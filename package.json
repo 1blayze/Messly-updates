@@ -1,0 +1,43 @@
+{
+  "name": "messly",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "vite",
+    "dev:web": "vite",
+    "dev:electron:main": "wait-on tcp:5173 && set ELECTRON_RUN_AS_NODE=&& electron .",
+    "dev:electron": "concurrently -k \"npm:dev:web\" \"npm:dev:electron:main\"",
+    "dev:desktop": "npm run dev:electron",
+    "build": "tsc -b && vite build",
+    "build:web": "tsc -b && vite build",
+    "preview": "vite preview",
+    "start:electron": "set ELECTRON_RUN_AS_NODE=&& electron ."
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.989.0",
+    "@aws-sdk/s3-request-presigner": "^3.989.0",
+    "@supabase/supabase-js": "^2.95.3",
+    "dotenv": "^17.3.1",
+    "emoji-picker-react": "^4.18.0",
+    "firebase": "^12.9.0",
+    "gsap": "^3.14.2",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-router-dom": "^7.13.0",
+    "sharp": "^0.34.5",
+    "twemoji": "^14.0.2",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.55",
+    "@types/react-dom": "^18.2.19",
+    "@vitejs/plugin-react": "^4.2.1",
+    "concurrently": "^9.2.1",
+    "electron": "^40.4.0",
+    "typescript": "^5.4.5",
+    "vite": "^5.2.8",
+    "wait-on": "^9.0.3"
+  }
+}

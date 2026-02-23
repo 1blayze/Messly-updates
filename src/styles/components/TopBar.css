@@ -1,0 +1,5 @@
+.app-top-bar {
+  grid-area: topbar;
+  background: var(--bg-topbar);
+  -webkit-app-region: drag;
+}

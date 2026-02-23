@@ -1,0 +1,2383 @@
+.video-call-wrapper {
+  position: sticky;
+  top: 0;
+  width: 100%;
+  z-index: 70;
+  pointer-events: none;
+  background: #000;
+  border-top: 0;
+}
+
+.video-call-wrapper.is-screen-share-mode {
+  position: relative;
+  top: auto;
+  flex: 0 0 auto;
+  min-height: 0;
+  display: block;
+  background: #000;
+}
+
+.video-call-card {
+  pointer-events: auto;
+  position: relative;
+  border-radius: 0;
+  overflow: hidden;
+  border: 0;
+  background: #000;
+  box-shadow: none;
+}
+
+.video-call-wrapper.is-screen-share-mode .video-call-card {
+  flex: 0 0 auto;
+  min-height: auto;
+  display: block;
+  background: #000;
+}
+
+.video-call-card.is-transmission-active {
+  overflow: visible;
+  padding-top: 15px;
+  padding-bottom: 94px;
+  transition:
+    padding-top 320ms cubic-bezier(0.22, 1, 0.36, 1),
+    padding-bottom 320ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.video-call-card.is-transmission-active.is-members-visible {
+  padding-bottom: 154px;
+}
+
+.video-call-card::before {
+  display: none;
+}
+
+.video-call-viewport {
+  position: relative;
+  width: 100%;
+  height: 220px;
+  background: #000;
+}
+
+.video-call-viewport.is-transmission-stage {
+  --transmission-radius: 12px;
+  width: calc(100% - 220px);
+  max-width: 860px;
+  aspect-ratio: 16 / 9;
+  height: auto;
+  min-height: 150px;
+  max-height: 46vh;
+  margin: 0 auto;
+  border-radius: var(--transmission-radius);
+  border: 0;
+  overflow: visible;
+  box-sizing: border-box;
+  isolation: isolate;
+  clip-path: none;
+}
+
+.video-call-card.is-transmission-active .video-call-viewport.is-transmission-stage {
+  transform: translate3d(0, 8px, 0);
+  transition: transform 340ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
+}
+
+.video-call-card.is-transmission-active.is-members-visible .video-call-viewport.is-transmission-stage {
+  transform: translate3d(0, -6px, 0);
+}
+
+.video-call-viewport.is-transmission-stage.is-transmission-split {
+  aspect-ratio: 32 / 9;
+  min-height: 140px;
+  max-height: 40vh;
+}
+
+.video-call-viewport.is-transmission-stage.is-transmission-stream,
+.video-call-viewport.is-transmission-stage.is-transmission-member {
+  width: calc(100% - 220px);
+  max-width: 860px;
+  margin: 0 auto;
+  border-radius: var(--transmission-radius);
+  overflow: visible;
+  clip-path: none;
+}
+
+.video-call-viewport.is-transmission-stage.is-transmission-stream .video-call-overlay.is-transmission,
+.video-call-viewport.is-transmission-stage.is-transmission-member .video-call-overlay.is-transmission {
+  border-radius: var(--transmission-radius);
+  padding: 0;
+}
+
+.video-call-viewport.is-transmission-stage.is-transmission-stream .video-call-transmission-stage,
+.video-call-viewport.is-transmission-stage.is-transmission-member .video-call-transmission-stage {
+  padding: 0;
+  gap: 0;
+  border-radius: var(--transmission-radius);
+  clip-path: inset(0 round var(--transmission-radius));
+}
+
+.video-call-viewport.is-transmission-stage.is-transmission-stream .video-call-transmission-tile--stream,
+.video-call-viewport.is-transmission-stage.is-transmission-member .video-call-transmission-tile--member {
+  border-radius: var(--transmission-radius);
+}
+
+.video-call-viewport.is-transmission-stage.is-transmission-stream .video-call-transmission-tile--member,
+.video-call-viewport.is-transmission-stage.is-transmission-member .video-call-transmission-tile--stream {
+  border-radius: var(--transmission-radius);
+  overflow: hidden;
+}
+
+.video-call-viewport.is-transmission-stage.is-transmission-stream .video-call-transmission-stage--stream .video-call-transmission-tile--member,
+.video-call-viewport.is-transmission-stage.is-transmission-member .video-call-transmission-stage--member .video-call-transmission-tile--stream {
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.video-call-viewport.is-transmission-stage .remote-video,
+.video-call-viewport.is-transmission-stage .video-call-share-video {
+  object-position: center 56%;
+  border-radius: inherit;
+}
+
+.video-call-viewport:fullscreen,
+.video-call-viewport:-webkit-full-screen {
+  width: 100vw;
+  height: 100vh;
+  background: #000;
+}
+
+.remote-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+  z-index: 1;
+}
+
+.video-call-share-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+  z-index: 2;
+}
+
+.video-call-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px 12px;
+  background: transparent;
+  z-index: 3;
+}
+
+.video-call-overlay.is-transmission {
+  justify-content: flex-start;
+  padding: 10px 12px;
+  background: none;
+  border-radius: var(--transmission-radius);
+  overflow: visible;
+}
+
+.video-call-transmission-presenter-pill {
+  position: absolute;
+  left: 12px;
+  top: 10px;
+  z-index: 9;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: min(72%, 320px);
+  padding: 5px 9px;
+  border-radius: 10px;
+  background: rgba(9, 13, 21, 0.84);
+  backdrop-filter: blur(8px) saturate(1.2);
+  -webkit-backdrop-filter: blur(8px) saturate(1.2);
+  color: #eef4ff;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.video-call-transmission-presenter-pill > span {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.video-call-overlay.is-transmission.is-fullscreen {
+  background: none;
+}
+
+.video-call-overlay.is-transmission .video-call-share-controls--overlay {
+  width: auto;
+  margin-left: auto;
+  position: absolute;
+  right: 12px;
+  left: auto;
+  bottom: 10px;
+  transform: none;
+  justify-content: flex-end;
+  z-index: 6;
+  gap: 12px;
+}
+
+.video-call-transmission-stream-controls {
+  position: absolute;
+  right: 12px;
+  bottom: 10px;
+  z-index: 9;
+  pointer-events: auto;
+}
+
+.video-call-share-controls--in-tile {
+  width: auto;
+  margin: 0;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.video-call-share-controls--in-tile .video-call-share-btn {
+  width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  color: rgba(247, 251, 255, 0.94);
+}
+
+.video-call-share-controls--in-tile .video-call-share-btn:hover,
+.video-call-share-controls--in-tile .video-call-share-btn:focus-visible,
+.video-call-share-controls--in-tile .video-call-share-btn.is-active {
+  background: transparent;
+  border-color: transparent;
+}
+
+.video-call-transmission-stage {
+  position: absolute;
+  inset: 0;
+  padding: 8px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+  z-index: 4;
+  box-sizing: border-box;
+  border-radius: var(--transmission-radius);
+  background: #000;
+  overflow: hidden;
+  clip-path: inset(0 round var(--transmission-radius));
+}
+
+.video-call-transmission-detached {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: 10px;
+  text-align: center;
+  color: rgba(233, 240, 252, 0.94);
+  pointer-events: auto;
+}
+
+.video-call-transmission-detached p {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.video-call-transmission-detached__return {
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(10, 14, 22, 0.78);
+  color: #f3f8ff;
+  border-radius: 10px;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.video-call-transmission-detached__return:hover,
+.video-call-transmission-detached__return:focus-visible {
+  background: rgba(24, 31, 44, 0.9);
+  border-color: rgba(255, 255, 255, 0.3);
+  outline: none;
+}
+
+.video-call-transmission-stage--stream,
+.video-call-transmission-stage--member {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.video-call-transmission-tile {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  box-sizing: border-box;
+  border: 0;
+  border-radius: var(--transmission-radius);
+  overflow: hidden;
+  background: #000;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  box-shadow: none;
+  transition: box-shadow 220ms ease, transform 220ms ease, filter 220ms ease;
+}
+
+.video-call-transmission-tile:focus,
+.video-call-transmission-tile:active {
+  outline: none;
+}
+
+.video-call-transmission-tile:hover,
+.video-call-transmission-tile:focus-visible {
+  box-shadow: none;
+  outline: none;
+}
+
+.video-call-transmission-tile.is-focused {
+  box-shadow: none;
+}
+
+.video-call-transmission-stream-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+  border-radius: inherit;
+}
+
+.video-call-transmission-tile--member {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--call-card-deep, rgba(18, 10, 12, 0.96));
+  isolation: isolate;
+}
+
+.video-call-transmission-tile--member::before {
+  content: "";
+  position: absolute;
+  inset: -16px;
+  z-index: 0;
+  background-image: var(--call-card-avatar-image, radial-gradient(circle at 50% 45%, var(--call-card-glow, rgba(122, 20, 34, 0.94)) 0%, var(--call-card-surface-strong, rgba(69, 12, 24, 0.96)) 70%, var(--call-card-deep, rgba(34, 8, 16, 0.98)) 100%));
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  filter: blur(20px) saturate(1.22) brightness(0.88);
+  transform: scale(1.16);
+  opacity: 0.92;
+  transition: filter 220ms ease, transform 220ms ease;
+}
+
+.video-call-transmission-tile--member::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background:
+    radial-gradient(circle at 64% 18%, rgba(255, 255, 255, 0.09) 0%, rgba(255, 255, 255, 0) 54%),
+    linear-gradient(165deg, rgba(12, 8, 12, 0.24) 0%, rgba(10, 7, 11, 0.66) 60%, rgba(8, 6, 10, 0.84) 100%);
+}
+
+.video-call-transmission-tile--member > * {
+  position: relative;
+  z-index: 2;
+}
+
+.video-call-transmission-tile--member.is-focused::before {
+  filter: blur(24px) saturate(1.28) brightness(0.92);
+  transform: scale(1.2);
+}
+
+.video-call-transmission-stage--stream .video-call-transmission-tile--stream.is-focused {
+  width: 100%;
+  height: 100%;
+}
+
+.video-call-transmission-stage--member .video-call-transmission-tile--member.is-focused {
+  width: 100%;
+  max-width: none;
+  height: 100%;
+  margin: 0 auto;
+}
+
+.video-call-transmission-member-avatar {
+  width: 78px;
+  height: 78px;
+  border-radius: 999px;
+  object-fit: cover;
+  border: 0;
+  box-shadow: none;
+}
+
+.video-call-transmission-stage--stream .video-call-transmission-tile--member {
+  position: absolute;
+  right: 12px;
+  top: 12px;
+  bottom: auto;
+  width: clamp(156px, 18vw, 212px);
+  aspect-ratio: 16 / 9;
+  height: auto;
+  z-index: 5;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 12px;
+  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.44);
+  backdrop-filter: blur(6px) saturate(1.15);
+  -webkit-backdrop-filter: blur(6px) saturate(1.15);
+}
+
+.video-call-transmission-stage--stream .video-call-transmission-member-avatar {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 54px;
+  height: 54px;
+  border: 2px solid rgba(255, 255, 255, 0.2);
+  box-shadow: 0 10px 22px rgba(0, 0, 0, 0.38);
+}
+
+.video-call-transmission-stage--stream .video-call-transmission-tile--member .video-call-transmission-tile-label {
+  left: 8px;
+  bottom: 8px;
+  max-width: calc(100% - 78px);
+  padding: 3px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  gap: 4px;
+}
+
+.video-call-transmission-stage--stream .video-call-transmission-tile--member .video-call-transmission-tile-label .video-call-source-title-icon {
+  opacity: 0.9;
+}
+
+.video-call-transmission-stage--member .video-call-transmission-tile--stream {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  width: 160px;
+  height: 96px;
+  z-index: 5;
+}
+
+.video-call-transmission-tile-label {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  max-width: calc(100% - 16px);
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: rgba(9, 13, 21, 0.84);
+  color: #eef4ff;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.2;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.video-call-transmission-tile-label > span:last-child {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.video-call-transmission-actions {
+  position: absolute;
+  left: 50%;
+  bottom: -6px;
+  transform: translate(-50%, 0);
+  width: auto;
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  z-index: 7;
+  pointer-events: auto;
+  transition: bottom 320ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.video-call-transmission-actions .video-call-participants-toggle {
+  background: rgba(72, 79, 91, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.video-call-transmission-user-dock {
+  position: absolute;
+  left: 50%;
+  bottom: -120px;
+  transform: translateX(-50%) translateY(16px) scale(0.97);
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  z-index: 7;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 240ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 320ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.video-call-transmission-user-dock.is-visible {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0) scale(1);
+  pointer-events: auto;
+}
+
+.video-call-transmission-user-card {
+  position: relative;
+  width: 188px;
+  height: 104px;
+  border: 1px solid rgba(146, 154, 170, 0.42);
+  border-radius: 12px;
+  background: var(--call-card-deep, rgba(4, 7, 12, 0.98));
+  overflow: hidden;
+  isolation: isolate;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.46);
+  color: #f3f7ff;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease;
+}
+
+.video-call-transmission-user-card--stream {
+  justify-content: flex-end;
+}
+
+.video-call-transmission-user-card::before {
+  content: "";
+  position: absolute;
+  inset: -14px;
+  z-index: 0;
+  background-image: var(--call-card-avatar-image, linear-gradient(160deg, var(--call-card-surface-strong, rgba(6, 10, 16, 0.92)) 0%, var(--call-card-deep, rgba(4, 7, 12, 0.98)) 100%));
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  filter: blur(16px) saturate(1.2) brightness(0.86);
+  transform: scale(1.14);
+  opacity: 0.9;
+  transition: filter 180ms ease, transform 180ms ease, opacity 180ms ease;
+}
+
+.video-call-transmission-user-card--stream::before {
+  display: none;
+}
+
+.video-call-transmission-user-card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background:
+    radial-gradient(circle at 68% 22%, rgba(255, 255, 255, 0.08) 0%, rgba(255, 255, 255, 0) 52%),
+    linear-gradient(165deg, rgba(7, 11, 18, 0.28) 0%, rgba(6, 9, 14, 0.72) 62%, rgba(5, 8, 12, 0.88) 100%);
+  transition: background 180ms ease;
+}
+
+.video-call-transmission-user-card--stream::after {
+  background:
+    linear-gradient(180deg, rgba(6, 9, 14, 0.06) 0%, rgba(6, 9, 14, 0.22) 42%, rgba(6, 9, 14, 0.72) 100%);
+}
+
+.video-call-transmission-user-card > * {
+  position: relative;
+  z-index: 2;
+}
+
+.video-call-transmission-user-preview {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.video-call-transmission-user-preview-video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  background: #000;
+}
+
+.video-call-transmission-user-card.is-focused {
+  border-color: rgba(162, 170, 186, 0.62);
+}
+
+.video-call-transmission-user-card:hover,
+.video-call-transmission-user-card:focus-visible {
+  border-color: rgba(178, 186, 202, 0.78);
+  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.5);
+  transform: translateY(-1px);
+  outline: none;
+}
+
+.video-call-transmission-user-card:hover::before,
+.video-call-transmission-user-card:focus-visible::before {
+  filter: blur(18px) saturate(1.25) brightness(0.9);
+  transform: scale(1.17);
+}
+
+.video-call-transmission-user-card.is-speaking {
+  border-color: rgba(72, 235, 142, 0.92);
+  box-shadow: 0 0 0 1px rgba(72, 235, 142, 0.44), 0 14px 30px rgba(0, 0, 0, 0.5);
+}
+
+.video-call-transmission-user-card.is-speaking::after {
+  background:
+    radial-gradient(circle at 68% 22%, rgba(156, 255, 205, 0.12) 0%, rgba(255, 255, 255, 0) 52%),
+    linear-gradient(165deg, rgba(10, 44, 24, 0.28) 0%, rgba(8, 28, 18, 0.7) 62%, rgba(6, 22, 14, 0.84) 100%);
+}
+
+.video-call-transmission-user-avatar {
+  width: 56px;
+  height: 56px;
+  border-radius: 999px;
+  object-fit: cover;
+}
+
+.video-call-transmission-user-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: var(--call-card-chip, rgba(8, 12, 20, 0.82));
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.video-call-transmission-user-name > span:last-child {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.video-call-transmission-actions .video-call-controls--card {
+  background: rgba(14, 20, 30, 0.84);
+  border: 0;
+  box-shadow: none;
+}
+
+.video-call-card.is-transmission-active .video-call-transmission-actions,
+.video-call-card.is-transmission-active .video-call-transmission-stream-controls,
+.video-call-card.is-transmission-active .video-call-overlay.is-transmission .video-call-share-controls--overlay {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 140ms ease, transform 140ms ease;
+}
+
+.video-call-card.is-transmission-active .video-call-transmission-actions {
+  transform: translate(-50%, 8px);
+}
+
+.video-call-card.is-transmission-active .video-call-transmission-stream-controls,
+.video-call-card.is-transmission-active .video-call-overlay.is-transmission .video-call-share-controls--overlay {
+  transform: translateY(8px);
+}
+
+.video-call-card.is-transmission-active:hover .video-call-transmission-actions,
+.video-call-card.is-transmission-active:hover .video-call-transmission-stream-controls,
+.video-call-card.is-transmission-active:hover .video-call-overlay.is-transmission .video-call-share-controls--overlay,
+.video-call-card.is-transmission-active:focus-within .video-call-transmission-actions,
+.video-call-card.is-transmission-active:focus-within .video-call-transmission-stream-controls,
+.video-call-card.is-transmission-active:focus-within .video-call-overlay.is-transmission .video-call-share-controls--overlay {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.video-call-card.is-transmission-active:hover .video-call-transmission-actions,
+.video-call-card.is-transmission-active:focus-within .video-call-transmission-actions {
+  transform: translate(-50%, 0);
+}
+
+.video-call-card.is-transmission-active:hover .video-call-transmission-stream-controls,
+.video-call-card.is-transmission-active:hover .video-call-overlay.is-transmission .video-call-share-controls--overlay,
+.video-call-card.is-transmission-active:focus-within .video-call-transmission-stream-controls,
+.video-call-card.is-transmission-active:focus-within .video-call-overlay.is-transmission .video-call-share-controls--overlay {
+  transform: translateY(0);
+}
+
+.video-call-share-controls--overlay .video-call-share-btn {
+  width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  color: rgba(247, 251, 255, 0.94);
+}
+
+.video-call-share-controls--overlay .video-call-share-btn--volume-toggle,
+.video-call-share-controls--overlay .video-call-share-btn--volume-toggle .ms-icon {
+  color: #ffffff;
+}
+
+.video-call-share-controls--overlay .video-call-share-btn:hover,
+.video-call-share-controls--overlay .video-call-share-btn:focus-visible {
+  background: transparent;
+  border-color: transparent;
+  transform: scale(1.08);
+}
+
+.video-call-share-controls--overlay .video-call-share-btn.is-active {
+  background: transparent;
+  border-color: transparent;
+}
+
+.video-call-overlay.is-avatar-stage {
+  justify-content: center;
+  background: #000;
+}
+
+.video-call-overlay.is-avatar-stage .video-call-participants {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  padding: 0;
+}
+
+.video-call-overlay.is-avatar-stage .video-call-footer {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 12px;
+  margin-top: 0;
+  justify-items: center;
+}
+
+.video-call-overlay.is-fullscreen {
+  padding: 12px 18px 16px;
+  background:
+    linear-gradient(180deg, rgba(3, 5, 8, 0.82) 0%, rgba(3, 5, 8, 0.2) 18%, rgba(3, 5, 8, 0.18) 80%, rgba(3, 5, 8, 0.88) 100%);
+}
+
+.video-call-fullscreen-head {
+  width: 100%;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.video-call-fullscreen-source {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  background: rgba(6, 9, 14, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+.video-call-fullscreen-source-avatar {
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  object-fit: cover;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  flex-shrink: 0;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.video-call-fullscreen-source-avatar.is-speaking {
+  border-color: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 0 0 2px rgba(255, 94, 116, 0.35), 0 0 22px rgba(255, 94, 116, 0.3);
+}
+
+.video-call-fullscreen-source-meta {
+  min-width: 0;
+}
+
+.video-call-fullscreen-source-title,
+.video-call-fullscreen-source-watchers {
+  margin: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.video-call-fullscreen-source-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #f7fbff;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.video-call-source-title-icon {
+  color: rgba(241, 246, 255, 0.92);
+}
+
+.video-call-fullscreen-source-status {
+  margin: 2px 0 0;
+  color: rgba(255, 209, 124, 0.95);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.video-call-fullscreen-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.video-call-fullscreen-badge {
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(9, 13, 21, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: #f0f5ff;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.video-call-share-controls {
+  width: 100%;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+}
+
+.video-call-share-controls--inline {
+  width: auto;
+  justify-content: center;
+}
+
+.video-call-share-btn {
+  width: 36px;
+  height: 36px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  background: rgba(10, 14, 22, 0.68);
+  color: #f7fbff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease, transform 120ms ease;
+}
+
+.video-call-share-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.video-call-share-btn:hover,
+.video-call-share-btn:focus-visible {
+  background: rgba(255, 255, 255, 0.18);
+  border-color: rgba(255, 255, 255, 0.22);
+  transform: translateY(-1px);
+}
+
+.video-call-share-btn.is-active {
+  background: rgba(0, 0, 0, 0.72);
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
+.video-call-volume-control {
+  position: relative;
+  display: inline-flex;
+}
+
+.video-call-share-btn--volume-toggle {
+  width: 36px;
+  height: 36px;
+  color: #ffffff;
+}
+
+.video-call-share-btn--volume-toggle .ms-icon {
+  color: #ffffff;
+}
+
+.video-call-volume-control.is-volume-anim .video-call-share-btn--volume-toggle {
+  animation: none;
+}
+
+.video-call-share-btn--volume-toggle:focus,
+.video-call-share-btn--volume-toggle:focus-visible,
+.video-call-share-btn--volume-toggle:active {
+  outline: none;
+  box-shadow: none;
+}
+
+.video-call-volume-popover {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% - 15px);
+  width: 26px;
+  height: 88px;
+  transform: translate(-50%, 5px);
+  opacity: 0;
+  pointer-events: none;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: opacity 120ms ease, transform 120ms ease;
+  z-index: 8;
+}
+
+.video-call-volume-control:hover .video-call-volume-popover,
+.video-call-volume-control:focus-within .video-call-volume-popover,
+.video-call-volume-popover:hover {
+  opacity: 1;
+  transform: translate(-50%, -2px);
+  pointer-events: auto;
+}
+
+.video-call-volume-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 70px;
+  height: 12px;
+  transform: rotate(-90deg);
+  border-radius: 999px;
+  background: transparent;
+  outline: none;
+  cursor: pointer;
+  touch-action: none;
+}
+
+.video-call-volume-slider:active {
+  cursor: grabbing;
+}
+
+.video-call-volume-slider:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.video-call-volume-slider::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(149, 158, 172, 0.7);
+}
+
+.video-call-volume-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -4px;
+  border-radius: 999px;
+  border: 0;
+  background: #8f98a8;
+  box-shadow: none;
+}
+
+.video-call-remote-audio {
+  position: absolute;
+  width: 0;
+  height: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.video-call-share-btn.is-volume-anim {
+  animation: video-call-volume-pulse 320ms ease;
+}
+
+@keyframes video-call-volume-pulse {
+  0% {
+    transform: scale(1);
+  }
+  45% {
+    transform: scale(1.08);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+.video-call-fullscreen-watchers {
+  width: 100%;
+  display: flex;
+  justify-content: flex-start;
+  align-items: center;
+  gap: 8px;
+  padding-left: 2px;
+}
+
+.video-call-overlay.is-transmission .video-call-fullscreen-watchers {
+  position: absolute;
+  left: 14px;
+  bottom: 12px;
+  width: auto;
+  padding-left: 0;
+}
+
+.video-call-fullscreen-watcher-avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 999px;
+  object-fit: cover;
+  border: 1px solid rgba(255, 255, 255, 0.26);
+  box-shadow: 0 7px 16px rgba(0, 0, 0, 0.36);
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.video-call-fullscreen-watcher-avatar.is-speaking {
+  border-color: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 0 0 2px rgba(255, 94, 116, 0.35), 0 0 20px rgba(255, 94, 116, 0.3);
+}
+
+.video-call-head {
+  width: 100%;
+  display: grid;
+  justify-items: center;
+  gap: 3px;
+  text-align: center;
+}
+
+.video-call-title {
+  margin: 0;
+  color: #f7fbff;
+  font-size: 14px;
+  font-weight: 700;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.28);
+}
+
+.video-call-status {
+  margin-top: 0;
+  color: rgba(232, 238, 252, 0.88);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(8, 12, 20, 0.52);
+}
+
+.video-call-participants {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  padding: 2px 0;
+}
+
+.video-call-participant {
+  position: relative;
+  width: 70px;
+  height: 70px;
+  border-radius: 999px;
+  overflow: hidden;
+  border: 1px solid var(--call-card-border, rgba(255, 255, 255, 0.24));
+  background-image:
+    radial-gradient(circle at 52% 36%, rgba(9, 12, 19, 0.18) 0%, rgba(8, 12, 20, 0.62) 58%, rgba(7, 10, 17, 0.88) 100%),
+    var(--call-card-avatar-image, radial-gradient(circle at 52% 36%, var(--call-card-glow-soft, rgba(106, 128, 176, 0.26)) 0%, var(--call-card-surface-strong, #101826) 58%, var(--call-card-deep, #0d1422) 100%));
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  background-blend-mode: normal, normal;
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.35);
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.video-call-participant.is-speaking {
+  border-color: rgba(72, 235, 142, 0.95);
+  box-shadow: 0 0 0 2px rgba(72, 235, 142, 0.38), 0 10px 24px rgba(40, 186, 110, 0.3);
+}
+
+.video-call-participant:first-child {
+  transform: translateX(9px);
+  z-index: 2;
+}
+
+.video-call-participant:last-child {
+  transform: translateX(-9px);
+}
+
+.video-call-participants--single .video-call-participant:first-child,
+.video-call-participants--single .video-call-participant:last-child {
+  transform: none;
+}
+
+.video-call-participant img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.video-call-participant-status {
+  position: absolute;
+  left: 50%;
+  bottom: 4px;
+  transform: translateX(-50%);
+  max-width: calc(100% - 8px);
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(9, 13, 21, 0.92);
+  border: 1px solid rgba(255, 209, 124, 0.52);
+  color: rgba(255, 226, 165, 0.98);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1.1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.video-call-actions {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  width: auto;
+  margin: 0 auto;
+}
+
+.video-call-btn {
+  border: 0;
+  border-radius: 10px;
+  width: 44px;
+  height: 38px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  color: #f6f9ff;
+  background: rgba(255, 255, 255, 0.14);
+  box-shadow: 0 6px 14px rgba(0, 0, 0, 0.22);
+}
+
+.video-call-btn--accept {
+  background: rgba(64, 190, 129, 0.4);
+}
+
+.video-call-btn--hangup {
+  background: #e85162;
+}
+
+.video-call-controls {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  margin: 0 auto;
+}
+
+.video-call-controls--card {
+  padding: 6px 8px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(28, 32, 39, 0.78);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
+}
+
+.video-call-control {
+  width: 34px;
+  height: 34px;
+  border: 0;
+  border-radius: 8px;
+  background: rgba(85, 92, 104, 0.82);
+  color: #ffffff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background-color 120ms ease, transform 120ms ease;
+}
+
+.video-call-control:hover,
+.video-call-control:focus-visible {
+  background: rgba(105, 112, 124, 0.9);
+  transform: translateY(-1px);
+}
+
+.video-call-control.is-off {
+  background: rgba(67, 73, 84, 0.9);
+}
+
+.video-call-control.is-active {
+  background: rgba(112, 118, 130, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.video-call-control.is-hangup {
+  background: #e85162;
+}
+
+.video-call-error {
+  color: #ffb3b3;
+  font-size: 12px;
+  text-align: center;
+}
+
+.video-call-footer {
+  width: 100%;
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  margin-top: auto;
+}
+
+.video-call-overlay.is-fullscreen .video-call-footer {
+  justify-items: stretch;
+}
+
+.video-call-bottom-controls {
+  width: 100%;
+  border-top: 0;
+  background: transparent;
+  display: flex;
+  justify-content: center;
+  padding: 10px 12px 12px;
+}
+
+.video-call-footer--outside {
+  margin-top: 0;
+  width: 100%;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+}
+
+.video-call-participants-toggle {
+  position: relative;
+  border: 0;
+  border-radius: 999px;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  min-height: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  background: rgba(72, 79, 91, 0.82);
+  color: #eef3ff;
+  cursor: pointer;
+  transition: background-color 120ms ease, transform 120ms ease;
+}
+
+.video-call-participants-toggle:hover,
+.video-call-participants-toggle:focus-visible {
+  background: rgba(92, 100, 114, 0.9);
+  transform: translateY(-1px);
+  outline: none;
+}
+
+.video-call-participants-toggle::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  transform: translate(-50%, 4px);
+  opacity: 0;
+  pointer-events: none;
+  white-space: nowrap;
+  padding: 6px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(13, 18, 27, 0.96);
+  color: #f3f7ff;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.1;
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.38);
+  transition: opacity 120ms ease, transform 120ms ease;
+  z-index: 20;
+}
+
+.video-call-participants-toggle:hover::after,
+.video-call-participants-toggle:focus-visible::after {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+.video-call-participants-toggle--screen-share {
+  width: 44px;
+  height: 34px;
+  gap: 1px;
+  padding: 0 2px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(11, 14, 20, 0.84);
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.24);
+}
+
+.video-call-participants-toggle--screen-share .ms-icon:first-child {
+  font-size: 15px;
+  opacity: 0.95;
+}
+
+.video-call-participants-toggle--screen-share .ms-icon:last-child {
+  font-size: 15px;
+}
+
+.video-call-participants-toggle--in-stage {
+  width: 46px;
+  height: 34px;
+  border-radius: 999px;
+  background: rgba(11, 14, 20, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.26);
+}
+
+.local-video {
+  position: absolute;
+  right: 14px;
+  top: 14px;
+  width: 136px;
+  height: 86px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  object-fit: cover;
+  background: #0a0f17;
+}
+
+@media (max-width: 720px) {
+  .video-call-wrapper {
+    top: 0;
+    width: 100%;
+  }
+
+  .video-call-viewport {
+    height: 190px;
+  }
+
+  .video-call-card.is-transmission-active {
+    padding-top: 15px;
+    padding-bottom: 86px;
+  }
+
+  .video-call-card.is-transmission-active.is-members-visible {
+    padding-bottom: 138px;
+  }
+
+  .video-call-viewport.is-transmission-stage {
+    --transmission-radius: 12px;
+    width: calc(100% - 12px);
+    max-width: none;
+    aspect-ratio: 16 / 9;
+    height: auto;
+    min-height: 220px;
+    max-height: 62vh;
+    margin-top: 0;
+    border-radius: var(--transmission-radius);
+    clip-path: inset(0 round var(--transmission-radius));
+  }
+
+  .video-call-viewport.is-transmission-stage.is-transmission-split {
+    aspect-ratio: 24 / 9;
+    min-height: 180px;
+    max-height: 48vh;
+  }
+
+  .video-call-viewport.is-transmission-stage.is-transmission-stream,
+  .video-call-viewport.is-transmission-stage.is-transmission-member {
+    width: 100%;
+    max-width: none;
+    margin: 0;
+    border-radius: var(--transmission-radius);
+    overflow: visible;
+    clip-path: none;
+  }
+
+  .video-call-viewport.is-transmission-stage.is-transmission-stream .video-call-overlay.is-transmission,
+  .video-call-viewport.is-transmission-stage.is-transmission-member .video-call-overlay.is-transmission {
+    border-radius: var(--transmission-radius);
+    padding: 0;
+  }
+
+  .video-call-viewport.is-transmission-stage.is-transmission-stream .video-call-transmission-stage,
+  .video-call-viewport.is-transmission-stage.is-transmission-member .video-call-transmission-stage {
+    padding: 0;
+    gap: 0;
+    border-radius: var(--transmission-radius);
+    clip-path: inset(0 round var(--transmission-radius));
+  }
+
+  .video-call-viewport.is-transmission-stage.is-transmission-stream .video-call-transmission-tile--stream,
+  .video-call-viewport.is-transmission-stage.is-transmission-member .video-call-transmission-tile--member {
+    border-radius: var(--transmission-radius);
+  }
+
+  .video-call-viewport.is-transmission-stage.is-transmission-stream .video-call-transmission-tile--member,
+  .video-call-viewport.is-transmission-stage.is-transmission-member .video-call-transmission-tile--stream {
+    border-radius: var(--transmission-radius);
+    overflow: hidden;
+  }
+
+  .video-call-viewport.is-transmission-stage.is-transmission-stream .video-call-transmission-stage--stream .video-call-transmission-tile--member,
+  .video-call-viewport.is-transmission-stage.is-transmission-member .video-call-transmission-stage--member .video-call-transmission-tile--stream {
+    border-radius: 12px;
+    overflow: hidden;
+  }
+
+  .video-call-transmission-stage--stream .video-call-transmission-tile--member {
+    right: 8px;
+    top: 8px;
+    width: 132px;
+    border-radius: 10px;
+  }
+
+  .video-call-transmission-stage--stream .video-call-transmission-member-avatar {
+    width: 42px;
+    height: 42px;
+    right: 8px;
+  }
+
+  .video-call-transmission-stage--stream .video-call-transmission-tile--member .video-call-transmission-tile-label {
+    max-width: calc(100% - 58px);
+    font-size: 10px;
+    padding: 3px 6px;
+  }
+
+  .local-video {
+    width: 114px;
+    height: 72px;
+  }
+
+  .video-call-transmission-user-dock {
+    bottom: -108px;
+    gap: 8px;
+  }
+
+  .video-call-transmission-user-card {
+    width: 156px;
+    height: 92px;
+    padding: 8px 10px;
+  }
+
+  .video-call-transmission-user-avatar {
+    width: 48px;
+    height: 48px;
+  }
+
+  .video-call-transmission-stage--member .video-call-transmission-tile--member.is-focused {
+    width: 100%;
+    max-width: none;
+  }
+
+  .video-call-transmission-actions {
+    bottom: -8px;
+  }
+
+  .video-call-card.is-transmission-active .video-call-transmission-actions,
+  .video-call-card.is-transmission-active .video-call-transmission-stream-controls,
+  .video-call-card.is-transmission-active .video-call-overlay.is-transmission .video-call-share-controls--overlay {
+    opacity: 1;
+    pointer-events: auto;
+    transform: none;
+    transition: none;
+  }
+
+  .video-call-fullscreen-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .video-call-fullscreen-badges {
+    justify-content: flex-end;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .video-call-card.is-transmission-active,
+  .video-call-card.is-transmission-active .video-call-viewport.is-transmission-stage,
+  .video-call-transmission-actions,
+  .video-call-transmission-user-dock {
+    transition: none !important;
+  }
+}
+
+/* Screen share stage + filmstrip layout */
+.video-call-card.is-screen-share-layout {
+  --screen-share-stage-max-width: 100%;
+  padding: 0 0 10px;
+  background:
+    radial-gradient(circle at 50% -8%, rgba(255, 255, 255, 0.04) 0%, rgba(255, 255, 255, 0) 40%),
+    #000;
+  height: auto;
+  min-height: 0;
+}
+
+.video-call-viewport.is-screen-share-layout {
+  height: auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-radius: 16px;
+  overflow: visible;
+  background: #000;
+}
+
+.video-call-wrapper.is-screen-share-mode .video-call-viewport.is-screen-share-layout {
+  flex: 0 0 auto;
+  min-height: 0;
+  height: auto;
+  max-height: none;
+}
+
+.video-call-viewport.is-screen-share-layout:fullscreen,
+.video-call-viewport.is-screen-share-layout:-webkit-full-screen {
+  width: 100vw;
+  height: 100vh;
+  border-radius: 0;
+}
+
+.video-call-viewport.is-screen-share-layout:fullscreen .video-call-overlay.is-screen-share.is-fullscreen,
+.video-call-viewport.is-screen-share-layout:-webkit-full-screen .video-call-overlay.is-screen-share.is-fullscreen {
+  position: absolute;
+  inset: 0;
+  padding: 10px 16px 10px;
+  background: #000;
+}
+
+.video-call-viewport.is-screen-share-layout:fullscreen .video-call-overlay.is-screen-share.is-screen-share-focus-stage.is-fullscreen,
+.video-call-viewport.is-screen-share-layout:-webkit-full-screen .video-call-overlay.is-screen-share.is-screen-share-focus-stage.is-fullscreen {
+  padding: 0;
+}
+
+.video-call-viewport.is-screen-share-layout:fullscreen .video-call-screen-layout,
+.video-call-viewport.is-screen-share-layout:-webkit-full-screen .video-call-screen-layout {
+  height: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
+  gap: 10px;
+  padding-bottom: 82px;
+  box-sizing: border-box;
+}
+
+.video-call-viewport.is-screen-share-layout:fullscreen .video-call-overlay.is-screen-share.is-screen-share-focus-stage .video-call-screen-layout,
+.video-call-viewport.is-screen-share-layout:-webkit-full-screen .video-call-overlay.is-screen-share.is-screen-share-focus-stage .video-call-screen-layout {
+  gap: 0;
+  padding-bottom: 0;
+}
+
+.video-call-viewport.is-screen-share-layout:fullscreen .video-call-screen-stage.is-focus-size,
+.video-call-viewport.is-screen-share-layout:-webkit-full-screen .video-call-screen-stage.is-focus-size {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+  max-height: none;
+  margin-top: 0;
+}
+
+.video-call-viewport.is-screen-share-layout:fullscreen .video-call-screen-stage.is-screen-focus .video-call-screen-stage__video,
+.video-call-viewport.is-screen-share-layout:-webkit-full-screen .video-call-screen-stage.is-screen-focus .video-call-screen-stage__video {
+  object-fit: cover;
+}
+
+.video-call-viewport.is-screen-share-layout:fullscreen .video-call-footer--screen-share,
+.video-call-viewport.is-screen-share-layout:-webkit-full-screen .video-call-footer--screen-share {
+  position: absolute;
+  left: 50%;
+  bottom: 6px;
+  transform: translateX(-50%);
+  z-index: 10;
+  margin-top: 0;
+  padding-bottom: 0;
+  width: auto;
+  pointer-events: auto;
+}
+
+.video-call-viewport.is-screen-share-layout:fullscreen .video-call-footer--screen-share .video-call-transmission-actions,
+.video-call-viewport.is-screen-share-layout:-webkit-full-screen .video-call-footer--screen-share .video-call-transmission-actions {
+  width: auto;
+  justify-items: center;
+  gap: 10px;
+}
+
+.video-call-viewport.is-screen-share-layout:fullscreen .video-call-footer--screen-share .video-call-controls--card,
+.video-call-viewport.is-screen-share-layout:-webkit-full-screen .video-call-footer--screen-share .video-call-controls--card {
+  margin: 0;
+}
+
+.video-call-viewport.is-screen-share-layout:fullscreen .video-call-overlay.is-screen-share.is-screen-share-focus-stage .video-call-footer--screen-share,
+.video-call-viewport.is-screen-share-layout:-webkit-full-screen .video-call-overlay.is-screen-share.is-screen-share-focus-stage .video-call-footer--screen-share {
+  display: none;
+}
+
+.video-call-overlay.is-screen-share {
+  position: relative;
+  inset: auto;
+  justify-content: flex-start;
+  gap: 0;
+  padding: 0;
+  background: #000;
+  min-height: auto;
+}
+
+.video-call-screen-layout {
+  width: 100%;
+  height: auto;
+  flex: 0 0 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  gap: 18px;
+}
+
+.video-call-overlay.is-screen-share.is-screen-share-focus-stage .video-call-screen-layout {
+  padding-bottom: 88px;
+  box-sizing: border-box;
+}
+
+.video-call-overlay.is-screen-share.is-screen-share-focus-stage.is-screen-share-members-visible .video-call-screen-layout {
+  padding-bottom: 94px;
+}
+
+.video-call-overlay.is-screen-share.is-screen-share-focus-stage .video-call-footer--screen-share {
+  position: absolute;
+  left: 50%;
+  bottom: 6px;
+  transform: translateX(-50%);
+  z-index: 10;
+  margin-top: 0;
+  padding-bottom: 0;
+  width: auto;
+  pointer-events: auto;
+}
+
+.video-call-overlay.is-screen-share.is-screen-share-focus-stage .video-call-footer--screen-share .video-call-transmission-actions {
+  width: auto;
+  justify-items: center;
+  gap: 10px;
+}
+
+.video-call-overlay.is-screen-share.is-screen-share-focus-stage .video-call-footer--screen-share .video-call-controls--card {
+  margin: 0;
+}
+
+.video-call-screen-grid {
+  width: 100%;
+  max-width: 1400px;
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  justify-content: center;
+  gap: 16px;
+  align-items: stretch;
+  padding: 10px 20px 0;
+}
+
+.video-call-screen-grid__tile {
+  position: relative;
+  min-width: 0;
+  aspect-ratio: 16 / 9;
+  border-radius: 12px;
+  overflow: hidden;
+  background: rgba(6, 9, 14, 0.92);
+  border: 0;
+  box-shadow: 0 10px 22px rgba(0, 0, 0, 0.2);
+}
+
+.video-call-screen-grid__tile--share {
+  cursor: pointer;
+}
+
+.video-call-screen-grid__tile--share:focus-visible {
+  outline: 2px solid rgba(179, 206, 255, 0.72);
+  outline-offset: 2px;
+}
+
+.video-call-screen-grid__video {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
+  background: #000;
+}
+
+.video-call-screen-stage {
+  position: relative;
+  flex: 0 0 auto;
+  min-height: 0;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  height: auto;
+  margin: 0 auto;
+  border-radius: 18px;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.02) inset,
+    0 22px 50px rgba(0, 0, 0, 0.34);
+}
+
+.video-call-screen-stage.is-focus-size {
+  --video-call-screen-focus-half-width: min(50%, calc(clamp(260px, 36vh, 400px) * 8 / 9));
+  margin-top: 10px;
+  width: 100%;
+  aspect-ratio: auto;
+  height: clamp(260px, 36vh, 400px);
+}
+
+.video-call-screen-stage.is-screen-focus {
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.video-call-screen-stage:fullscreen,
+.video-call-screen-stage:-webkit-full-screen {
+  width: 100vw;
+  height: 100vh;
+  margin: 0;
+  aspect-ratio: auto;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: #000;
+}
+
+.video-call-screen-stage__member {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  background: var(--call-card-deep, #0a0c11);
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.video-call-screen-stage__member::before {
+  content: "";
+  position: absolute;
+  inset: -26px;
+  z-index: 0;
+  background-image: var(--call-card-avatar-image, radial-gradient(circle at 50% 40%, rgba(112, 28, 44, 0.9) 0%, rgba(38, 10, 18, 0.96) 68%, rgba(14, 8, 11, 0.98) 100%));
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  filter: blur(28px) saturate(1.18) brightness(0.84);
+  transform: scale(1.14);
+  opacity: 0.96;
+}
+
+.video-call-screen-stage__member::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background:
+    radial-gradient(circle at 52% 42%, rgba(255, 255, 255, 0.04) 0%, rgba(255, 255, 255, 0) 58%),
+    linear-gradient(180deg, rgba(7, 9, 13, 0.18) 0%, rgba(7, 9, 13, 0.46) 58%, rgba(7, 9, 13, 0.82) 100%);
+}
+
+.video-call-screen-stage__member.is-speaking::after {
+  background:
+    radial-gradient(circle at 52% 42%, rgba(99, 255, 172, 0.08) 0%, rgba(255, 255, 255, 0) 58%),
+    linear-gradient(180deg, rgba(5, 17, 11, 0.14) 0%, rgba(7, 18, 12, 0.4) 58%, rgba(7, 16, 11, 0.76) 100%);
+}
+
+.video-call-screen-stage__member-glass {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  backdrop-filter: blur(10px) saturate(1.12);
+  -webkit-backdrop-filter: blur(10px) saturate(1.12);
+  pointer-events: none;
+}
+
+.video-call-screen-stage__member-avatar {
+  position: relative;
+  z-index: 3;
+  width: clamp(82px, 11vw, 128px);
+  height: clamp(82px, 11vw, 128px);
+  border-radius: 999px;
+  object-fit: cover;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.12), 0 20px 44px rgba(0, 0, 0, 0.44);
+}
+
+.video-call-screen-stage__member.is-speaking .video-call-screen-stage__member-avatar {
+  box-shadow:
+    0 0 0 2px rgba(94, 255, 168, 0.46),
+    0 0 0 8px rgba(94, 255, 168, 0.12),
+    0 20px 44px rgba(0, 0, 0, 0.44);
+}
+
+.video-call-screen-stage__member-name {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100% - 24px);
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(6, 9, 14, 0.72);
+  color: #f4f8ff;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.video-call-screen-stage__member-name > span:first-child {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.video-call-screen-stage__member-presenting {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding-left: 8px;
+  border-left: 1px solid rgba(255, 255, 255, 0.14);
+  color: rgba(242, 247, 255, 0.92);
+  font-size: 11px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.video-call-screen-stage__member-status {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 4;
+  max-width: min(80%, 440px);
+  padding: 5px 9px;
+  border-radius: 999px;
+  background: rgba(8, 12, 20, 0.7);
+  color: rgba(241, 246, 255, 0.94);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.video-call-screen-stage__video {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
+  background: #000;
+}
+
+.video-call-screen-stage__video.is-fit-cover {
+  object-fit: cover;
+}
+
+.video-call-screen-stage__label {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  z-index: 7;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: min(76%, 380px);
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(7, 10, 14, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.2);
+  color: #f3f7ff;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.video-call-screen-stage__label > span {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.video-call-screen-stage__quality {
+  position: absolute;
+  right: 12px;
+  top: 12px;
+  z-index: 7;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: max-content;
+  max-width: none;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(7, 10, 14, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: rgba(247, 251, 255, 0.96);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+  letter-spacing: 0.02em;
+}
+
+.video-call-screen-stage.is-screen-focus .video-call-screen-stage__quality {
+  right: auto;
+  left: calc(50% + var(--video-call-screen-focus-half-width) - clamp(14px, 1.6vw, 24px));
+  top: calc(var(--video-call-screen-focus-vertical-inset, 0px) + clamp(10px, 1.4vh, 16px));
+  transform: translateX(-100%);
+}
+
+.video-call-screen-stage__controls {
+  position: absolute;
+  right: 14px;
+  bottom: 14px;
+  z-index: 8;
+  pointer-events: auto;
+}
+
+.video-call-screen-stage.is-screen-focus .video-call-screen-stage__controls {
+  left: calc(50% + var(--video-call-screen-focus-half-width) - clamp(14px, 1.6vw, 24px));
+  right: auto;
+  bottom: calc(var(--video-call-screen-focus-vertical-inset, 0px) + clamp(14px, 1.8vh, 22px));
+  transform: translateX(-100%);
+}
+
+.video-call-screen-stage.is-screen-focus .video-call-screen-stage__label {
+  left: calc(50% - var(--video-call-screen-focus-half-width) + clamp(14px, 1.6vw, 24px));
+  bottom: calc(var(--video-call-screen-focus-vertical-inset, 0px) + 12px);
+}
+
+.video-call-screen-stage__members-toggle {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  z-index: 8;
+  pointer-events: auto;
+}
+
+.video-call-screen-stage.is-screen-focus .video-call-screen-stage__members-toggle {
+  bottom: calc(var(--video-call-screen-focus-vertical-inset, 0px) + 5px);
+}
+
+.video-call-screen-stage__call-controls {
+  position: absolute;
+  left: 50%;
+  bottom: clamp(8px, 1.2vh, 14px);
+  transform: translateX(-50%);
+  z-index: 8;
+  pointer-events: auto;
+}
+
+.video-call-screen-stage__call-controls .video-call-controls--card,
+.video-call-screen-stage__call-controls .video-call-actions {
+  margin: 0;
+}
+
+.video-call-screen-stage.is-screen-focus .video-call-screen-stage__call-controls {
+  bottom: calc(var(--video-call-screen-focus-vertical-inset, 0px) + clamp(8px, 1.2vh, 14px));
+}
+
+.video-call-viewport.is-screen-share-layout:fullscreen .video-call-screen-stage.is-screen-focus .video-call-screen-stage__members-toggle,
+.video-call-viewport.is-screen-share-layout:-webkit-full-screen .video-call-screen-stage.is-screen-focus .video-call-screen-stage__members-toggle {
+  bottom: calc(var(--video-call-screen-focus-vertical-inset, 0px) + clamp(54px, 7.4vh, 76px));
+}
+
+.video-call-viewport.is-screen-share-layout:fullscreen .video-call-screen-stage.is-screen-focus .video-call-screen-stage__quality,
+.video-call-viewport.is-screen-share-layout:-webkit-full-screen .video-call-screen-stage.is-screen-focus .video-call-screen-stage__quality {
+  left: auto;
+  right: 12px;
+  top: 12px;
+  transform: none;
+}
+
+.video-call-viewport.is-screen-share-layout:fullscreen .video-call-screen-stage.is-screen-focus .video-call-screen-stage__label,
+.video-call-viewport.is-screen-share-layout:-webkit-full-screen .video-call-screen-stage.is-screen-focus .video-call-screen-stage__label {
+  left: 12px;
+  bottom: 12px;
+}
+
+.video-call-viewport.is-screen-share-layout:fullscreen .video-call-screen-stage.is-screen-focus .video-call-screen-stage__controls,
+.video-call-viewport.is-screen-share-layout:-webkit-full-screen .video-call-screen-stage.is-screen-focus .video-call-screen-stage__controls {
+  left: auto;
+  right: 14px;
+  bottom: 14px;
+  transform: none;
+}
+
+.video-call-viewport.is-screen-share-layout:fullscreen .video-call-screen-stage.is-screen-focus .video-call-screen-stage__members-toggle,
+.video-call-viewport.is-screen-share-layout:-webkit-full-screen .video-call-screen-stage.is-screen-focus .video-call-screen-stage__members-toggle {
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.video-call-viewport.is-screen-share-layout:fullscreen .video-call-screen-stage.is-screen-focus .video-call-screen-stage__call-controls,
+.video-call-viewport.is-screen-share-layout:-webkit-full-screen .video-call-screen-stage.is-screen-focus .video-call-screen-stage__call-controls {
+  bottom: 12px;
+}
+
+.video-call-viewport.is-screen-share-layout:fullscreen .video-call-screen-stage.is-screen-focus .video-call-screen-stage__members-toggle,
+.video-call-viewport.is-screen-share-layout:-webkit-full-screen .video-call-screen-stage.is-screen-focus .video-call-screen-stage__members-toggle {
+  bottom: 58px;
+}
+
+.video-call-share-controls--in-stage {
+  width: auto;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.video-call-screen-filmstrip {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 14px;
+  width: 100%;
+  margin: 0 auto;
+  margin-top: clamp(12px, 2.8vh, 28px);
+  padding: 8px 6px 2px;
+  min-height: 0;
+  max-height: 220px;
+  opacity: 1;
+  transform: translateY(0);
+  overflow: hidden;
+  pointer-events: auto;
+  transition:
+    max-height 220ms ease,
+    opacity 180ms ease,
+    transform 220ms ease,
+    margin-top 220ms ease,
+    padding-top 220ms ease,
+    padding-bottom 220ms ease;
+}
+
+.video-call-screen-filmstrip.is-collapsed {
+  max-height: 0;
+  opacity: 0;
+  transform: translateY(-8px);
+  margin-top: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  pointer-events: none;
+}
+
+.video-call-screen-tile {
+  position: relative;
+  width: 220px;
+  height: 124px;
+  border-radius: 14px;
+  overflow: hidden;
+  border: 1px solid rgba(155, 164, 180, 0.42);
+  background: var(--call-card-deep, rgba(8, 11, 16, 0.9));
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.22);
+  color: #f4f8ff;
+  padding: 0;
+  cursor: pointer;
+  transition: transform 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.video-call-screen-tile--grid {
+  width: auto;
+  height: auto;
+  aspect-ratio: 16 / 9;
+  border-radius: 12px;
+  border: 0;
+  box-shadow: 0 10px 22px rgba(0, 0, 0, 0.2);
+}
+
+.video-call-screen-tile--grid:hover,
+.video-call-screen-tile--grid:focus-visible {
+  border-color: transparent;
+  box-shadow: 0 14px 26px rgba(0, 0, 0, 0.26);
+}
+
+.video-call-screen-tile--grid.is-presenter,
+.video-call-screen-tile--grid.is-stage-focused {
+  border-color: transparent;
+}
+
+.video-call-screen-tile:hover,
+.video-call-screen-tile:focus-visible {
+  transform: translateY(-1px);
+  border-color: rgba(186, 194, 209, 0.72);
+  box-shadow: 0 14px 28px rgba(0, 0, 0, 0.34);
+  outline: none;
+}
+
+.video-call-screen-tile.is-stage-focused {
+  border-color: rgba(206, 214, 228, 0.78);
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.44);
+}
+
+.video-call-screen-tile.is-speaking {
+  border-color: rgba(72, 235, 142, 0.92);
+  box-shadow: 0 0 0 1px rgba(72, 235, 142, 0.38);
+}
+
+.video-call-screen-tile.is-presenter {
+  border-color: rgba(198, 208, 226, 0.7);
+}
+
+.video-call-screen-tile__video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  background: #000;
+}
+
+.video-call-screen-tile__avatar {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 56px;
+  height: 56px;
+  border-radius: 999px;
+  transform: translate(-50%, -50%);
+  object-fit: cover;
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.35);
+}
+
+.video-call-screen-tile__badge {
+  position: absolute;
+  left: 10px;
+  top: 10px;
+  z-index: 6;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #f6faff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.video-call-screen-tile__quality-pill {
+  position: absolute;
+  right: 10px;
+  top: 10px;
+  z-index: 6;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.6);
+  color: rgba(246, 250, 255, 0.96);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.02em;
+}
+
+.video-call-screen-tile__meta {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 10px;
+  z-index: 6;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: rgba(8, 11, 16, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.video-call-screen-tile__controls {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 7;
+  pointer-events: auto;
+}
+
+.video-call-screen-tile--share-preview .video-call-screen-tile__meta {
+  right: 120px;
+}
+
+.video-call-screen-tile--share-preview .video-call-screen-tile__controls .video-call-share-controls {
+  width: auto;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.video-call-screen-tile--share-preview .video-call-screen-tile__controls .video-call-share-btn {
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  background: rgba(7, 10, 14, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+.video-call-screen-tile--share-preview .video-call-screen-tile__controls .video-call-share-btn:hover,
+.video-call-screen-tile--share-preview .video-call-screen-tile__controls .video-call-share-btn:focus-visible {
+  background: rgba(18, 24, 34, 0.92);
+  border-color: rgba(255, 255, 255, 0.22);
+  transform: none;
+}
+
+.video-call-screen-tile--share-preview .video-call-screen-tile__controls .video-call-share-btn .ms-icon {
+  font-size: 15px;
+}
+
+.video-call-screen-tile--share-preview .video-call-screen-tile__controls .video-call-volume-popover {
+  bottom: calc(100% - 11px);
+}
+
+.video-call-screen-tile__name {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.video-call-screen-tile__icons {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: rgba(244, 249, 255, 0.94);
+  flex-shrink: 0;
+}
+
+.video-call-footer--screen-share {
+  margin-top: clamp(20px, 3.6vh, 38px);
+  width: 100%;
+  margin-left: auto;
+  margin-right: auto;
+  padding-bottom: 14px;
+}
+
+.video-call-footer--screen-share .video-call-transmission-actions {
+  position: static;
+  transform: none;
+  width: 100%;
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+}
+
+.video-call-card.is-transmission-active .video-call-footer--screen-share .video-call-transmission-actions {
+  opacity: 1;
+  pointer-events: auto;
+  transform: none;
+}
+
+.video-call-footer--screen-share .video-call-controls--card {
+  margin: 0;
+  padding: 9px 12px;
+  background: rgba(11, 14, 20, 0.84);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.22);
+}
+
+@media (max-width: 960px) {
+  .video-call-card.is-screen-share-layout {
+    padding: 10px 8px 8px;
+  }
+
+  .video-call-viewport.is-screen-share-layout {
+    height: clamp(240px, 42vh, 420px);
+    border-radius: 14px;
+  }
+
+  .video-call-screen-stage {
+    border-radius: 14px;
+  }
+
+  .video-call-screen-filmstrip {
+    gap: 8px;
+  }
+
+  .video-call-screen-grid {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .video-call-screen-tile {
+    width: 180px;
+    height: 102px;
+    border-radius: 12px;
+  }
+
+  .video-call-screen-tile--grid {
+    width: auto;
+    height: auto;
+    aspect-ratio: 16 / 9;
+  }
+
+  .video-call-screen-tile--share-preview .video-call-screen-tile__meta {
+    right: 92px;
+  }
+
+  .video-call-screen-tile__quality-pill {
+    right: 8px;
+    top: 8px;
+    padding: 3px 6px;
+  }
+
+  .video-call-screen-stage__member-name {
+    max-width: calc(100% - 20px);
+  }
+
+  .video-call-screen-tile__avatar {
+    width: 48px;
+    height: 48px;
+  }
+}
+
+@media (max-width: 1180px) and (min-width: 961px) {
+  .video-call-screen-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

@@ -1,0 +1,43 @@
+.server-rail {
+  grid-area: servers;
+  background: var(--bg-rail);
+  display: grid;
+  grid-template-rows: var(--app-navbar-height) 1fr;
+}
+
+.server-rail__top {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.server-rail__messages-button {
+  width: 48px;
+  height: 48px;
+  border: 0;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-primary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-radius 120ms ease;
+}
+
+.server-rail__messages-button:hover {
+  background: rgba(255, 255, 255, 0.16);
+  border-radius: 12px;
+}
+
+.server-rail__messages-button--active {
+  background: rgba(255, 255, 255, 0.18);
+} 
+
+.server-rail__messages-image {
+  width: 28px;
+  height: 28px;
+  object-fit: contain;
+  display: block;
+}

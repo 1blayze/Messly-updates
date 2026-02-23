@@ -1,0 +1,73 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+build/
+out/
+release/
+
+# TypeScript / bundler caches
+*.tsbuildinfo
+.vite/
+.cache/
+.turbo/
+.eslintcache
+
+# Environment / secrets
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Temporary/local runtime files
+tmp/
+*.tmp
+*.temp
+
+# Supabase local artifacts
+supabase/.temp/
+supabase/.branches/
+supabase/.local/
+supabase/.env
+supabase/functions/.env
+supabase/functions/.env.*
+
+# Electron packaging/runtime artifacts
+*.asar
+*.blockmap
+*.exe
+*.dmg
+*.AppImage
+*.deb
+*.rpm
+
+# Editor / OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+
+.idea/
+*.suo
+*.user
+*.userossc
+*.sln.docstates
+*.swp
+*.swo
+*~
