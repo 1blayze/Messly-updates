@@ -358,6 +358,24 @@ export function isProfileMediaUploadError(error: unknown): error is ProfileMedia
   );
 }
 
+function isMissingElectronR2EnvError(error: unknown): boolean {
+  const message =
+    typeof error === "object" && error !== null && "message" in error
+      ? String((error as { message?: string }).message ?? "")
+      : String(error ?? "");
+
+  if (!message.includes("Missing required environment variable:")) {
+    return false;
+  }
+
+  return (
+    message.includes("R2_BUCKET") ||
+    message.includes("R2_ENDPOINT") ||
+    message.includes("R2_ACCESS_KEY_ID") ||
+    message.includes("R2_SECRET_ACCESS_KEY")
+  );
+}
+
 function parseUploadErrorPayload(error: unknown): ParsedUploadErrorPayload | null {
   const message =
     typeof error === "object" && error !== null && "message" in error
@@ -587,6 +605,12 @@ export async function uploadProfileMediaAsset(
         fileName: file.name || undefined,
       });
     } else {
+      // Installed Electron builds may not ship local R2 credentials. Fall back to
+      // the web/edge upload path so avatar/banner uploads still work for end users.
+      if (isMissingElectronR2EnvError(error)) {
+        return uploadProfileMediaViaWebStorage(kind, userId, file);
+      }
+
       if (message.includes("No handler registered for 'media:upload-profile'")) {
         throw new Error("Upload de perfil indisponivel. Reinicie o aplicativo.");
       }

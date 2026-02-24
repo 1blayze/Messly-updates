@@ -90,6 +90,51 @@ interface ScreenShareSourceOptions {
   fetchWindowIcons?: boolean;
 }
 
+type AppUpdaterStatus =
+  | "idle"
+  | "disabled"
+  | "checking"
+  | "available"
+  | "unavailable"
+  | "downloading"
+  | "downloaded"
+  | "error";
+
+interface AppUpdaterState {
+  enabled: boolean;
+  status: AppUpdaterStatus;
+  currentVersion: string;
+  latestVersion: string | null;
+  releaseName: string | null;
+  publishedAt: string | null;
+  releaseNotes: string | null;
+  assetName: string | null;
+  downloadedBytes: number;
+  totalBytes: number;
+  progressPercent: number;
+  lastCheckedAt: string | null;
+  errorMessage: string | null;
+}
+
+interface AppUpdaterDownloadResult {
+  state: AppUpdaterState;
+  filePath: string;
+}
+
+interface AppUpdaterInstallResult {
+  launched: boolean;
+}
+
+interface WindowsBehaviorSettings {
+  startMinimized: boolean;
+  closeToTray: boolean;
+  launchAtStartup: boolean;
+}
+
+interface WindowsBehaviorSettingsRestoreResult {
+  restored: boolean;
+}
+
 interface ElectronApi {
   platform: string;
   getSignedMediaUrl?: (payload: GetSignedMediaUrlPayload) => Promise<GetSignedMediaUrlResult>;
@@ -98,6 +143,14 @@ interface ElectronApi {
   openExternalUrl?: (payload: OpenExternalUrlPayload) => Promise<OpenExternalUrlResult>;
   getScreenShareSources?: (options?: ScreenShareSourceOptions) => Promise<ScreenShareSource[]>;
   setWindowAttention?: (payload: SetWindowAttentionPayload) => Promise<SetWindowAttentionResult>;
+  updaterGetState?: () => Promise<AppUpdaterState | null>;
+  updaterCheck?: () => Promise<AppUpdaterState>;
+  updaterDownload?: () => Promise<AppUpdaterDownloadResult>;
+  updaterInstall?: () => Promise<AppUpdaterInstallResult>;
+  getWindowsSettings?: () => Promise<WindowsBehaviorSettings>;
+  updateWindowsSettings?: (payload: Partial<WindowsBehaviorSettings>) => Promise<WindowsBehaviorSettings>;
+  restoreMainWindowFromTray?: () => Promise<WindowsBehaviorSettingsRestoreResult>;
+  onUpdaterStateChanged?: (listener: (state: AppUpdaterState) => void) => () => void;
   versions: {
     chrome: string;
     electron: string;

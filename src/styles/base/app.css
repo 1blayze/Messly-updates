@@ -353,7 +353,7 @@ body {
 
 .main-panel__friends-list {
   display: grid;
-  gap: 10px;
+  gap: 0;
 }
 
 .main-panel__friends-search {
@@ -394,20 +394,21 @@ body {
 }
 
 .main-panel__friend-item {
-  border: 1px solid var(--border-subtle);
-  border-radius: 12px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.015));
+  border: 0;
+  border-top: 1px solid var(--border-subtle);
+  border-radius: 0;
+  background: transparent;
   padding: 10px 14px;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 14px;
-  transition: border-color 120ms ease, background-color 120ms ease;
+  transition: border-top-color 120ms ease, background-color 120ms ease;
 }
 
 .main-panel__friend-item:hover {
-  border-color: var(--border-default);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.02));
+  border-top-color: var(--border-default);
+  background: transparent;
 }
 
 .main-panel__friend-avatar-wrap {
@@ -642,24 +643,25 @@ body {
 
 .main-panel__pending-list {
   display: grid;
-  gap: 12px;
+  gap: 0;
 }
 
 .main-panel__pending-item {
-  border: 1px solid var(--border-subtle);
-  border-radius: 14px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.015));
+  border: 0;
+  border-top: 1px solid var(--border-subtle);
+  border-radius: 0;
+  background: transparent;
   padding: 14px 16px;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 14px;
-  transition: border-color 120ms ease, background-color 120ms ease;
+  transition: border-top-color 120ms ease, background-color 120ms ease;
 }
 
 .main-panel__pending-item:hover {
-  border-color: var(--border-default);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.02));
+  border-top-color: var(--border-default);
+  background: transparent;
 }
 
 .main-panel__pending-avatar {
@@ -805,7 +807,6 @@ body {
   justify-content: center;
   pointer-events: auto;
   background: rgba(6, 8, 12, 0.28);
-  backdrop-filter: blur(3px);
 }
 
 .app-settings-modal {

@@ -56,7 +56,7 @@ const AUTO_SCROLL_THRESHOLD_PX = 120;
 const SCROLL_TO_BOTTOM_DURATION_S = 0.35;
 const MEDIA_GROUP_WINDOW_MS = 15 * 1000;
 const MAX_VISIBLE_MEDIA_ATTACHMENTS = 5;
-const INITIAL_PAGE_SIZE = 30;
+const INITIAL_PAGE_SIZE = 24;
 const LOAD_OLDER_THRESHOLD_PX = 120;
 const TWEMOJI_BASE_URL = "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/";
 const TWEMOJI_CACHE_LIMIT = 400;
@@ -669,6 +669,32 @@ function sortMessages(messages: ChatMessageItem[]): ChatMessageItem[] {
   return sorted;
 }
 
+function areFlatRecordValuesEqual(
+  current: Record<string, unknown> | null | undefined,
+  next: Record<string, unknown> | null | undefined,
+): boolean {
+  if (current === next) {
+    return true;
+  }
+  if (!current || !next) {
+    return !current && !next;
+  }
+
+  const currentKeys = Object.keys(current);
+  const nextKeys = Object.keys(next);
+  if (currentKeys.length !== nextKeys.length) {
+    return false;
+  }
+
+  for (const key of currentKeys) {
+    if (!Object.prototype.hasOwnProperty.call(next, key) || current[key] !== next[key]) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 function areMessagesEqual(current: ChatMessageItem[], next: ChatMessageItem[]): boolean {
   if (current.length !== next.length) {
     return false;
@@ -688,10 +714,16 @@ function areMessagesEqual(current: ChatMessageItem[], next: ChatMessageItem[]): 
       (currentItem.editedAt ?? "") !== (nextItem.editedAt ?? "") ||
       (currentItem.deletedAt ?? "") !== (nextItem.deletedAt ?? "") ||
       (currentItem.replyToId ?? "") !== (nextItem.replyToId ?? "") ||
-      JSON.stringify(currentItem.replyToSnapshot ?? null) !== JSON.stringify(nextItem.replyToSnapshot ?? null) ||
+      !areFlatRecordValuesEqual(
+        (currentItem.replyToSnapshot as unknown as Record<string, unknown> | null | undefined) ?? null,
+        (nextItem.replyToSnapshot as unknown as Record<string, unknown> | null | undefined) ?? null,
+      ) ||
       (currentItem.callId ?? "") !== (nextItem.callId ?? "") ||
-      JSON.stringify(currentItem.payload ?? null) !== JSON.stringify(nextItem.payload ?? null) ||
-      JSON.stringify(currentItem.attachment ?? null) !== JSON.stringify(nextItem.attachment ?? null) ||
+      !areFlatRecordValuesEqual(currentItem.payload ?? null, nextItem.payload ?? null) ||
+      !areFlatRecordValuesEqual(
+        (currentItem.attachment as unknown as Record<string, unknown> | null | undefined) ?? null,
+        (nextItem.attachment as unknown as Record<string, unknown> | null | undefined) ?? null,
+      ) ||
       Boolean(currentItem.optimistic) !== Boolean(nextItem.optimistic) ||
       Boolean(currentItem.failed) !== Boolean(nextItem.failed) ||
       Number(currentItem.sendAttemptCount ?? 0) !== Number(nextItem.sendAttemptCount ?? 0)
@@ -2713,8 +2745,8 @@ export default function DirectMessageChatView({
           ? ((await preloadChatMessages({
               conversationId,
               limit: INITIAL_PAGE_SIZE,
-              // Reuse in-flight preload from sidebar when available, but still force a fresh read on open.
-              force: true,
+              // Prefer sidebar preload/in-flight cache on first open to reduce perceived wait.
+              force: false,
             })) ??
             (await listChatMessages({
               conversationId,
@@ -3668,7 +3700,7 @@ export default function DirectMessageChatView({
         setMessages((current) => {
           const withoutOptimistic = current.filter((message) => !(message.clientId === textClientId && message.optimistic));
           const nextMessages = sortMessages([...withoutOptimistic, serverMessage]);
-          return areMessagesEqual(current, nextMessages) ? current : nextMessages;
+          return nextMessages;
         });
         void markConversationAsRead([serverMessage]);
       }
@@ -3994,9 +4026,11 @@ export default function DirectMessageChatView({
     }
 
     const targetId = deleteTarget.id;
+    const deleteTargetSnapshot = deleteTarget;
     const snapshot = messages;
     const alreadyKnownAsDeleted = deletedMessageIds.has(targetId);
     setIsDeletingMessage(true);
+    setDeleteTarget(null);
     setDeletedMessageIds((current) => {
       const next = new Set(current);
       next.add(targetId);
@@ -4006,7 +4040,6 @@ export default function DirectMessageChatView({
 
     try {
       await deleteChatMessage(targetId);
-      setMessages((current) => current.filter((message) => message.id !== targetId));
       setAttachmentUrlMap((current) => {
         const next = { ...current };
         delete next[targetId];
@@ -4017,8 +4050,6 @@ export default function DirectMessageChatView({
         delete next[targetId];
         return next;
       });
-
-      setDeleteTarget(null);
     } catch (error) {
       setMessages(snapshot);
       if (!alreadyKnownAsDeleted) {
@@ -4032,6 +4063,7 @@ export default function DirectMessageChatView({
         scope: "chat.deleteMessage",
         messageId: targetId,
       });
+      setDeleteTarget(deleteTargetSnapshot);
       setLoadError(error instanceof Error ? error.message : "Nao foi possivel excluir a mensagem.");
     } finally {
       setIsDeletingMessage(false);
@@ -6216,6 +6248,11 @@ export default function DirectMessageChatView({
               mediaSourceMessages.map((mediaMessage) => {
                 const mediaFullUrl = resolveRenderedAttachmentUrl(mediaMessage);
                 const mediaPreviewUrl = resolveRenderedAttachmentThumbUrl(mediaMessage);
+                const mediaMimeType = String(mediaMessage.attachment?.mimeType ?? "").trim().toLowerCase();
+                const mediaFileKey = String(mediaMessage.attachment?.fileKey ?? mediaMessage.content ?? "").trim().toLowerCase();
+                const isGifImage =
+                  mediaMessage.type === "image" &&
+                  (mediaMimeType === "image/gif" || mediaFileKey.endsWith(".gif"));
                 const mediaSender = getParticipantById(mediaMessage.senderId);
                 const mediaSenderName = mediaSender.displayName || mediaSender.username || "Usuario";
                 const mediaSenderAvatar =
@@ -6223,7 +6260,7 @@ export default function DirectMessageChatView({
                 return {
                   messageId: mediaMessage.id,
                   type: mediaMessage.type === "video" ? "video" : "image",
-                  previewUrl: mediaPreviewUrl || mediaFullUrl,
+                  previewUrl: isGifImage ? mediaFullUrl : (mediaPreviewUrl || mediaFullUrl),
                   fullUrl: mediaFullUrl,
                   isLoading:
                     mediaMessage.type === "video"

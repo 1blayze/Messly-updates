@@ -1,7 +1,7 @@
 {
   "name": "messly",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.0.2",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -12,6 +12,9 @@
     "dev:desktop": "npm run dev:electron",
     "build": "tsc -b && vite build",
     "build:web": "tsc -b && vite build",
+    "dist": "npm run build && electron-builder --win nsis",
+    "dist:win": "npm run build && electron-builder --win nsis",
+    "dist:publish": "npm run build && electron-builder --win nsis --publish always",
     "preview": "vite preview",
     "start:electron": "set ELECTRON_RUN_AS_NODE=&& electron ."
   },
@@ -21,6 +24,7 @@
     "@supabase/supabase-js": "^2.95.3",
     "dotenv": "^17.3.1",
     "emoji-picker-react": "^4.18.0",
+    "electron-updater": "^6.6.2",
     "firebase": "^12.9.0",
     "gsap": "^3.14.2",
     "react": "^18.2.0",
@@ -36,8 +40,73 @@
     "@vitejs/plugin-react": "^4.2.1",
     "concurrently": "^9.2.1",
     "electron": "^40.4.0",
+    "electron-builder": "^24.13.3",
     "typescript": "^5.4.5",
     "vite": "^5.2.8",
     "wait-on": "^9.0.3"
+  },
+  "build": {
+    "appId": "com.blayze.messly",
+    "productName": "Messly",
+    "asar": true,
+    "artifactName": "messly-setup.${ext}",
+    "compression": "maximum",
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "src/assets/images/img/messly-*.ico",
+      "src/assets/images/img/messly.png",
+      "src/assets/images/img/tray/*.ico",
+      "package.json",
+      "!**/*.map",
+      "!**/*.md",
+      "!**/README*",
+      "!**/CHANGELOG*",
+      "!**/{test,tests}/**",
+      "!**/__tests__/**",
+      "!**/*.d.ts"
+    ],
+    "icon": "src/assets/images/img/messly-256.ico",
+    "electronLanguages": [
+      "en-US",
+      "pt-BR"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "icon": "src/assets/images/img/messly-256.ico",
+      "signAndEditExecutable": false,
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false,
+      "allowElevation": true,
+      "createDesktopShortcut": false,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Messly",
+      "uninstallDisplayName": "Messly",
+      "runAfterFinish": true,
+      "installerIcon": "src/assets/images/img/messly-256.ico",
+      "uninstallerIcon": "src/assets/images/img/messly-256.ico",
+      "installerHeaderIcon": "src/assets/images/img/messly-256.ico",
+      "include": "build/installer.nsh"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "1blayze",
+        "repo": "Messly-updates"
+      }
+    ]
   }
 }

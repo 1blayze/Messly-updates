@@ -81,7 +81,7 @@ interface UserProfileRow {
   banner_hash?: string | null;
 }
 
-type SettingsSection = "profile" | "social" | "audio";
+type SettingsSection = "profile" | "social" | "audio" | "windows";
 
 type ProfileMediaUpdatePayload = Record<string, string | null>;
 
@@ -100,6 +100,11 @@ const SIDEBAR_IDENTITY_CACHE_PREFIX = "messly:sidebar-identity:";
 const SIDEBAR_RESOLVED_MEDIA_CACHE_PREFIX = "messly:sidebar-media:";
 const AUDIO_SETTINGS_STORAGE_KEY_PREFIX = "messly:audio-settings:";
 const DEFAULT_PUSH_TO_TALK_BIND = "V";
+const DEFAULT_WINDOWS_BEHAVIOR_SETTINGS: WindowsBehaviorSettings = {
+  startMinimized: true,
+  closeToTray: true,
+  launchAtStartup: true,
+};
 
 interface CachedSidebarIdentityFallback {
   displayName: string;
@@ -594,6 +599,7 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
   const [bannerHash, setBannerHash] = useState<string | null>(null);
   const [avatarSrc, setAvatarSrc] = useState<string>("");
   const [bannerSrc, setBannerSrc] = useState<string>(getDefaultBannerUrl);
+  const [isProfileIdentityLoading, setIsProfileIdentityLoading] = useState(true);
   const [isAvatarUploading, setIsAvatarUploading] = useState(false);
   const [isBannerUploading, setIsBannerUploading] = useState(false);
   const [avatarFeedback, setAvatarFeedback] = useState<UploadFeedbackState | null>(null);
@@ -606,6 +612,12 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
   const [isBlockedAccountsLoading, setIsBlockedAccountsLoading] = useState(false);
   const [blockedAccountsError, setBlockedAccountsError] = useState<string | null>(null);
   const [unblockingUserId, setUnblockingUserId] = useState<string | null>(null);
+  const [windowsBehaviorSettings, setWindowsBehaviorSettings] = useState<WindowsBehaviorSettings>(
+    DEFAULT_WINDOWS_BEHAVIOR_SETTINGS,
+  );
+  const [isWindowsBehaviorLoading, setIsWindowsBehaviorLoading] = useState(false);
+  const [windowsBehaviorError, setWindowsBehaviorError] = useState<string | null>(null);
+  const [savingWindowsBehaviorKey, setSavingWindowsBehaviorKey] = useState<keyof WindowsBehaviorSettings | null>(null);
   const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([]);
   const [audioOutputs, setAudioOutputs] = useState<MediaDeviceInfo[]>([]);
   const [selectedInputId, setSelectedInputId] = useState("");
@@ -633,6 +645,7 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
   const bannerColorAreaRef = useRef<HTMLDivElement | null>(null);
   const temporaryAvatarUrlRef = useRef<string | null>(null);
   const temporaryBannerUrlRef = useRef<string | null>(null);
+  const windowsBehaviorLoadedRef = useRef(false);
   const audioSettingsLoadedRef = useRef(false);
   const micTestAnimationFrameRef = useRef<number | null>(null);
   const micTestStreamRef = useRef<MediaStream | null>(null);
@@ -647,9 +660,20 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
   const displayedMicSensitivity = autoMicSensitivity ? -40 : manualMicSensitivity;
   const audioSettingsStorageKey = useMemo(() => buildAudioSettingsStorageKey(user?.uid ?? null), [user?.uid]);
   const hasBannerMedia = useMemo(
-    () => Boolean(bannerKey || (bannerSrc && bannerSrc.trim().length > 0 && bannerSrc !== getDefaultBannerUrl())),
-    [bannerKey, bannerSrc],
+    () =>
+      Boolean(
+        bannerKey ||
+          bannerHash ||
+          (bannerSrc && bannerSrc.trim().length > 0 && bannerSrc !== getDefaultBannerUrl()),
+      ),
+    [bannerHash, bannerKey, bannerSrc],
   );
+  const isDesktopRuntime = typeof window !== "undefined" && Boolean(window.electronAPI);
+  const isWindowsDesktopRuntime = isDesktopRuntime && window.electronAPI?.platform === "win32";
+  const canManageWindowsBehavior =
+    isWindowsDesktopRuntime &&
+    typeof window.electronAPI?.getWindowsSettings === "function" &&
+    typeof window.electronAPI?.updateWindowsSettings === "function";
 
   const setTemporaryPreviewUrl = (kind: ProfileMediaKind, nextUrl: string): void => {
     if (kind === "avatar") {
@@ -1133,10 +1157,57 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
 
     let isMounted = true;
 
+    setIsProfileIdentityLoading(true);
+
     async function loadProfileFromDatabase(): Promise<void> {
       let data: UserProfileRow | null = null;
       const cachedIdentity = readSidebarIdentityFallback(stableFirebaseUid);
       const cachedMedia = readSidebarResolvedMediaFallback(stableFirebaseUid);
+
+      if (isMounted && (cachedIdentity || cachedMedia)) {
+        const cachedDisplayName = String(cachedIdentity?.displayName ?? "").trim();
+        const cachedUsername = String(cachedIdentity?.username ?? "").trim();
+        const cachedAbout = String(cachedIdentity?.about ?? "").slice(0, ABOUT_MAX_LENGTH);
+        const cachedAvatarKey = String(cachedIdentity?.avatarKey ?? "").trim() || null;
+        const cachedAvatarHash = String(cachedIdentity?.avatarHash ?? "").trim() || null;
+        const cachedAvatarUrl = String(cachedIdentity?.avatarUrl ?? cachedMedia?.avatarSrc ?? "").trim() || null;
+        const cachedBannerKey = String(cachedIdentity?.bannerKey ?? "").trim() || null;
+        const cachedBannerHash = String(cachedIdentity?.bannerHash ?? "").trim() || null;
+        const cachedBannerSrc = String(cachedMedia?.bannerSrc ?? "").trim();
+
+        if (cachedDisplayName) {
+          setDisplayName(cachedDisplayName);
+          setSavedDisplayName(cachedDisplayName);
+        }
+        if (cachedUsername) {
+          setUsername(cachedUsername);
+        }
+        if (cachedAbout) {
+          setAbout(cachedAbout);
+          setSavedAbout(cachedAbout);
+        }
+        if (cachedAvatarKey) {
+          setAvatarKey(cachedAvatarKey);
+        }
+        if (cachedAvatarHash) {
+          setAvatarHash(cachedAvatarHash);
+        }
+        if (cachedAvatarUrl) {
+          setAvatarUrl(cachedAvatarUrl);
+          if (!cachedAvatarUrl.startsWith("http") && !cachedAvatarUrl.startsWith("blob:")) {
+            setAvatarSrc(cachedAvatarUrl);
+          }
+        }
+        if (cachedBannerKey) {
+          setBannerKey(cachedBannerKey);
+        }
+        if (cachedBannerHash) {
+          setBannerHash(cachedBannerHash);
+        }
+        if (cachedBannerSrc) {
+          setBannerSrc(cachedBannerSrc);
+        }
+      }
 
       if (stableCurrentUserId) {
         const byIdResult = await queryUserById(stableCurrentUserId);
@@ -1206,6 +1277,7 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
         if (cachedMedia?.bannerSrc) {
           setBannerSrc(cachedMedia.bannerSrc);
         }
+        setIsProfileIdentityLoading(false);
         return;
       }
       const row = data as UserProfileRow;
@@ -1234,9 +1306,14 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
       setAvatarHash((row.avatar_hash ?? "").trim() || null);
       setBannerKey((row.banner_key ?? "").trim() || null);
       setBannerHash((row.banner_hash ?? "").trim() || null);
+      setIsProfileIdentityLoading(false);
     }
 
-    void loadProfileFromDatabase();
+    void loadProfileFromDatabase().catch(() => {
+      if (isMounted) {
+        setIsProfileIdentityLoading(false);
+      }
+    });
 
     return () => {
       isMounted = false;
@@ -1381,6 +1458,55 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
     };
   }, [activeSection, dbUserId]);
 
+  useEffect(() => {
+    if (activeSection !== "windows") {
+      return;
+    }
+
+    if (!isWindowsDesktopRuntime) {
+      setWindowsBehaviorError("Disponivel apenas no aplicativo desktop para Windows.");
+      return;
+    }
+
+    if (!canManageWindowsBehavior || windowsBehaviorLoadedRef.current) {
+      return;
+    }
+
+    let isMounted = true;
+    setIsWindowsBehaviorLoading(true);
+    setWindowsBehaviorError(null);
+
+    void window.electronAPI
+      ?.getWindowsSettings?.()
+      .then((settings) => {
+        if (!isMounted || !settings) {
+          return;
+        }
+        windowsBehaviorLoadedRef.current = true;
+        setWindowsBehaviorSettings({
+          startMinimized: Boolean(settings.startMinimized),
+          closeToTray: Boolean(settings.closeToTray),
+          launchAtStartup: Boolean(settings.launchAtStartup),
+        });
+      })
+      .catch(() => {
+        if (!isMounted) {
+          return;
+        }
+        setWindowsBehaviorError("Nao foi possivel carregar as configuracoes do Windows.");
+      })
+      .finally(() => {
+        if (!isMounted) {
+          return;
+        }
+        setIsWindowsBehaviorLoading(false);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [activeSection, canManageWindowsBehavior, isWindowsDesktopRuntime]);
+
   const safeUsername = useMemo(() => username.trim() || "username", [username]);
   const safeDisplayName = useMemo(() => displayName.trim() || safeUsername || "Nome", [displayName, safeUsername]);
   const safeAbout = useMemo(() => about.trim(), [about]);
@@ -1444,6 +1570,39 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
     if (normalized) {
       setBannerColor(normalized);
       setProfileFeedback(null);
+    }
+  };
+
+  const handleWindowsBehaviorToggle = async (
+    key: keyof WindowsBehaviorSettings,
+    nextValue: boolean,
+  ): Promise<void> => {
+    if (!canManageWindowsBehavior || !window.electronAPI?.updateWindowsSettings) {
+      return;
+    }
+
+    const previous = windowsBehaviorSettings;
+    const optimistic = {
+      ...previous,
+      [key]: nextValue,
+    };
+    setWindowsBehaviorSettings(optimistic);
+    setSavingWindowsBehaviorKey(key);
+    setWindowsBehaviorError(null);
+
+    try {
+      const updated = await window.electronAPI.updateWindowsSettings({ [key]: nextValue });
+      setWindowsBehaviorSettings({
+        startMinimized: Boolean(updated.startMinimized),
+        closeToTray: Boolean(updated.closeToTray),
+        launchAtStartup: Boolean(updated.launchAtStartup),
+      });
+      windowsBehaviorLoadedRef.current = true;
+    } catch {
+      setWindowsBehaviorSettings(previous);
+      setWindowsBehaviorError("Nao foi possivel salvar a configuracao do Windows.");
+    } finally {
+      setSavingWindowsBehaviorKey((current) => (current === key ? null : current));
     }
   };
 
@@ -1922,9 +2081,8 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
       return;
     }
 
-    // Only avatar GIFs are sent directly to preserve animation.
-    // Banner GIFs should go through the editor and be exported as WebP.
-    if (kind === "avatar" && file.type.toLowerCase() === "image/gif") {
+    // Send GIFs directly to preserve animation (avatar + banner).
+    if (file.type.toLowerCase() === "image/gif") {
       void uploadProfileMedia(kind, file);
       return;
     }
@@ -1950,8 +2108,9 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
         ? isBannerUploading
         : false;
   const hasAvatarMedia = Boolean(
-    avatarKey || avatarUrl || (avatarSrc && avatarSrc.trim().length > 0 && avatarSrc !== getDefaultAvatarUrl()),
+    avatarKey || avatarHash || avatarUrl || (avatarSrc && avatarSrc.trim().length > 0 && avatarSrc !== getDefaultAvatarUrl()),
   );
+  const shouldSuppressPreviewBannerColor = isProfileIdentityLoading || hasBannerMedia || Boolean(bannerHash);
 
   return (
     <>
@@ -1989,6 +2148,13 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
               onClick={() => setActiveSection("audio")}
             >
               Audio
+            </button>
+            <button
+              className={`${styles.menuItem}${activeSection === "windows" ? ` ${styles.menuItemActive}` : ""}`}
+              type="button"
+              onClick={() => setActiveSection("windows")}
+            >
+              Windows
             </button>
           </aside>
 
@@ -2221,7 +2387,7 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
                     <UserProfilePopover
                       avatarSrc={avatarSrc}
                       bannerSrc={bannerSrc}
-                      bannerColor={hasBannerMedia ? null : safeBannerColor}
+                      bannerColor={shouldSuppressPreviewBannerColor ? null : safeBannerColor}
                       displayName={safeDisplayName}
                       username={safeUsername}
                       aboutText={safeAbout}
@@ -2508,6 +2674,85 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
                         </section>
                       </div>
                     </div>
+                  </section>
+                </div>
+              </section>
+            ) : activeSection === "windows" ? (
+              <section className={styles.windowsPanel} aria-label="Configuracoes do Windows">
+                <header className={styles.editorHeader}>
+                  <h3 className={styles.editorTitle}>Windows</h3>
+                </header>
+
+                <div className={styles.windowsContent}>
+                  <section className={styles.windowsCard} aria-label="Comportamento no Windows">
+                    <div className={styles.windowsCardHead}>
+                      <h4>Comportamento do aplicativo</h4>
+                      {isWindowsBehaviorLoading ? (
+                        <span className={styles.windowsInlineStatus}>Carregando...</span>
+                      ) : null}
+                    </div>
+
+                    {!isWindowsDesktopRuntime ? (
+                      <p className={styles.windowsSupportNotice}>
+                        Disponivel apenas no aplicativo desktop para Windows.
+                      </p>
+                    ) : (
+                      <div className={styles.windowsSettingList}>
+                        {(
+                          [
+                            {
+                              key: "startMinimized",
+                              title: "Iniciar minimizado",
+                              description: "Abre o Messly minimizado na proxima inicializacao do app.",
+                            },
+                            {
+                              key: "closeToTray",
+                              title: "Ao fechar, minimizar para bandeja",
+                              description: "Mantem o app rodando na bandeja do sistema ao fechar a janela.",
+                            },
+                            {
+                              key: "launchAtStartup",
+                              title: "Abrir o Messly na inicializacao",
+                              description: "Inicia o Messly automaticamente quando o Windows ligar.",
+                            },
+                          ] as const
+                        ).map((item) => {
+                          const isSaving = savingWindowsBehaviorKey === item.key;
+                          const disabled = !canManageWindowsBehavior || isWindowsBehaviorLoading || Boolean(isSaving);
+                          const checked = Boolean(windowsBehaviorSettings[item.key]);
+                          return (
+                            <div key={item.key} className={styles.windowsSettingRow}>
+                              <div className={styles.windowsSettingMeta}>
+                                <p className={styles.windowsSettingTitle}>{item.title}</p>
+                                <p className={styles.windowsSettingDesc}>{item.description}</p>
+                              </div>
+
+                              <button
+                                type="button"
+                                role="switch"
+                                aria-checked={checked}
+                                aria-label={item.title}
+                                disabled={disabled}
+                                className={`${styles.windowsSwitch}${checked ? ` ${styles.windowsSwitchOn}` : ""}${
+                                  disabled ? ` ${styles.windowsSwitchDisabled}` : ""
+                                }`}
+                                onClick={() => {
+                                  void handleWindowsBehaviorToggle(item.key, !checked);
+                                }}
+                              >
+                                <span className={styles.windowsSwitchThumb} aria-hidden="true" />
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {windowsBehaviorError ? (
+                      <p className={styles.windowsErrorText} role="status" aria-live="polite">
+                        {windowsBehaviorError}
+                      </p>
+                    ) : null}
                   </section>
                 </div>
               </section>

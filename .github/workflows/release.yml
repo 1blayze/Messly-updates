@@ -1,0 +1,67 @@
+name: Release Electron App
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-publish-windows:
+    name: Build and publish Windows release
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      CI: "true"
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate GH_TOKEN secret
+        shell: bash
+        run: |
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "GH_TOKEN secret is missing."
+            echo "Create a PAT with Contents: Read and write for repo 1blayze/Messly-updates"
+            exit 1
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Validate tag matches package version
+        shell: bash
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          echo "Tag version: ${TAG_VERSION}"
+          echo "Package version: ${PKG_VERSION}"
+          if [ "${TAG_VERSION}" != "${PKG_VERSION}" ]; then
+            echo "Tag version does not match package.json version."
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build and publish release to public updates repo
+        run: npm run dist:publish
+
+      - name: Upload build artifacts (debug fallback)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: messly-release-debug
+          path: |
+            release/**
+            dist/**
+          if-no-files-found: ignore
+

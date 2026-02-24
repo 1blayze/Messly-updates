@@ -16,7 +16,11 @@ import { supabase } from "../services/supabase";
 import { firebaseDatabase } from "../services/firebase";
 import { escapeLikePattern, normalizeEmail } from "../services/usernameAvailability";
 import { friendRequestsEnabled } from "../services/friends/friendRequests";
-import { SIDEBAR_CALL_STATE_EVENT, type SidebarCallStateDetail } from "../services/calls/callUiPresence";
+import {
+  dispatchSidebarCallHangup,
+  SIDEBAR_CALL_STATE_EVENT,
+  type SidebarCallStateDetail,
+} from "../services/calls/callUiPresence";
 
 type FriendsTab = "online" | "all" | "pending";
 type PendingDirection = "incoming" | "outgoing";
@@ -700,6 +704,16 @@ export default function AppShell() {
   const handleChangePresence = (state: PresenceState): void => {
     presenceController.setPreferredState(state);
   };
+
+  const handlePrepareForUpdateInstall = useCallback(async (): Promise<void> => {
+    if (!isSidebarCallActive) {
+      return;
+    }
+    dispatchSidebarCallHangup();
+    await new Promise((resolve) => {
+      window.setTimeout(resolve, 300);
+    });
+  }, [isSidebarCallActive]);
 
   const handleSidebarDirectMessagesChange = useCallback((items: SidebarDirectMessageSelection[]): void => {
     setSidebarDirectMessages((current) => (areSidebarSelectionsEqual(current, items) ? current : items));
@@ -1971,7 +1985,7 @@ export default function AppShell() {
 
   return (
     <div className="app-shell">
-      <TopBar />
+      <TopBar isCallActive={isSidebarCallActive} onPrepareForUpdateInstall={handlePrepareForUpdateInstall} />
       <ServerRail />
       <DirectMessagesSidebar
         currentUserId={currentUserId}

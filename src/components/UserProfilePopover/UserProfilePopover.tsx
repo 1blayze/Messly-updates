@@ -11,7 +11,7 @@ import {
 } from "react";
 import MaterialSymbolIcon from "../ui/MaterialSymbolIcon";
 import EmojiButton from "../chat/EmojiButton";
-import { getNameAvatarUrl, isDefaultBannerUrl } from "../../services/cdn/mediaUrls";
+import { getNameAvatarUrl, isDefaultAvatarUrl, isDefaultBannerUrl } from "../../services/cdn/mediaUrls";
 import type { PresenceState } from "../../services/presence/presenceTypes";
 import { normalizeBannerColor } from "../../services/profile/bannerColor";
 import messageIconSrc from "../../assets/images/msg.png";
@@ -128,7 +128,7 @@ export default function UserProfilePopover({
       trimmed.startsWith("https://") ||
       trimmed.startsWith("data:") ||
       trimmed.startsWith("blob:");
-    return !trimmed || !isAbsolute ? fallbackAvatarSrc : trimmed;
+    return !trimmed || !isAbsolute || isDefaultAvatarUrl(trimmed) ? fallbackAvatarSrc : trimmed;
   }, [avatarSrc, fallbackAvatarSrc]);
   const safeBannerSrc = useMemo(() => {
     const trimmed = (bannerSrc ?? "").trim();

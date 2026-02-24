@@ -59,9 +59,17 @@ function loadBackendEnv() {
   };
 }
 
-const backendEnv = loadBackendEnv();
+let backendEnvCache = null;
+
+function getBackendEnv() {
+  if (backendEnvCache) {
+    return backendEnvCache;
+  }
+  backendEnvCache = loadBackendEnv();
+  return backendEnvCache;
+}
 
 module.exports = {
-  backendEnv,
   loadBackendEnv,
+  getBackendEnv,
 };

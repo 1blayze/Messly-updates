@@ -3,8 +3,6 @@ const sharp = require("sharp");
 const {
   AVATAR_ALLOWED_TYPES,
   AVATAR_GIF_MAX_FRAMES,
-  AVATAR_GIF_MAX_HEIGHT,
-  AVATAR_GIF_MAX_WIDTH,
   AVATAR_MAX_BYTES,
   AVATAR_TARGET_HEIGHT,
   AVATAR_TARGET_WIDTH,
@@ -87,13 +85,6 @@ function processGifAvatar(buffer) {
   if (gifMetadata.frames < 1) {
     throw createMediaUploadError("INVALID_IMAGE", {
       allowedTypes: [...AVATAR_ALLOWED_TYPES],
-    });
-  }
-
-  if (gifMetadata.width > AVATAR_GIF_MAX_WIDTH || gifMetadata.height > AVATAR_GIF_MAX_HEIGHT) {
-    throw createMediaUploadError("DIMENSIONS_TOO_LARGE", {
-      maxWidth: AVATAR_GIF_MAX_WIDTH,
-      maxHeight: AVATAR_GIF_MAX_HEIGHT,
     });
   }
 
