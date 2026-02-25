@@ -32,6 +32,8 @@ interface SignedMediaCacheEntry {
 }
 
 const signedMediaCache = new Map<string, SignedMediaCacheEntry>();
+const signedMediaInFlight = new Map<string, Promise<SignedMediaCacheEntry | null>>();
+const warmedImageUrls = new Map<string, number>();
 
 function isElectronRuntime(): boolean {
   return typeof window !== "undefined" && typeof window.electronAPI !== "undefined";
@@ -117,7 +119,42 @@ function getCachedSignedUrl(cacheKey: string): string | null {
   return cached.url;
 }
 
+function warmImageUrl(rawUrl: string | null | undefined): void {
+  const url = String(rawUrl ?? "").trim();
+  if (!url || typeof Image === "undefined") {
+    return;
+  }
+  if (url.startsWith("data:") || url.startsWith("blob:")) {
+    return;
+  }
+
+  const now = Date.now();
+  const warmedAt = warmedImageUrls.get(url) ?? 0;
+  if (now - warmedAt < 60_000) {
+    return;
+  }
+  warmedImageUrls.set(url, now);
+
+  try {
+    const image = new Image();
+    image.decoding = "async";
+    image.loading = "eager";
+    image.src = url;
+    if (typeof image.decode === "function") {
+      void image.decode().catch(() => {});
+    }
+  } catch {
+    // Ignore preload failures.
+  }
+}
+
 async function fetchSignedMediaUrl(mediaKey: string): Promise<SignedMediaCacheEntry | null> {
+  const inFlight = signedMediaInFlight.get(mediaKey);
+  if (inFlight) {
+    return inFlight;
+  }
+
+  const request = (async (): Promise<SignedMediaCacheEntry | null> => {
   const getSignedMediaUrl = window.electronAPI?.getSignedMediaUrl;
   if (getSignedMediaUrl) {
     try {
@@ -168,6 +205,17 @@ async function fetchSignedMediaUrl(mediaKey: string): Promise<SignedMediaCacheEn
   } catch {}
 
   return null;
+  })();
+
+  signedMediaInFlight.set(mediaKey, request);
+  try {
+    return await request;
+  } finally {
+    const current = signedMediaInFlight.get(mediaKey);
+    if (current === request) {
+      signedMediaInFlight.delete(mediaKey);
+    }
+  }
 }
 
 async function resolveProfileMediaUrl(
@@ -191,6 +239,7 @@ async function resolveProfileMediaUrl(
   const cacheKey = safeHash ? `${safeKey}:${safeHash}` : safeKey;
   const cachedUrl = getCachedSignedUrl(cacheKey);
   if (cachedUrl) {
+    warmImageUrl(cachedUrl);
     return cachedUrl;
   }
 
@@ -200,6 +249,7 @@ async function resolveProfileMediaUrl(
   }
 
   signedMediaCache.set(cacheKey, signed);
+  warmImageUrl(signed.url);
   return signed.url;
 }
 
@@ -263,6 +313,7 @@ export async function getAttachmentUrl(mediaKeyOrUrl: string | null | undefined)
 
   const cachedUrl = getCachedSignedUrl(safeKey);
   if (cachedUrl) {
+    warmImageUrl(cachedUrl);
     return cachedUrl;
   }
 
@@ -272,5 +323,6 @@ export async function getAttachmentUrl(mediaKeyOrUrl: string | null | undefined)
   }
 
   signedMediaCache.set(safeKey, signed);
+  warmImageUrl(signed.url);
   return signed.url;
 }

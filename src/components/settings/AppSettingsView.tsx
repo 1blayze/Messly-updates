@@ -1,4 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEvent as ReactPointerEvent } from "react";
+import {
+  EmailAuthProvider,
+  deleteUser,
+  reauthenticateWithCredential,
+  signOut,
+  updatePassword,
+  verifyBeforeUpdateEmail,
+} from "firebase/auth";
 import { useAuthSession } from "../../auth/AuthProvider";
 import {
   getAvatarUrl,
@@ -16,6 +24,7 @@ import { AVATAR_MAX_BYTES, AVATAR_MAX_MB, BANNER_MAX_BYTES, BANNER_MAX_MB } from
 import ImageEditModal from "../media/ImageEditModal";
 import { PRESENCE_LABELS } from "../../services/presence/presenceTypes";
 import { supabase } from "../../services/supabase";
+import { firebaseAuth } from "../../services/firebase";
 import { escapeLikePattern, normalizeEmail } from "../../services/usernameAvailability";
 import { DEFAULT_BANNER_COLOR, getBannerColorInputValue, normalizeBannerColor } from "../../services/profile/bannerColor";
 import { ensureUser } from "../../services/userSync";
@@ -23,6 +32,7 @@ import MaterialSymbolIcon from "../ui/MaterialSymbolIcon";
 import Modal from "../ui/Modal";
 import UserProfilePopover from "../UserProfilePopover/UserProfilePopover";
 import styles from "./AppSettingsView.module.css";
+import appPackage from "../../../package.json";
 
 interface AppSettingsViewProps {
   onClose: () => void;
@@ -50,6 +60,8 @@ interface ProfileUpdatedDetail {
   username?: string | null;
   about?: string | null;
   banner_color?: string | null;
+  profile_theme_primary_color?: string | null;
+  profile_theme_accent_color?: string | null;
 }
 
 interface BlockedAccountItem {
@@ -70,10 +82,14 @@ interface BlockedUserRow {
 
 interface UserProfileRow {
   id?: string | null;
+  email?: string | null;
+  firebase_uid?: string | null;
   display_name?: string | null;
   username?: string | null;
   about?: string | null;
   banner_color?: string | null;
+  profile_theme_primary_color?: string | null;
+  profile_theme_accent_color?: string | null;
   avatar_url?: string | null;
   avatar_key?: string | null;
   avatar_hash?: string | null;
@@ -81,30 +97,51 @@ interface UserProfileRow {
   banner_hash?: string | null;
 }
 
-type SettingsSection = "profile" | "social" | "audio" | "windows";
+type SettingsSection = "account" | "profile" | "social" | "audio" | "windows";
+type AccountModalKind = "email" | "password" | "deactivate" | "delete";
+type AccountEmailModalStep = "verifyCurrent" | "verifyNew";
 
 type ProfileMediaUpdatePayload = Record<string, string | null>;
 
 const ABOUT_MAX_LENGTH = 190;
 const USERS_MISSING_COLUMN_REGEX = /Could not find the '([^']+)' column of 'users' in the schema cache/i;
 const PROFILE_MEDIA_COLUMNS = new Set(["avatar_key", "avatar_hash", "avatar_url", "banner_key", "banner_hash"]);
-const OPTIONAL_PROFILE_COLUMNS = new Set(["banner_color"]);
+const OPTIONAL_PROFILE_COLUMNS = new Set(["banner_color", "profile_theme_primary_color", "profile_theme_accent_color"]);
 const USER_PROFILE_SELECT_COLUMNS =
-  "id,username,display_name,email,firebase_uid,about,banner_color,avatar_key,avatar_hash,avatar_url,banner_key,banner_hash";
+  "id,username,display_name,email,firebase_uid,about,banner_color,profile_theme_primary_color,profile_theme_accent_color,avatar_key,avatar_hash,avatar_url,banner_key,banner_hash";
 const USER_PROFILE_SELECT_COLUMNS_WITHOUT_AVATAR_URL =
-  "id,username,display_name,email,firebase_uid,about,banner_color,avatar_key,avatar_hash,banner_key,banner_hash";
+  "id,username,display_name,email,firebase_uid,about,banner_color,profile_theme_primary_color,profile_theme_accent_color,avatar_key,avatar_hash,banner_key,banner_hash";
 const USER_PROFILE_SELECT_COLUMNS_FALLBACK = "id,username,display_name,email,firebase_uid,about";
 const BLOCKED_USERS_SELECT_COLUMNS = "id,username,display_name,avatar_key,avatar_hash,avatar_url";
 const BLOCKED_USERS_SELECT_COLUMNS_FALLBACK = "id,username,display_name,avatar_key,avatar_hash";
 const SIDEBAR_IDENTITY_CACHE_PREFIX = "messly:sidebar-identity:";
 const SIDEBAR_RESOLVED_MEDIA_CACHE_PREFIX = "messly:sidebar-media:";
 const AUDIO_SETTINGS_STORAGE_KEY_PREFIX = "messly:audio-settings:";
+const PROFILE_PLUS_THEME_STORAGE_KEY_PREFIX = "messly:profile-plus-theme:";
+const PROFILE_PLUS_THEME_UPDATED_EVENT = "messly:profile-plus-theme-updated";
 const DEFAULT_PUSH_TO_TALK_BIND = "V";
+const APP_RELEASE_CHANNEL = "stable";
+const DEFAULT_PLUS_PROFILE_PRIMARY_COLOR = "#5D4CF4";
+const DEFAULT_PLUS_PROFILE_ACCENT_COLOR = "#8B2BE2";
 const DEFAULT_WINDOWS_BEHAVIOR_SETTINGS: WindowsBehaviorSettings = {
   startMinimized: true,
   closeToTray: true,
   launchAtStartup: true,
 };
+const SETTINGS_SIDEBAR_ITEMS: ReadonlyArray<{
+  key: SettingsSection;
+  label: string;
+  icon: string;
+}> = [
+  { key: "account", label: "Minha conta", icon: "badge" },
+  { key: "profile", label: "Editar perfil", icon: "person" },
+  { key: "social", label: "Conteudo social", icon: "groups" },
+  { key: "audio", label: "Audio", icon: "graphic_eq" },
+  { key: "windows", label: "Windows", icon: "desktop_windows" },
+];
+
+const ACCOUNT_DELETE_CONFIRM_TEXT = "EXCLUIR";
+const ACCOUNT_DEACTIVATE_CONFIRM_TEXT = "DESATIVAR";
 
 interface CachedSidebarIdentityFallback {
   displayName: string;
@@ -139,6 +176,12 @@ interface PersistedAudioSettings {
   pushToTalkBind: string;
 }
 
+interface PersistedProfilePlusThemeSettings {
+  v: 1;
+  primary: string;
+  accent: string;
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
@@ -149,6 +192,71 @@ function buildAudioSettingsStorageKey(userUid: string | null | undefined): strin
     return `${AUDIO_SETTINGS_STORAGE_KEY_PREFIX}guest`;
   }
   return `${AUDIO_SETTINGS_STORAGE_KEY_PREFIX}${normalizedUid}`;
+}
+
+function buildProfilePlusThemeStorageKey(userUid: string | null | undefined): string {
+  const normalizedUid = String(userUid ?? "").trim();
+  if (!normalizedUid) {
+    return `${PROFILE_PLUS_THEME_STORAGE_KEY_PREFIX}guest`;
+  }
+  return `${PROFILE_PLUS_THEME_STORAGE_KEY_PREFIX}${normalizedUid}`;
+}
+
+function readProfilePlusThemeSettings(userUid: string | null | undefined): {
+  primary: string;
+  accent: string;
+} {
+  if (typeof window === "undefined") {
+    return {
+      primary: DEFAULT_PLUS_PROFILE_PRIMARY_COLOR,
+      accent: DEFAULT_PLUS_PROFILE_ACCENT_COLOR,
+    };
+  }
+
+  try {
+    const raw = window.localStorage.getItem(buildProfilePlusThemeStorageKey(userUid));
+    if (!raw) {
+      return {
+        primary: DEFAULT_PLUS_PROFILE_PRIMARY_COLOR,
+        accent: DEFAULT_PLUS_PROFILE_ACCENT_COLOR,
+      };
+    }
+
+    const parsed = JSON.parse(raw) as Partial<PersistedProfilePlusThemeSettings> | null;
+    const primary = normalizeBannerColor(parsed?.primary) ?? DEFAULT_PLUS_PROFILE_PRIMARY_COLOR;
+    const accent = normalizeBannerColor(parsed?.accent) ?? DEFAULT_PLUS_PROFILE_ACCENT_COLOR;
+    return { primary, accent };
+  } catch {
+    return {
+      primary: DEFAULT_PLUS_PROFILE_PRIMARY_COLOR,
+      accent: DEFAULT_PLUS_PROFILE_ACCENT_COLOR,
+    };
+  }
+}
+
+function writeProfilePlusThemeSettings(
+  userUid: string | null | undefined,
+  payload: {
+    primary: string;
+    accent: string;
+  },
+): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    const primary = normalizeBannerColor(payload.primary) ?? DEFAULT_PLUS_PROFILE_PRIMARY_COLOR;
+    const accent = normalizeBannerColor(payload.accent) ?? DEFAULT_PLUS_PROFILE_ACCENT_COLOR;
+    const serialized: PersistedProfilePlusThemeSettings = {
+      v: 1,
+      primary,
+      accent,
+    };
+    window.localStorage.setItem(buildProfilePlusThemeStorageKey(userUid), JSON.stringify(serialized));
+  } catch {
+    // ignore storage failures
+  }
 }
 
 function formatDeviceOptionLabel(rawLabel: string | null | undefined, fallback: string): string {
@@ -321,6 +429,44 @@ function getErrorMessage(error: unknown): string {
   }
 
   return "Nao foi possivel concluir o upload agora.";
+}
+
+function getAccountActionErrorMessage(error: unknown): string {
+  const firebaseCode =
+    typeof error === "object" && error !== null && "code" in error
+      ? String((error as { code?: string }).code ?? "").trim()
+      : "";
+
+  switch (firebaseCode) {
+    case "auth/network-request-failed":
+      return "Sem internet. Verifique sua conexao e tente novamente.";
+    case "auth/too-many-requests":
+      return "Muitas tentativas. Aguarde um pouco e tente novamente.";
+    case "auth/invalid-credential":
+    case "auth/wrong-password":
+      return "Senha atual incorreta.";
+    case "auth/invalid-email":
+      return "Digite um email valido.";
+    case "auth/email-already-in-use":
+      return "Esse email ja esta em uso.";
+    case "auth/requires-recent-login":
+      return "Entre novamente para concluir essa alteracao de seguranca.";
+    case "auth/weak-password":
+      return "A nova senha e muito fraca. Use uma senha mais forte.";
+    case "auth/user-mismatch":
+      return "Confirme o email atual corretamente.";
+    default:
+      break;
+  }
+
+  if (typeof error === "object" && error !== null && "message" in error) {
+    const message = String((error as { message?: string }).message ?? "").trim();
+    if (message) {
+      return message;
+    }
+  }
+
+  return "Nao foi possivel concluir esta acao agora.";
 }
 
 function getMissingUsersColumn(error: unknown): string | null {
@@ -578,7 +724,7 @@ async function updateUserProfileWithSchemaFallback(
 
 export default function AppSettingsView({ onClose, currentUserId = null }: AppSettingsViewProps) {
   const { user } = useAuthSession();
-  const [activeSection, setActiveSection] = useState<SettingsSection>("profile");
+  const [activeSection, setActiveSection] = useState<SettingsSection>("account");
   const [dbUserId, setDbUserId] = useState<string | null>(null);
   const [displayName, setDisplayName] = useState("Nome");
   const [savedDisplayName, setSavedDisplayName] = useState("Nome");
@@ -587,6 +733,10 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
   const [savedAbout, setSavedAbout] = useState("");
   const [bannerColor, setBannerColor] = useState<string | null>(null);
   const [savedBannerColor, setSavedBannerColor] = useState<string | null>(null);
+  const [profileThemePrimaryColor, setProfileThemePrimaryColor] = useState<string>(DEFAULT_PLUS_PROFILE_PRIMARY_COLOR);
+  const [savedProfileThemePrimaryColor, setSavedProfileThemePrimaryColor] = useState<string>(DEFAULT_PLUS_PROFILE_PRIMARY_COLOR);
+  const [profileThemeAccentColor, setProfileThemeAccentColor] = useState<string>(DEFAULT_PLUS_PROFILE_ACCENT_COLOR);
+  const [savedProfileThemeAccentColor, setSavedProfileThemeAccentColor] = useState<string>(DEFAULT_PLUS_PROFILE_ACCENT_COLOR);
   const [bannerColorInput, setBannerColorInput] = useState(getBannerColorInputValue(null));
   const [bannerColorHue, setBannerColorHue] = useState(0);
   const [bannerColorSaturation, setBannerColorSaturation] = useState(0);
@@ -600,6 +750,24 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
   const [avatarSrc, setAvatarSrc] = useState<string>("");
   const [bannerSrc, setBannerSrc] = useState<string>(getDefaultBannerUrl);
   const [isProfileIdentityLoading, setIsProfileIdentityLoading] = useState(true);
+  const [accountModalKind, setAccountModalKind] = useState<AccountModalKind | null>(null);
+  const [accountActionFeedback, setAccountActionFeedback] = useState<UploadFeedbackState | null>(null);
+  const [isAccountActionPending, setIsAccountActionPending] = useState(false);
+  const [accountEmailModalStep, setAccountEmailModalStep] = useState<AccountEmailModalStep>("verifyCurrent");
+  const [accountCurrentEmailInput, setAccountCurrentEmailInput] = useState("");
+  const [accountCurrentPasswordInput, setAccountCurrentPasswordInput] = useState("");
+  const [accountNewEmailInput, setAccountNewEmailInput] = useState("");
+  const [accountEmailModalFeedback, setAccountEmailModalFeedback] = useState<UploadFeedbackState | null>(null);
+  const [accountPasswordCurrentInput, setAccountPasswordCurrentInput] = useState("");
+  const [accountPasswordNewInput, setAccountPasswordNewInput] = useState("");
+  const [accountPasswordConfirmInput, setAccountPasswordConfirmInput] = useState("");
+  const [accountPasswordModalFeedback, setAccountPasswordModalFeedback] = useState<UploadFeedbackState | null>(null);
+  const [accountDeactivatePasswordInput, setAccountDeactivatePasswordInput] = useState("");
+  const [accountDeactivateConfirmInput, setAccountDeactivateConfirmInput] = useState("");
+  const [accountDeactivateModalFeedback, setAccountDeactivateModalFeedback] = useState<UploadFeedbackState | null>(null);
+  const [accountDeletePasswordInput, setAccountDeletePasswordInput] = useState("");
+  const [accountDeleteConfirmInput, setAccountDeleteConfirmInput] = useState("");
+  const [accountDeleteModalFeedback, setAccountDeleteModalFeedback] = useState<UploadFeedbackState | null>(null);
   const [isAvatarUploading, setIsAvatarUploading] = useState(false);
   const [isBannerUploading, setIsBannerUploading] = useState(false);
   const [avatarFeedback, setAvatarFeedback] = useState<UploadFeedbackState | null>(null);
@@ -659,6 +827,14 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
   const normalizedInputGain = clamp(Math.round(inputGain), 0, 100);
   const displayedMicSensitivity = autoMicSensitivity ? -40 : manualMicSensitivity;
   const audioSettingsStorageKey = useMemo(() => buildAudioSettingsStorageKey(user?.uid ?? null), [user?.uid]);
+  const normalizedProfileThemePrimaryColor = useMemo(
+    () => normalizeBannerColor(profileThemePrimaryColor) ?? DEFAULT_PLUS_PROFILE_PRIMARY_COLOR,
+    [profileThemePrimaryColor],
+  );
+  const normalizedProfileThemeAccentColor = useMemo(
+    () => normalizeBannerColor(profileThemeAccentColor) ?? DEFAULT_PLUS_PROFILE_ACCENT_COLOR,
+    [profileThemeAccentColor],
+  );
   const hasBannerMedia = useMemo(
     () =>
       Boolean(
@@ -674,6 +850,16 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
     isWindowsDesktopRuntime &&
     typeof window.electronAPI?.getWindowsSettings === "function" &&
     typeof window.electronAPI?.updateWindowsSettings === "function";
+  const settingsVersion = String(appPackage.version ?? "0.0.0").trim() || "0.0.0";
+  const runtimePlatformLabel = isDesktopRuntime
+    ? `${window.electronAPI?.platform ?? "desktop"}${window.electronAPI?.arch ? ` ${window.electronAPI.arch}` : ""}`
+    : "web";
+  const runtimeEngineLabel =
+    isDesktopRuntime && window.electronAPI?.versions?.electron
+      ? `electron ${window.electronAPI.versions.electron}`
+      : "navegador";
+  const settingsSidebarVersionPrimary = `${APP_RELEASE_CHANNEL} v${settingsVersion}`;
+  const settingsSidebarVersionSecondary = `${runtimeEngineLabel} · ${runtimePlatformLabel}`;
 
   const setTemporaryPreviewUrl = (kind: ProfileMediaKind, nextUrl: string): void => {
     if (kind === "avatar") {
@@ -1147,6 +1333,14 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
   );
 
   useEffect(() => {
+    const stored = readProfilePlusThemeSettings(user?.uid ?? null);
+    setProfileThemePrimaryColor(stored.primary);
+    setSavedProfileThemePrimaryColor(stored.primary);
+    setProfileThemeAccentColor(stored.accent);
+    setSavedProfileThemeAccentColor(stored.accent);
+  }, [user?.uid]);
+
+  useEffect(() => {
     const firebaseUid = user?.uid;
     const normalizedCurrentUserId = String(currentUserId ?? "").trim();
     if (!firebaseUid && !normalizedCurrentUserId) {
@@ -1293,6 +1487,16 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
         "Nome";
       const resolvedAbout = (row.about ?? "").slice(0, ABOUT_MAX_LENGTH);
       const resolvedBannerColor = normalizeBannerColor(row.banner_color) ?? null;
+      const rowHasProfileThemePrimaryColor = Object.prototype.hasOwnProperty.call(row, "profile_theme_primary_color");
+      const rowHasProfileThemeAccentColor = Object.prototype.hasOwnProperty.call(row, "profile_theme_accent_color");
+      const resolvedProfileThemePrimaryColor =
+        normalizeBannerColor(row.profile_theme_primary_color) ?? DEFAULT_PLUS_PROFILE_PRIMARY_COLOR;
+      const resolvedProfileThemeAccentColor =
+        normalizeBannerColor(row.profile_theme_accent_color) ?? DEFAULT_PLUS_PROFILE_ACCENT_COLOR;
+      const fallbackProfileThemePrimaryColor =
+        normalizeBannerColor(savedProfileThemePrimaryColor) ?? DEFAULT_PLUS_PROFILE_PRIMARY_COLOR;
+      const fallbackProfileThemeAccentColor =
+        normalizeBannerColor(savedProfileThemeAccentColor) ?? DEFAULT_PLUS_PROFILE_ACCENT_COLOR;
       setDisplayName(resolvedDisplayName);
       setSavedDisplayName(resolvedDisplayName);
       setUsername(resolvedUsername);
@@ -1301,6 +1505,24 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
       setBannerColor(resolvedBannerColor);
       setSavedBannerColor(resolvedBannerColor);
       setBannerColorInput(getBannerColorInputValue(resolvedBannerColor));
+      if (rowHasProfileThemePrimaryColor) {
+        setProfileThemePrimaryColor(resolvedProfileThemePrimaryColor);
+        setSavedProfileThemePrimaryColor(resolvedProfileThemePrimaryColor);
+      }
+      if (rowHasProfileThemeAccentColor) {
+        setProfileThemeAccentColor(resolvedProfileThemeAccentColor);
+        setSavedProfileThemeAccentColor(resolvedProfileThemeAccentColor);
+      }
+      if (rowHasProfileThemePrimaryColor || rowHasProfileThemeAccentColor) {
+        writeProfilePlusThemeSettings(user?.uid ?? null, {
+          primary: rowHasProfileThemePrimaryColor
+            ? resolvedProfileThemePrimaryColor
+            : fallbackProfileThemePrimaryColor,
+          accent: rowHasProfileThemeAccentColor
+            ? resolvedProfileThemeAccentColor
+            : fallbackProfileThemeAccentColor,
+        });
+      }
       setAvatarUrl((row.avatar_url ?? "").trim() || null);
       setAvatarKey((row.avatar_key ?? "").trim() || null);
       setAvatarHash((row.avatar_hash ?? "").trim() || null);
@@ -1529,8 +1751,23 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
     () =>
       displayName.trim() !== savedDisplayName.trim() ||
       about !== savedAbout ||
-      normalizeBannerColor(bannerColor) !== normalizeBannerColor(savedBannerColor),
-    [about, bannerColor, displayName, savedAbout, savedBannerColor, savedDisplayName],
+      normalizeBannerColor(bannerColor) !== normalizeBannerColor(savedBannerColor) ||
+      normalizedProfileThemePrimaryColor !==
+        (normalizeBannerColor(savedProfileThemePrimaryColor) ?? DEFAULT_PLUS_PROFILE_PRIMARY_COLOR) ||
+      normalizedProfileThemeAccentColor !==
+        (normalizeBannerColor(savedProfileThemeAccentColor) ?? DEFAULT_PLUS_PROFILE_ACCENT_COLOR),
+    [
+      about,
+      bannerColor,
+      displayName,
+      normalizedProfileThemeAccentColor,
+      normalizedProfileThemePrimaryColor,
+      savedAbout,
+      savedBannerColor,
+      savedDisplayName,
+      savedProfileThemeAccentColor,
+      savedProfileThemePrimaryColor,
+    ],
   );
   const aboutCount = about.length;
   const isEyeDropperSupported = typeof window !== "undefined" && "EyeDropper" in window;
@@ -1544,6 +1781,22 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
     setAbout(savedAbout);
     setBannerColor(savedBannerColor);
     setBannerColorInput(getBannerColorInputValue(savedBannerColor));
+    setProfileThemePrimaryColor(normalizeBannerColor(savedProfileThemePrimaryColor) ?? DEFAULT_PLUS_PROFILE_PRIMARY_COLOR);
+    setProfileThemeAccentColor(normalizeBannerColor(savedProfileThemeAccentColor) ?? DEFAULT_PLUS_PROFILE_ACCENT_COLOR);
+    setProfileFeedback(null);
+  };
+
+  const handleProfileThemeColorChange = (slot: "primary" | "accent", rawValue: string): void => {
+    const normalized = normalizeBannerColor(rawValue);
+    if (!normalized) {
+      return;
+    }
+
+    if (slot === "primary") {
+      setProfileThemePrimaryColor(normalized);
+    } else {
+      setProfileThemeAccentColor(normalized);
+    }
     setProfileFeedback(null);
   };
 
@@ -1736,6 +1989,8 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
     const nextDisplayName = displayName.trim() || safeUsername || "Nome";
     const nextAbout = about.slice(0, ABOUT_MAX_LENGTH);
     const nextBannerColor = normalizeBannerColor(bannerColor) ?? null;
+    const nextProfileThemePrimaryColor = normalizeBannerColor(profileThemePrimaryColor) ?? DEFAULT_PLUS_PROFILE_PRIMARY_COLOR;
+    const nextProfileThemeAccentColor = normalizeBannerColor(profileThemeAccentColor) ?? DEFAULT_PLUS_PROFILE_ACCENT_COLOR;
 
     setIsSavingProfile(true);
     setProfileFeedback(null);
@@ -1744,8 +1999,18 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
         display_name: nextDisplayName,
         about: nextAbout || null,
         banner_color: nextBannerColor,
+        profile_theme_primary_color: nextProfileThemePrimaryColor,
+        profile_theme_accent_color: nextProfileThemeAccentColor,
       });
       const didPersistBannerColor = Object.prototype.hasOwnProperty.call(persistedUpdates, "banner_color");
+      const didPersistProfileThemePrimaryColor = Object.prototype.hasOwnProperty.call(
+        persistedUpdates,
+        "profile_theme_primary_color",
+      );
+      const didPersistProfileThemeAccentColor = Object.prototype.hasOwnProperty.call(
+        persistedUpdates,
+        "profile_theme_accent_color",
+      );
       const effectiveBannerColor = didPersistBannerColor ? nextBannerColor : savedBannerColor;
 
       setDisplayName(nextDisplayName);
@@ -1755,6 +2020,25 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
       setBannerColor(effectiveBannerColor);
       setSavedBannerColor(effectiveBannerColor);
       setBannerColorInput(getBannerColorInputValue(effectiveBannerColor));
+      setProfileThemePrimaryColor(nextProfileThemePrimaryColor);
+      setSavedProfileThemePrimaryColor(nextProfileThemePrimaryColor);
+      setProfileThemeAccentColor(nextProfileThemeAccentColor);
+      setSavedProfileThemeAccentColor(nextProfileThemeAccentColor);
+      writeProfilePlusThemeSettings(user?.uid ?? null, {
+        primary: nextProfileThemePrimaryColor,
+        accent: nextProfileThemeAccentColor,
+      });
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(
+          new CustomEvent(PROFILE_PLUS_THEME_UPDATED_EVENT, {
+            detail: {
+              userUid: user?.uid ?? null,
+              primary: nextProfileThemePrimaryColor,
+              accent: nextProfileThemeAccentColor,
+            },
+          }),
+        );
+      }
       const profileUpdateDetail: ProfileUpdatedDetail = {
         userId: dbUserId,
         display_name: nextDisplayName,
@@ -1763,6 +2047,12 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
       };
       if (didPersistBannerColor) {
         profileUpdateDetail.banner_color = nextBannerColor;
+      }
+      if (didPersistProfileThemePrimaryColor) {
+        profileUpdateDetail.profile_theme_primary_color = nextProfileThemePrimaryColor;
+      }
+      if (didPersistProfileThemeAccentColor) {
+        profileUpdateDetail.profile_theme_accent_color = nextProfileThemeAccentColor;
       }
       publishProfileUpdated(profileUpdateDetail);
 
@@ -1840,6 +2130,7 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
     avatar_key?: string | null;
     avatar_hash?: string | null;
     avatar_url?: string | null;
+    banner_color?: string | null;
     banner_key?: string | null;
     banner_hash?: string | null;
   }): void => {
@@ -1917,6 +2208,7 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
         avatar_key?: string | null;
         avatar_hash?: string | null;
         avatar_url?: string | null;
+        banner_color?: string | null;
         banner_key?: string | null;
         banner_hash?: string | null;
       } = {
@@ -1937,6 +2229,9 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
       }
       if (Object.prototype.hasOwnProperty.call(appliedUpdates, "banner_hash")) {
         detail.banner_hash = uploaded.hash;
+      }
+      if (kind === "banner") {
+        detail.banner_color = normalizeBannerColor(savedBannerColor) ?? null;
       }
 
       publishProfileMediaChange(detail);
@@ -2019,6 +2314,7 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
         avatar_key?: string | null;
         avatar_hash?: string | null;
         avatar_url?: string | null;
+        banner_color?: string | null;
         banner_key?: string | null;
         banner_hash?: string | null;
       } = { userId: dbUserId };
@@ -2037,6 +2333,9 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
       }
       if (Object.prototype.hasOwnProperty.call(appliedUpdates, "banner_hash")) {
         detail.banner_hash = null;
+      }
+      if (kind === "banner") {
+        detail.banner_color = normalizeBannerColor(savedBannerColor) ?? null;
       }
 
       publishProfileMediaChange(detail);
@@ -2101,6 +2400,270 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
     }
   };
 
+  const accountEmail = useMemo(() => normalizeEmail(user?.email ?? ""), [user?.email]);
+  const accountEmailLabel = accountEmail || "Sem email";
+  const accountEmailStatusLabel = user?.emailVerified ? "Email verificado" : "Verificacao pendente";
+  const accountAvatarPreviewSrc = avatarSrc || getNameAvatarUrl(safeDisplayName || safeUsername || "U");
+  const accountBannerHasImage = bannerSrc.trim().length > 0 && bannerSrc !== getDefaultBannerUrl();
+  const accountBannerStyle = useMemo(() => {
+    if (accountBannerHasImage) {
+      return {
+        backgroundImage: `url("${bannerSrc}")`,
+      };
+    }
+
+    const baseColor = safeBannerColor ?? DEFAULT_BANNER_COLOR;
+    return {
+      background: `linear-gradient(180deg, ${baseColor} 0%, rgba(17, 20, 28, 0.94) 100%)`,
+    };
+  }, [accountBannerHasImage, bannerSrc, safeBannerColor]);
+
+  const resetAccountModalState = useCallback(() => {
+    setAccountActionFeedback(null);
+    setIsAccountActionPending(false);
+    setAccountEmailModalStep("verifyCurrent");
+    setAccountCurrentEmailInput(accountEmail);
+    setAccountCurrentPasswordInput("");
+    setAccountNewEmailInput("");
+    setAccountEmailModalFeedback(null);
+    setAccountPasswordCurrentInput("");
+    setAccountPasswordNewInput("");
+    setAccountPasswordConfirmInput("");
+    setAccountPasswordModalFeedback(null);
+    setAccountDeactivatePasswordInput("");
+    setAccountDeactivateConfirmInput("");
+    setAccountDeactivateModalFeedback(null);
+    setAccountDeletePasswordInput("");
+    setAccountDeleteConfirmInput("");
+    setAccountDeleteModalFeedback(null);
+  }, [accountEmail]);
+
+  const openAccountModal = useCallback(
+    (kind: AccountModalKind) => {
+      resetAccountModalState();
+      setAccountModalKind(kind);
+    },
+    [resetAccountModalState],
+  );
+
+  const closeAccountModal = useCallback(() => {
+    setAccountModalKind(null);
+    resetAccountModalState();
+  }, [resetAccountModalState]);
+
+  const reauthenticateCurrentEmailSession = useCallback(async (password: string) => {
+    const currentAuthUser = firebaseAuth.currentUser;
+    const currentEmail = normalizeEmail(currentAuthUser?.email ?? "");
+    if (!currentAuthUser || !currentEmail) {
+      throw new Error("Sua conta atual nao possui login por email disponivel.");
+    }
+
+    const credential = EmailAuthProvider.credential(currentEmail, password);
+    await reauthenticateWithCredential(currentAuthUser, credential);
+    return currentAuthUser;
+  }, []);
+
+  const handleAccountEmailVerifyCurrentStep = useCallback(async () => {
+    const currentTypedEmail = normalizeEmail(accountCurrentEmailInput);
+    const currentSessionEmail = normalizeEmail(firebaseAuth.currentUser?.email ?? user?.email ?? "");
+
+    if (!currentSessionEmail) {
+      setAccountEmailModalFeedback({ tone: "error", message: "Nao foi possivel identificar o email atual da conta." });
+      return;
+    }
+
+    if (currentTypedEmail !== currentSessionEmail) {
+      setAccountEmailModalFeedback({ tone: "error", message: "Confirme o email atual exatamente como ele esta na conta." });
+      return;
+    }
+
+    if (!accountCurrentPasswordInput.trim()) {
+      setAccountEmailModalFeedback({ tone: "error", message: "Digite sua senha atual para continuar." });
+      return;
+    }
+
+    setIsAccountActionPending(true);
+    setAccountEmailModalFeedback(null);
+
+    try {
+      await reauthenticateCurrentEmailSession(accountCurrentPasswordInput);
+      setAccountCurrentPasswordInput("");
+      setAccountEmailModalStep("verifyNew");
+      setAccountEmailModalFeedback({
+        tone: "success",
+        message: "Email atual confirmado. Agora informe o novo email para enviar a verificacao.",
+      });
+    } catch (error) {
+      console.error("[account:change-email:verify-current]", error);
+      setAccountEmailModalFeedback({ tone: "error", message: getAccountActionErrorMessage(error) });
+    } finally {
+      setIsAccountActionPending(false);
+    }
+  }, [accountCurrentEmailInput, accountCurrentPasswordInput, reauthenticateCurrentEmailSession, user?.email]);
+
+  const handleAccountEmailSendVerification = useCallback(async () => {
+    const currentAuthUser = firebaseAuth.currentUser;
+    const currentSessionEmail = normalizeEmail(currentAuthUser?.email ?? user?.email ?? "");
+    const nextEmail = normalizeEmail(accountNewEmailInput);
+
+    if (!currentAuthUser || !currentSessionEmail) {
+      setAccountEmailModalFeedback({ tone: "error", message: "Sessao invalida. Entre novamente para alterar o email." });
+      return;
+    }
+
+    if (!nextEmail) {
+      setAccountEmailModalFeedback({ tone: "error", message: "Digite o novo email." });
+      return;
+    }
+
+    if (nextEmail === currentSessionEmail) {
+      setAccountEmailModalFeedback({ tone: "error", message: "O novo email precisa ser diferente do atual." });
+      return;
+    }
+
+    setIsAccountActionPending(true);
+    setAccountEmailModalFeedback(null);
+
+    try {
+      await verifyBeforeUpdateEmail(currentAuthUser, nextEmail);
+      setAccountEmailModalFeedback({
+        tone: "success",
+        message: `Enviamos um link de confirmacao para ${nextEmail}. Confirme no novo email para concluir a troca.`,
+      });
+      setAccountActionFeedback({
+        tone: "success",
+        message: "Solicitacao enviada. Verifique o novo email para concluir a alteracao.",
+      });
+    } catch (error) {
+      console.error("[account:change-email:verify-new]", error);
+      setAccountEmailModalFeedback({ tone: "error", message: getAccountActionErrorMessage(error) });
+    } finally {
+      setIsAccountActionPending(false);
+    }
+  }, [accountNewEmailInput, user?.email]);
+
+  const handleAccountPasswordUpdate = useCallback(async () => {
+    if (!accountPasswordCurrentInput.trim()) {
+      setAccountPasswordModalFeedback({ tone: "error", message: "Digite sua senha atual." });
+      return;
+    }
+
+    if (!accountPasswordNewInput) {
+      setAccountPasswordModalFeedback({ tone: "error", message: "Digite a nova senha." });
+      return;
+    }
+
+    if (accountPasswordNewInput.length < 6) {
+      setAccountPasswordModalFeedback({ tone: "error", message: "A nova senha deve ter pelo menos 6 caracteres." });
+      return;
+    }
+
+    if (accountPasswordNewInput !== accountPasswordConfirmInput) {
+      setAccountPasswordModalFeedback({ tone: "error", message: "A confirmacao da nova senha nao confere." });
+      return;
+    }
+
+    setIsAccountActionPending(true);
+    setAccountPasswordModalFeedback(null);
+
+    try {
+      const currentAuthUser = await reauthenticateCurrentEmailSession(accountPasswordCurrentInput);
+      await updatePassword(currentAuthUser, accountPasswordNewInput);
+      setAccountActionFeedback({ tone: "success", message: "Senha atualizada com sucesso." });
+      setAccountPasswordModalFeedback({ tone: "success", message: "Senha atualizada com sucesso." });
+      window.setTimeout(() => {
+        setAccountModalKind((current) => (current === "password" ? null : current));
+      }, 450);
+    } catch (error) {
+      console.error("[account:change-password]", error);
+      setAccountPasswordModalFeedback({ tone: "error", message: getAccountActionErrorMessage(error) });
+    } finally {
+      setIsAccountActionPending(false);
+    }
+  }, [
+    accountPasswordConfirmInput,
+    accountPasswordCurrentInput,
+    accountPasswordNewInput,
+    reauthenticateCurrentEmailSession,
+  ]);
+
+  const handleAccountDeactivate = useCallback(async () => {
+    if (!accountDeactivatePasswordInput.trim()) {
+      setAccountDeactivateModalFeedback({ tone: "error", message: "Digite sua senha atual para confirmar." });
+      return;
+    }
+
+    if (accountDeactivateConfirmInput.trim().toUpperCase() !== ACCOUNT_DEACTIVATE_CONFIRM_TEXT) {
+      setAccountDeactivateModalFeedback({
+        tone: "error",
+        message: `Digite ${ACCOUNT_DEACTIVATE_CONFIRM_TEXT} para confirmar.`,
+      });
+      return;
+    }
+
+    setIsAccountActionPending(true);
+    setAccountDeactivateModalFeedback(null);
+
+    try {
+      await reauthenticateCurrentEmailSession(accountDeactivatePasswordInput);
+
+      if (dbUserId) {
+        const { error } = await supabase.from("users").update({ status: "disabled" }).eq("id", dbUserId);
+        if (error) {
+          console.error("[account:deactivate:db]", error);
+        }
+      }
+
+      setAccountActionFeedback({
+        tone: "success",
+        message: "Conta desativada nesta sessao. Voce sera desconectado agora.",
+      });
+      await signOut(firebaseAuth);
+    } catch (error) {
+      console.error("[account:deactivate]", error);
+      setAccountDeactivateModalFeedback({ tone: "error", message: getAccountActionErrorMessage(error) });
+    } finally {
+      setIsAccountActionPending(false);
+    }
+  }, [accountDeactivateConfirmInput, accountDeactivatePasswordInput, dbUserId, reauthenticateCurrentEmailSession]);
+
+  const handleAccountDelete = useCallback(async () => {
+    if (!accountDeletePasswordInput.trim()) {
+      setAccountDeleteModalFeedback({ tone: "error", message: "Digite sua senha atual para confirmar." });
+      return;
+    }
+
+    if (accountDeleteConfirmInput.trim().toUpperCase() !== ACCOUNT_DELETE_CONFIRM_TEXT) {
+      setAccountDeleteModalFeedback({
+        tone: "error",
+        message: `Digite ${ACCOUNT_DELETE_CONFIRM_TEXT} para confirmar.`,
+      });
+      return;
+    }
+
+    setIsAccountActionPending(true);
+    setAccountDeleteModalFeedback(null);
+
+    try {
+      const currentAuthUser = await reauthenticateCurrentEmailSession(accountDeletePasswordInput);
+
+      if (dbUserId) {
+        const { error } = await supabase.from("users").update({ status: "disabled" }).eq("id", dbUserId);
+        if (error) {
+          console.error("[account:delete:disable]", error);
+        }
+      }
+
+      await deleteUser(currentAuthUser);
+      setAccountActionFeedback({ tone: "success", message: "Conta excluida com sucesso." });
+    } catch (error) {
+      console.error("[account:delete]", error);
+      setAccountDeleteModalFeedback({ tone: "error", message: getAccountActionErrorMessage(error) });
+    } finally {
+      setIsAccountActionPending(false);
+    }
+  }, [accountDeleteConfirmInput, accountDeletePasswordInput, dbUserId, reauthenticateCurrentEmailSession]);
+
   const isImageEditorApplying =
     pendingImageEdit?.kind === "avatar"
       ? isAvatarUploading
@@ -2128,38 +2691,166 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
 
         <div className={styles.grid}>
           <aside className={styles.menu} aria-label="Categorias">
-            <button
-              className={`${styles.menuItem}${activeSection === "profile" ? ` ${styles.menuItemActive}` : ""}`}
-              type="button"
-              onClick={() => setActiveSection("profile")}
-            >
-              Editar perfil
-            </button>
-            <button
-              className={`${styles.menuItem}${activeSection === "social" ? ` ${styles.menuItemActive}` : ""}`}
-              type="button"
-              onClick={() => setActiveSection("social")}
-            >
-              Conteudo social
-            </button>
-            <button
-              className={`${styles.menuItem}${activeSection === "audio" ? ` ${styles.menuItemActive}` : ""}`}
-              type="button"
-              onClick={() => setActiveSection("audio")}
-            >
-              Audio
-            </button>
-            <button
-              className={`${styles.menuItem}${activeSection === "windows" ? ` ${styles.menuItemActive}` : ""}`}
-              type="button"
-              onClick={() => setActiveSection("windows")}
-            >
-              Windows
-            </button>
+            <div className={styles.menuList}>
+              {SETTINGS_SIDEBAR_ITEMS.map((item) => {
+                const isActive = activeSection === item.key;
+                return (
+                  <button
+                    key={item.key}
+                    className={`${styles.menuItem}${isActive ? ` ${styles.menuItemActive}` : ""}`}
+                    type="button"
+                    onClick={() => setActiveSection(item.key)}
+                  >
+                    <MaterialSymbolIcon
+                      className={styles.menuItemIcon}
+                      name={item.icon}
+                      size={17}
+                      filled={isActive}
+                    />
+                    <span className={styles.menuItemLabel}>{item.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className={styles.menuVersionBlock} aria-label={`Versao do aplicativo ${settingsVersion}`}>
+              <p className={styles.menuVersionPrimary}>{settingsSidebarVersionPrimary}</p>
+              <p className={styles.menuVersionSecondary}>{settingsSidebarVersionSecondary}</p>
+            </div>
           </aside>
 
           <div className={styles.panel}>
-            {activeSection === "profile" ? (
+            {activeSection === "account" ? (
+              <section className={styles.accountPanel} aria-label="Minha conta">
+                <header className={styles.editorHeader}>
+                  <h3 className={styles.editorTitle}>Minha conta</h3>
+                </header>
+
+                <div className={styles.accountContent}>
+                  <section className={styles.accountHeroCard} aria-label="Resumo da conta">
+                    <div className={styles.accountHeroBanner} style={accountBannerStyle}>
+                      <div className={styles.accountHeroBannerShade} />
+                    </div>
+
+                    <div className={styles.accountHeroBody}>
+                      <img
+                        className={styles.accountHeroAvatar}
+                        src={accountAvatarPreviewSrc}
+                        alt={`Avatar de ${safeDisplayName}`}
+                        loading="eager"
+                        onError={(event) => {
+                          event.currentTarget.onerror = null;
+                          event.currentTarget.src = getNameAvatarUrl(safeDisplayName || safeUsername || "U");
+                        }}
+                      />
+
+                      <div className={styles.accountHeroMeta}>
+                        <p className={styles.accountHeroName}>{safeDisplayName}</p>
+                        <p className={styles.accountHeroUsername}>@{safeUsername}</p>
+                        <div className={styles.accountHeroEmailRow}>
+                          <MaterialSymbolIcon name="mail" size={14} filled={false} />
+                          <span className={styles.accountHeroEmail}>{accountEmailLabel}</span>
+                          <span
+                            className={`${styles.accountHeroEmailBadge}${
+                              user?.emailVerified ? ` ${styles.accountHeroEmailBadgeVerified}` : ""
+                            }`}
+                          >
+                            {accountEmailStatusLabel}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className={styles.accountHeroActions}>
+                        <button
+                          type="button"
+                          className={styles.accountInlineAction}
+                          onClick={() => setActiveSection("profile")}
+                        >
+                          <MaterialSymbolIcon name="edit" size={15} filled={false} />
+                          <span>Editar perfil</span>
+                        </button>
+                      </div>
+                    </div>
+                  </section>
+
+                  <section className={styles.accountActionList} aria-label="Seguranca da conta">
+                    <article className={styles.accountActionRow}>
+                      <div className={styles.accountActionMeta}>
+                        <p className={styles.accountActionTitle}>Alterar email</p>
+                        <p className={styles.accountActionDescription}>
+                          Confirme o email atual e envie verificacao para o novo email.
+                        </p>
+                      </div>
+                      <button type="button" className={styles.accountActionButton} onClick={() => openAccountModal("email")}>
+                        Alterar email
+                      </button>
+                    </article>
+
+                    <article className={styles.accountActionRow}>
+                      <div className={styles.accountActionMeta}>
+                        <p className={styles.accountActionTitle}>Alterar senha</p>
+                        <p className={styles.accountActionDescription}>
+                          Atualize sua senha com confirmacao da senha atual.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        className={styles.accountActionButton}
+                        onClick={() => openAccountModal("password")}
+                      >
+                        Alterar senha
+                      </button>
+                    </article>
+
+                    <article className={styles.accountActionRow}>
+                      <div className={styles.accountActionMeta}>
+                        <p className={styles.accountActionTitle}>Desativar conta</p>
+                        <p className={styles.accountActionDescription}>
+                          Desconecta agora e marca a conta como desativada nesta sessao.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        className={`${styles.accountActionButton} ${styles.accountActionButtonWarn}`}
+                        onClick={() => openAccountModal("deactivate")}
+                      >
+                        Desativar
+                      </button>
+                    </article>
+
+                    <article className={styles.accountActionRow}>
+                      <div className={styles.accountActionMeta}>
+                        <p className={styles.accountActionTitle}>Excluir conta</p>
+                        <p className={styles.accountActionDescription}>
+                          Acao irreversivel. Remove o acesso da conta apos confirmacao.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        className={`${styles.accountActionButton} ${styles.accountActionButtonDanger}`}
+                        onClick={() => openAccountModal("delete")}
+                      >
+                        Excluir conta
+                      </button>
+                    </article>
+                  </section>
+
+                  {accountActionFeedback ? (
+                    <p
+                      className={`${styles.accountActionFeedback}${
+                        accountActionFeedback.tone === "error"
+                          ? ` ${styles.accountActionFeedbackError}`
+                          : ` ${styles.accountActionFeedbackSuccess}`
+                      }`}
+                      role="status"
+                      aria-live="polite"
+                    >
+                      {accountActionFeedback.message}
+                    </p>
+                  ) : null}
+                </div>
+              </section>
+            ) : activeSection === "profile" ? (
             <div
               className={`${styles.profileEditor}${hasUnsavedProfileChanges ? ` ${styles.profileEditorWithUnsaved}` : ""}`}
             >
@@ -2171,6 +2862,63 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
                 className={`${styles.editorContent}${hasUnsavedProfileChanges ? ` ${styles.editorContentWithUnsaved}` : ""}`}
               >
                 <form className={styles.form} onSubmit={(event) => event.preventDefault()}>
+                  <section className={`${styles.formSection} ${styles.plusProfileSection}`} aria-label="Tema de perfil Plus">
+                    <div className={styles.plusProfileHeader}>
+                      <div className={styles.plusProfileHeaderCopy}>
+                        <p className={styles.plusProfileEyebrow}>Experimente o Plus!</p>
+                        <p className={styles.plusProfileDescription}>Personalize as cores do seu perfil com tema primario e realce.</p>
+                      </div>
+                      <span className={styles.plusProfileBadge}>Plus</span>
+                    </div>
+
+                    <div className={styles.plusProfileThemeBlock}>
+                      <p className={styles.plusProfileThemeTitle}>Tema de perfil</p>
+                      <div className={styles.plusProfileThemeColors}>
+                        <label className={styles.plusProfileColorItem} htmlFor="profile-theme-primary-color">
+                          <span
+                            className={styles.plusProfileColorSwatch}
+                            style={{ background: normalizedProfileThemePrimaryColor }}
+                            aria-hidden="true"
+                          >
+                            <span className={styles.plusProfileColorSwatchIcon}>
+                              <MaterialSymbolIcon name="edit" size={14} filled={true} />
+                            </span>
+                          </span>
+                          <span className={styles.plusProfileColorLabel}>Primaria</span>
+                          <input
+                            id="profile-theme-primary-color"
+                            className={styles.plusProfileColorInput}
+                            type="color"
+                            value={normalizedProfileThemePrimaryColor}
+                            onChange={(event) => handleProfileThemeColorChange("primary", event.target.value)}
+                            aria-label="Cor primaria do perfil"
+                          />
+                        </label>
+
+                        <label className={styles.plusProfileColorItem} htmlFor="profile-theme-accent-color">
+                          <span
+                            className={styles.plusProfileColorSwatch}
+                            style={{ background: normalizedProfileThemeAccentColor }}
+                            aria-hidden="true"
+                          >
+                            <span className={styles.plusProfileColorSwatchIcon}>
+                              <MaterialSymbolIcon name="edit" size={14} filled={true} />
+                            </span>
+                          </span>
+                          <span className={styles.plusProfileColorLabel}>Realce</span>
+                          <input
+                            id="profile-theme-accent-color"
+                            className={styles.plusProfileColorInput}
+                            type="color"
+                            value={normalizedProfileThemeAccentColor}
+                            onChange={(event) => handleProfileThemeColorChange("accent", event.target.value)}
+                            aria-label="Cor de realce do perfil"
+                          />
+                        </label>
+                      </div>
+                    </div>
+                  </section>
+
                   <section className={styles.formSection}>
                     <label className={styles.fieldLabel} htmlFor="profile-display-name">
                       Nome exibido
@@ -2388,6 +3136,8 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
                       avatarSrc={avatarSrc}
                       bannerSrc={bannerSrc}
                       bannerColor={shouldSuppressPreviewBannerColor ? null : safeBannerColor}
+                      themePrimaryColor={normalizedProfileThemePrimaryColor}
+                      themeAccentColor={normalizedProfileThemeAccentColor}
                       displayName={safeDisplayName}
                       username={safeUsername}
                       aboutText={safeAbout}
@@ -2831,6 +3581,409 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
         onClose={() => setPendingImageEdit(null)}
         onApply={handleApplyEditedImage}
       />
+
+      <Modal
+        isOpen={accountModalKind === "email"}
+        title="Alterar email"
+        ariaLabel="Alterar email da conta"
+        onClose={closeAccountModal}
+        panelClassName={styles.accountModalPanel}
+        bodyClassName={styles.accountModalBody}
+        footer={
+          <div className={styles.accountModalFooter}>
+            <button
+              className={styles.accountModalButtonGhost}
+              type="button"
+              onClick={closeAccountModal}
+              disabled={isAccountActionPending}
+            >
+              Cancelar
+            </button>
+            {accountEmailModalStep === "verifyCurrent" ? (
+              <button
+                className={styles.accountModalButtonPrimary}
+                type="button"
+                onClick={() => {
+                  void handleAccountEmailVerifyCurrentStep();
+                }}
+                disabled={isAccountActionPending}
+              >
+                {isAccountActionPending ? "Verificando..." : "Verificar email atual"}
+              </button>
+            ) : (
+              <button
+                className={styles.accountModalButtonPrimary}
+                type="button"
+                onClick={() => {
+                  void handleAccountEmailSendVerification();
+                }}
+                disabled={isAccountActionPending}
+              >
+                {isAccountActionPending ? "Enviando..." : "Enviar verificacao"}
+              </button>
+            )}
+          </div>
+        }
+      >
+        <div className={styles.accountModalForm}>
+          <p className={styles.accountModalDescription}>
+            {accountEmailModalStep === "verifyCurrent"
+              ? "Primeiro confirme o email atual e sua senha. Depois enviamos a verificacao para o novo email."
+              : "Agora informe o novo email. Um link de verificacao sera enviado para concluir a troca."}
+          </p>
+
+          {accountEmailModalStep === "verifyCurrent" ? (
+            <>
+              <label className={styles.accountModalLabel} htmlFor="account-current-email-input">
+                Email atual
+              </label>
+              <input
+                id="account-current-email-input"
+                className={styles.accountModalInput}
+                type="email"
+                value={accountCurrentEmailInput}
+                onChange={(event) => setAccountCurrentEmailInput(event.target.value)}
+                placeholder={accountEmailLabel}
+                autoComplete="email"
+                disabled={isAccountActionPending}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    void handleAccountEmailVerifyCurrentStep();
+                  }
+                }}
+              />
+
+              <label className={styles.accountModalLabel} htmlFor="account-current-password-email-input">
+                Senha atual
+              </label>
+              <input
+                id="account-current-password-email-input"
+                className={styles.accountModalInput}
+                type="password"
+                value={accountCurrentPasswordInput}
+                onChange={(event) => setAccountCurrentPasswordInput(event.target.value)}
+                placeholder="Digite sua senha"
+                autoComplete="current-password"
+                disabled={isAccountActionPending}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    void handleAccountEmailVerifyCurrentStep();
+                  }
+                }}
+              />
+            </>
+          ) : (
+            <>
+              <div className={styles.accountModalStepBadge}>
+                <MaterialSymbolIcon name="check_circle" size={14} filled={true} />
+                <span>Email atual confirmado</span>
+              </div>
+
+              <label className={styles.accountModalLabel} htmlFor="account-new-email-input">
+                Novo email
+              </label>
+              <input
+                id="account-new-email-input"
+                className={styles.accountModalInput}
+                type="email"
+                value={accountNewEmailInput}
+                onChange={(event) => setAccountNewEmailInput(event.target.value)}
+                placeholder="novoemail@gmail.com"
+                autoComplete="email"
+                disabled={isAccountActionPending}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    void handleAccountEmailSendVerification();
+                  }
+                }}
+              />
+            </>
+          )}
+
+          {accountEmailModalFeedback ? (
+            <p
+              className={`${styles.accountModalFeedback}${
+                accountEmailModalFeedback.tone === "error"
+                  ? ` ${styles.accountModalFeedbackError}`
+                  : ` ${styles.accountModalFeedbackSuccess}`
+              }`}
+              role="status"
+              aria-live="polite"
+            >
+              {accountEmailModalFeedback.message}
+            </p>
+          ) : null}
+        </div>
+      </Modal>
+
+      <Modal
+        isOpen={accountModalKind === "password"}
+        title="Alterar senha"
+        ariaLabel="Alterar senha da conta"
+        onClose={closeAccountModal}
+        panelClassName={styles.accountModalPanel}
+        bodyClassName={styles.accountModalBody}
+        footer={
+          <div className={styles.accountModalFooter}>
+            <button
+              className={styles.accountModalButtonGhost}
+              type="button"
+              onClick={closeAccountModal}
+              disabled={isAccountActionPending}
+            >
+              Cancelar
+            </button>
+            <button
+              className={styles.accountModalButtonPrimary}
+              type="button"
+              onClick={() => {
+                void handleAccountPasswordUpdate();
+              }}
+              disabled={isAccountActionPending}
+            >
+              {isAccountActionPending ? "Salvando..." : "Salvar senha"}
+            </button>
+          </div>
+        }
+      >
+        <div className={styles.accountModalForm}>
+          <p className={styles.accountModalDescription}>
+            Confirme a senha atual e defina uma nova senha para a sua conta.
+          </p>
+
+          <label className={styles.accountModalLabel} htmlFor="account-password-current">
+            Senha atual
+          </label>
+          <input
+            id="account-password-current"
+            className={styles.accountModalInput}
+            type="password"
+            value={accountPasswordCurrentInput}
+            onChange={(event) => setAccountPasswordCurrentInput(event.target.value)}
+            autoComplete="current-password"
+            disabled={isAccountActionPending}
+          />
+
+          <label className={styles.accountModalLabel} htmlFor="account-password-new">
+            Nova senha
+          </label>
+          <input
+            id="account-password-new"
+            className={styles.accountModalInput}
+            type="password"
+            value={accountPasswordNewInput}
+            onChange={(event) => setAccountPasswordNewInput(event.target.value)}
+            autoComplete="new-password"
+            disabled={isAccountActionPending}
+          />
+
+          <label className={styles.accountModalLabel} htmlFor="account-password-confirm">
+            Confirmar nova senha
+          </label>
+          <input
+            id="account-password-confirm"
+            className={styles.accountModalInput}
+            type="password"
+            value={accountPasswordConfirmInput}
+            onChange={(event) => setAccountPasswordConfirmInput(event.target.value)}
+            autoComplete="new-password"
+            disabled={isAccountActionPending}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                void handleAccountPasswordUpdate();
+              }
+            }}
+          />
+
+          {accountPasswordModalFeedback ? (
+            <p
+              className={`${styles.accountModalFeedback}${
+                accountPasswordModalFeedback.tone === "error"
+                  ? ` ${styles.accountModalFeedbackError}`
+                  : ` ${styles.accountModalFeedbackSuccess}`
+              }`}
+              role="status"
+              aria-live="polite"
+            >
+              {accountPasswordModalFeedback.message}
+            </p>
+          ) : null}
+        </div>
+      </Modal>
+
+      <Modal
+        isOpen={accountModalKind === "deactivate"}
+        title="Desativar conta"
+        ariaLabel="Desativar conta"
+        onClose={closeAccountModal}
+        panelClassName={styles.accountModalPanel}
+        bodyClassName={styles.accountModalBody}
+        footer={
+          <div className={styles.accountModalFooter}>
+            <button
+              className={styles.accountModalButtonGhost}
+              type="button"
+              onClick={closeAccountModal}
+              disabled={isAccountActionPending}
+            >
+              Cancelar
+            </button>
+            <button
+              className={`${styles.accountModalButtonPrimary} ${styles.accountModalButtonWarn}`}
+              type="button"
+              onClick={() => {
+                void handleAccountDeactivate();
+              }}
+              disabled={isAccountActionPending}
+            >
+              {isAccountActionPending ? "Desativando..." : "Desativar conta"}
+            </button>
+          </div>
+        }
+      >
+        <div className={styles.accountModalForm}>
+          <p className={styles.accountModalDescription}>
+            Isso vai desconectar sua sessao atual. Para confirmar, digite sua senha e a palavra{" "}
+            <strong>{ACCOUNT_DEACTIVATE_CONFIRM_TEXT}</strong>.
+          </p>
+
+          <label className={styles.accountModalLabel} htmlFor="account-deactivate-password">
+            Senha atual
+          </label>
+          <input
+            id="account-deactivate-password"
+            className={styles.accountModalInput}
+            type="password"
+            value={accountDeactivatePasswordInput}
+            onChange={(event) => setAccountDeactivatePasswordInput(event.target.value)}
+            autoComplete="current-password"
+            disabled={isAccountActionPending}
+          />
+
+          <label className={styles.accountModalLabel} htmlFor="account-deactivate-confirm">
+            Digite {ACCOUNT_DEACTIVATE_CONFIRM_TEXT}
+          </label>
+          <input
+            id="account-deactivate-confirm"
+            className={styles.accountModalInput}
+            type="text"
+            value={accountDeactivateConfirmInput}
+            onChange={(event) => setAccountDeactivateConfirmInput(event.target.value)}
+            autoComplete="off"
+            spellCheck={false}
+            disabled={isAccountActionPending}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                void handleAccountDeactivate();
+              }
+            }}
+          />
+
+          {accountDeactivateModalFeedback ? (
+            <p
+              className={`${styles.accountModalFeedback}${
+                accountDeactivateModalFeedback.tone === "error"
+                  ? ` ${styles.accountModalFeedbackError}`
+                  : ` ${styles.accountModalFeedbackSuccess}`
+              }`}
+              role="status"
+              aria-live="polite"
+            >
+              {accountDeactivateModalFeedback.message}
+            </p>
+          ) : null}
+        </div>
+      </Modal>
+
+      <Modal
+        isOpen={accountModalKind === "delete"}
+        title="Excluir conta"
+        ariaLabel="Excluir conta"
+        onClose={closeAccountModal}
+        panelClassName={styles.accountModalPanel}
+        bodyClassName={styles.accountModalBody}
+        footer={
+          <div className={styles.accountModalFooter}>
+            <button
+              className={styles.accountModalButtonGhost}
+              type="button"
+              onClick={closeAccountModal}
+              disabled={isAccountActionPending}
+            >
+              Cancelar
+            </button>
+            <button
+              className={`${styles.accountModalButtonPrimary} ${styles.accountModalButtonDanger}`}
+              type="button"
+              onClick={() => {
+                void handleAccountDelete();
+              }}
+              disabled={isAccountActionPending}
+            >
+              {isAccountActionPending ? "Excluindo..." : "Excluir conta"}
+            </button>
+          </div>
+        }
+      >
+        <div className={styles.accountModalForm}>
+          <p className={styles.accountModalDescription}>
+            Essa acao e irreversivel. Para confirmar, digite sua senha e a palavra{" "}
+            <strong>{ACCOUNT_DELETE_CONFIRM_TEXT}</strong>.
+          </p>
+
+          <label className={styles.accountModalLabel} htmlFor="account-delete-password">
+            Senha atual
+          </label>
+          <input
+            id="account-delete-password"
+            className={styles.accountModalInput}
+            type="password"
+            value={accountDeletePasswordInput}
+            onChange={(event) => setAccountDeletePasswordInput(event.target.value)}
+            autoComplete="current-password"
+            disabled={isAccountActionPending}
+          />
+
+          <label className={styles.accountModalLabel} htmlFor="account-delete-confirm">
+            Digite {ACCOUNT_DELETE_CONFIRM_TEXT}
+          </label>
+          <input
+            id="account-delete-confirm"
+            className={styles.accountModalInput}
+            type="text"
+            value={accountDeleteConfirmInput}
+            onChange={(event) => setAccountDeleteConfirmInput(event.target.value)}
+            autoComplete="off"
+            spellCheck={false}
+            disabled={isAccountActionPending}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                void handleAccountDelete();
+              }
+            }}
+          />
+
+          {accountDeleteModalFeedback ? (
+            <p
+              className={`${styles.accountModalFeedback}${
+                accountDeleteModalFeedback.tone === "error"
+                  ? ` ${styles.accountModalFeedbackError}`
+                  : ` ${styles.accountModalFeedbackSuccess}`
+              }`}
+              role="status"
+              aria-live="polite"
+            >
+              {accountDeleteModalFeedback.message}
+            </p>
+          ) : null}
+        </div>
+      </Modal>
 
       <Modal
         isOpen={Boolean(uploadLimitModal)}

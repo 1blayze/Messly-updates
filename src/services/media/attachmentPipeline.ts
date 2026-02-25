@@ -194,6 +194,35 @@ function shouldFallbackToEdgeUpload(error: unknown): boolean {
   );
 }
 
+function shouldFallbackFromElectronAttachmentUpload(error: unknown): boolean {
+  if (isAbortError(error)) {
+    return false;
+  }
+
+  const message = String(error instanceof Error ? error.message : error ?? "");
+  const normalizedMessage = message.toLowerCase();
+  if (!normalizedMessage) {
+    return false;
+  }
+
+  const isMissingR2Env =
+    normalizedMessage.includes("missing required environment variable:") &&
+    (normalizedMessage.includes("r2_bucket") ||
+      normalizedMessage.includes("r2_endpoint") ||
+      normalizedMessage.includes("r2_access_key_id") ||
+      normalizedMessage.includes("r2_secret_access_key"));
+
+  if (isMissingR2Env) {
+    return true;
+  }
+
+  return (
+    normalizedMessage.includes("nosuchbucket") ||
+    normalizedMessage.includes("the specified bucket does not exist") ||
+    normalizedMessage.includes("no value provided for input http label: bucket")
+  );
+}
+
 async function uploadAttachmentViaElectron(options: UploadAttachmentBlobOptions): Promise<boolean> {
   const handler = window.electronAPI?.uploadAttachment;
   if (!handler) {
@@ -218,6 +247,9 @@ async function uploadAttachmentViaElectron(options: UploadAttachmentBlobOptions)
   } catch (error) {
     const message = String(error instanceof Error ? error.message : error ?? "");
     if (message.includes("No handler registered for 'media:upload-attachment'")) {
+      return false;
+    }
+    if (shouldFallbackFromElectronAttachmentUpload(error)) {
       return false;
     }
     throw error;

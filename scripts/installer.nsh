@@ -12,9 +12,13 @@
 !macroend
 
 !macro customInstall
-  ; Reserved for future custom steps (e.g. post-install tasks)
+  ; Ensure a running tray instance does not block file replacement during reinstall/upgrade.
+  ExecWait '"$SYSDIR\taskkill.exe" /F /T /IM Messly.exe' $0
+  Sleep 400
 !macroend
 
 !macro customUnInit
-  ; Reserved for future uninstall customization
+  ; Close a running tray/background instance before uninstall so it does not remain alive.
+  ExecWait '"$SYSDIR\taskkill.exe" /F /T /IM Messly.exe' $0
+  Sleep 500
 !macroend

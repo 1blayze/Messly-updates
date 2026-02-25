@@ -82,6 +82,33 @@ function shouldShowUpdaterButton(state: AppUpdaterState | null, isPanelOpen: boo
   return ["checking", "available", "downloading", "downloaded", "error"].includes(state.status);
 }
 
+function logUpdaterConsoleError(context: string, error: unknown): void {
+  if (typeof console === "undefined" || typeof console.error !== "function") {
+    return;
+  }
+  console.error(`[updater] ${context}`, error);
+}
+
+function getSafeUpdaterUiErrorMessage(rawMessage: string | null | undefined, fallbackMessage: string): string {
+  const message = String(rawMessage ?? "").trim();
+  if (!message) {
+    return fallbackMessage;
+  }
+  const normalized = message.toLowerCase();
+  if (normalized.includes("no published versions on github")) {
+    return "Nenhuma versao publicada foi encontrada no repositorio de atualizacoes.";
+  }
+  if (
+    normalized.includes("error invoking remote method") ||
+    normalized.includes("updater:check") ||
+    normalized.includes("updater:download") ||
+    normalized.includes("updater:install")
+  ) {
+    return fallbackMessage;
+  }
+  return message;
+}
+
 export default function TopBar({ isCallActive = false, onPrepareForUpdateInstall }: TopBarProps) {
   const [updaterState, setUpdaterState] = useState<AppUpdaterState | null>(null);
   const [isUpdaterPanelOpen, setIsUpdaterPanelOpen] = useState(false);
@@ -96,11 +123,15 @@ export default function TopBar({ isCallActive = false, onPrepareForUpdateInstall
     }
 
     let cancelled = false;
-    void api.updaterGetState().then((state) => {
-      if (!cancelled) {
-        setUpdaterState(state);
-      }
-    }).catch(() => {});
+    void api.updaterGetState()
+      .then((state) => {
+        if (!cancelled) {
+          setUpdaterState(state);
+        }
+      })
+      .catch((error) => {
+        logUpdaterConsoleError("get-state failed", error);
+      });
 
     const unsubscribe = api.onUpdaterStateChanged?.((state) => {
       if (!cancelled) {
@@ -144,7 +175,8 @@ export default function TopBar({ isCallActive = false, onPrepareForUpdateInstall
       const nextState = await api.updaterCheck();
       setUpdaterState(nextState);
     } catch (error) {
-      setLocalActionError(error instanceof Error ? error.message : "Falha ao verificar atualizacao.");
+      logUpdaterConsoleError("check failed", error);
+      setLocalActionError("Falha ao verificar atualizacao.");
     } finally {
       setIsUpdaterActionPending(false);
     }
@@ -163,7 +195,8 @@ export default function TopBar({ isCallActive = false, onPrepareForUpdateInstall
         setUpdaterState(result.state);
       }
     } catch (error) {
-      setLocalActionError(error instanceof Error ? error.message : "Falha ao baixar atualizacao.");
+      logUpdaterConsoleError("download failed", error);
+      setLocalActionError("Falha ao baixar atualizacao.");
     } finally {
       setIsUpdaterActionPending(false);
     }
@@ -192,7 +225,8 @@ export default function TopBar({ isCallActive = false, onPrepareForUpdateInstall
     try {
       await api.updaterInstall();
     } catch (error) {
-      setLocalActionError(error instanceof Error ? error.message : "Falha ao iniciar instalacao.");
+      logUpdaterConsoleError("install failed", error);
+      setLocalActionError("Falha ao iniciar instalacao.");
       setIsUpdaterActionPending(false);
     }
   }, [isCallActive, onPrepareForUpdateInstall]);
@@ -227,10 +261,10 @@ export default function TopBar({ isCallActive = false, onPrepareForUpdateInstall
         : "Nenhuma atualizacao encontrada.";
     }
     if (updaterState.status === "disabled") {
-      return updaterState.errorMessage || "Atualizador desativado.";
+      return getSafeUpdaterUiErrorMessage(updaterState.errorMessage, "Atualizador desativado.");
     }
     if (updaterState.status === "error") {
-      return updaterState.errorMessage || "Falha ao verificar atualizacao.";
+      return getSafeUpdaterUiErrorMessage(updaterState.errorMessage, "Falha ao verificar atualizacao.");
     }
     if (updaterState.status === "downloading") {
       return updaterProgressText;
@@ -307,8 +341,6 @@ export default function TopBar({ isCallActive = false, onPrepareForUpdateInstall
                     Ao instalar, voce sera desconectado da chamada atual.
                   </p>
                 ) : null}
-
-                {localActionError ? <p className="app-top-bar__updater-error">{localActionError}</p> : null}
 
                 <div className="app-top-bar__updater-actions-row">
                   <button

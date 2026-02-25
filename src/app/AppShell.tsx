@@ -12,6 +12,7 @@ import { presenceController } from "../services/presence/presenceController";
 import { useAuthSession } from "../auth/AuthProvider";
 import type { PresenceState } from "../services/presence/presenceTypes";
 import { getAvatarUrl, getNameAvatarUrl, isDefaultAvatarUrl } from "../services/cdn/mediaUrls";
+import { normalizeBannerColor } from "../services/profile/bannerColor";
 import { supabase } from "../services/supabase";
 import { firebaseDatabase } from "../services/firebase";
 import { escapeLikePattern, normalizeEmail } from "../services/usernameAvailability";
@@ -24,6 +25,7 @@ import {
 
 type FriendsTab = "online" | "all" | "pending";
 type PendingDirection = "incoming" | "outgoing";
+type NetworkBannerState = "online" | "offline" | "reconnecting" | "restored";
 
 interface FriendRequestRow {
   id: string;
@@ -57,6 +59,8 @@ interface UserIdentityRow {
   id: string;
   username: string | null;
   display_name: string | null;
+  profile_theme_primary_color?: string | null;
+  profile_theme_accent_color?: string | null;
   avatar_key: string | null;
   avatar_hash: string | null;
   avatar_url?: string | null;
@@ -71,6 +75,8 @@ interface ProfileUpdatedDetail {
   userId: string;
   display_name?: string | null;
   username?: string | null;
+  profile_theme_primary_color?: string | null;
+  profile_theme_accent_color?: string | null;
 }
 
 interface ConversationIdentityRow {
@@ -84,6 +90,8 @@ interface DirectMessageUserRow extends UserIdentityRow {
   firebase_uid?: string | null;
   about?: string | null;
   banner_color?: string | null;
+  profile_theme_primary_color?: string | null;
+  profile_theme_accent_color?: string | null;
   banner_key?: string | null;
   banner_hash?: string | null;
   created_at?: string | null;
@@ -690,10 +698,19 @@ export default function AppShell() {
   const [callHostDirectMessage, setCallHostDirectMessage] = useState<SidebarDirectMessageSelection | null>(null);
   const [isSidebarCallActive, setIsSidebarCallActive] = useState(false);
   const [currentUserChatProfile, setCurrentUserChatProfile] = useState<DirectMessageChatParticipant | null>(null);
+  const [networkBannerState, setNetworkBannerState] = useState<NetworkBannerState>(() => {
+    if (typeof navigator === "undefined") {
+      return "online";
+    }
+    return navigator.onLine ? "online" : "offline";
+  });
   const friendsRefreshInFlightRef = useRef(false);
   const friendsRefreshQueuedRef = useRef(false);
   const pendingRefreshInFlightRef = useRef(false);
   const pendingRefreshQueuedRef = useRef(false);
+  const networkReconnectTimerRef = useRef<number | null>(null);
+  const networkBannerHideTimerRef = useRef<number | null>(null);
+  const networkOnlineRef = useRef<boolean>(typeof navigator === "undefined" ? true : navigator.onLine);
   const sidebarDirectMessagesByConversationId = useMemo(() => {
     const map = new Map<string, SidebarDirectMessageSelection>();
     sidebarDirectMessages.forEach((item) => {
@@ -734,6 +751,102 @@ export default function AppShell() {
       window.removeEventListener("focus", updateFocusState);
       window.removeEventListener("blur", updateFocusState);
       document.removeEventListener("visibilitychange", updateFocusState);
+    };
+  }, []);
+
+  useEffect(() => {
+    const clearNetworkTimers = (): void => {
+      if (networkReconnectTimerRef.current !== null) {
+        window.clearTimeout(networkReconnectTimerRef.current);
+        networkReconnectTimerRef.current = null;
+      }
+      if (networkBannerHideTimerRef.current !== null) {
+        window.clearTimeout(networkBannerHideTimerRef.current);
+        networkBannerHideTimerRef.current = null;
+      }
+    };
+
+    const setOfflineBanner = (): void => {
+      clearNetworkTimers();
+      networkOnlineRef.current = false;
+      setNetworkBannerState("offline");
+    };
+
+    const setOnlineBannerSequence = (): void => {
+      clearNetworkTimers();
+
+      if (typeof navigator !== "undefined" && !navigator.onLine) {
+        networkOnlineRef.current = false;
+        setNetworkBannerState("offline");
+        return;
+      }
+
+      networkOnlineRef.current = true;
+      setNetworkBannerState("reconnecting");
+
+      networkReconnectTimerRef.current = window.setTimeout(() => {
+        if (typeof navigator !== "undefined" && !navigator.onLine) {
+          networkOnlineRef.current = false;
+          setNetworkBannerState("offline");
+          return;
+        }
+
+        setNetworkBannerState("restored");
+
+        networkBannerHideTimerRef.current = window.setTimeout(() => {
+          if (typeof navigator !== "undefined" && !navigator.onLine) {
+            networkOnlineRef.current = false;
+            setNetworkBannerState("offline");
+            return;
+          }
+          networkOnlineRef.current = true;
+          setNetworkBannerState("online");
+          networkBannerHideTimerRef.current = null;
+        }, 1300);
+
+        networkReconnectTimerRef.current = null;
+      }, 850);
+    };
+
+    const syncFromNavigator = (): void => {
+      if (typeof navigator === "undefined") {
+        return;
+      }
+      const nextOnline = navigator.onLine;
+      if (nextOnline === networkOnlineRef.current) {
+        return;
+      }
+      if (nextOnline) {
+        setOnlineBannerSequence();
+      } else {
+        setOfflineBanner();
+      }
+    };
+
+    const handleOffline = (): void => {
+      setOfflineBanner();
+    };
+
+    const handleOnline = (): void => {
+      setOnlineBannerSequence();
+    };
+
+    window.addEventListener("offline", handleOffline);
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("focus", syncFromNavigator);
+    document.addEventListener("visibilitychange", syncFromNavigator);
+
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      networkOnlineRef.current = false;
+      setNetworkBannerState("offline");
+    }
+
+    return () => {
+      clearNetworkTimers();
+      window.removeEventListener("offline", handleOffline);
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("focus", syncFromNavigator);
+      document.removeEventListener("visibilitychange", syncFromNavigator);
     };
   }, []);
 
@@ -867,7 +980,7 @@ export default function AppShell() {
       try {
         const primaryResult = await supabase
           .from("users")
-          .select("id,username,display_name,avatar_key,avatar_hash,avatar_url")
+          .select("id,username,display_name,profile_theme_primary_color,profile_theme_accent_color,avatar_key,avatar_hash,avatar_url")
           .eq("id", currentUserId)
           .limit(1)
           .maybeSingle();
@@ -878,7 +991,7 @@ export default function AppShell() {
         if (userError && isMissingAvatarUrlColumnError(userError.message ?? "")) {
           const fallbackResult = await supabase
             .from("users")
-            .select("id,username,display_name,avatar_key,avatar_hash")
+            .select("id,username,display_name,profile_theme_primary_color,profile_theme_accent_color,avatar_key,avatar_hash")
             .eq("id", currentUserId)
             .limit(1)
             .maybeSingle();
@@ -923,6 +1036,8 @@ export default function AppShell() {
           displayName,
           username,
           avatarSrc,
+          themePrimaryColor: normalizeBannerColor(userRow?.profile_theme_primary_color) ?? null,
+          themeAccentColor: normalizeBannerColor(userRow?.profile_theme_accent_color) ?? null,
           presenceState: "offline",
         });
       } catch {
@@ -953,7 +1068,18 @@ export default function AppShell() {
 
         const nextUsername = String(detail.username ?? "").trim() || current.username;
         const nextDisplayName = normalizeProfileDisplayName(detail.display_name, nextUsername, current.displayName);
-        if (nextUsername === current.username && nextDisplayName === current.displayName) {
+        const nextThemePrimaryColor = Object.prototype.hasOwnProperty.call(detail, "profile_theme_primary_color")
+          ? normalizeBannerColor(detail.profile_theme_primary_color) ?? null
+          : current.themePrimaryColor ?? null;
+        const nextThemeAccentColor = Object.prototype.hasOwnProperty.call(detail, "profile_theme_accent_color")
+          ? normalizeBannerColor(detail.profile_theme_accent_color) ?? null
+          : current.themeAccentColor ?? null;
+        if (
+          nextUsername === current.username &&
+          nextDisplayName === current.displayName &&
+          (current.themePrimaryColor ?? null) === nextThemePrimaryColor &&
+          (current.themeAccentColor ?? null) === nextThemeAccentColor
+        ) {
           return current;
         }
 
@@ -961,6 +1087,8 @@ export default function AppShell() {
           ...current,
           username: nextUsername,
           displayName: nextDisplayName,
+          themePrimaryColor: nextThemePrimaryColor,
+          themeAccentColor: nextThemeAccentColor,
         };
       });
     };
@@ -1007,7 +1135,7 @@ export default function AppShell() {
 
       const userWithLegacyAvatar = await supabase
         .from("users")
-        .select("id,username,display_name,avatar_key,avatar_hash,avatar_url,status,firebase_uid,about,banner_color,banner_key,banner_hash,created_at")
+        .select("id,username,display_name,avatar_key,avatar_hash,avatar_url,status,firebase_uid,about,banner_color,profile_theme_primary_color,profile_theme_accent_color,banner_key,banner_hash,created_at")
         .eq("id", targetUserId)
         .limit(1)
         .maybeSingle();
@@ -1018,7 +1146,7 @@ export default function AppShell() {
       if (userError && isMissingAvatarUrlColumnError(userError.message ?? "")) {
         const userWithoutLegacyAvatar = await supabase
           .from("users")
-          .select("id,username,display_name,avatar_key,avatar_hash,status,firebase_uid,about,banner_color,banner_key,banner_hash,created_at")
+          .select("id,username,display_name,avatar_key,avatar_hash,status,firebase_uid,about,banner_color,profile_theme_primary_color,profile_theme_accent_color,banner_key,banner_hash,created_at")
           .eq("id", targetUserId)
           .limit(1)
           .maybeSingle();
@@ -1061,6 +1189,8 @@ export default function AppShell() {
         firebaseUid: String(userRow.firebase_uid ?? "").trim() || undefined,
         aboutText: String(userRow.about ?? "").trim(),
         bannerColor: userRow.banner_color ?? null,
+        themePrimaryColor: normalizeBannerColor(userRow.profile_theme_primary_color) ?? null,
+        themeAccentColor: normalizeBannerColor(userRow.profile_theme_accent_color) ?? null,
         bannerKey: userRow.banner_key ?? null,
         bannerHash: userRow.banner_hash ?? null,
         memberSinceAt: userRow.created_at ?? null,
@@ -1975,6 +2105,8 @@ export default function AppShell() {
       avatarSrc,
       presenceState,
       firebaseUid: String(user?.uid ?? "").trim() || undefined,
+      themePrimaryColor: currentUserChatProfile?.themePrimaryColor ?? null,
+      themeAccentColor: currentUserChatProfile?.themeAccentColor ?? null,
     };
   }, [currentUserId, currentUserChatProfile, presenceState, user?.displayName, user?.uid]);
   const incomingCount = useMemo(
@@ -1982,6 +2114,34 @@ export default function AppShell() {
     [pendingCards],
   );
   const outgoingCount = pendingCount - incomingCount;
+  const showNetworkBanner = networkBannerState !== "online";
+  const networkBannerMeta = useMemo(() => {
+    switch (networkBannerState) {
+      case "offline":
+        return {
+          tone: "offline",
+          icon: "wifi_off",
+          title: "Sem internet",
+          subtitle: "Tentando reconectar automaticamente...",
+        } as const;
+      case "reconnecting":
+        return {
+          tone: "reconnecting",
+          icon: "sync",
+          title: "Reconectando",
+          subtitle: "Restabelecendo a conexao...",
+        } as const;
+      case "restored":
+        return {
+          tone: "restored",
+          icon: "wifi",
+          title: "Conexao restabelecida",
+          subtitle: "Tudo pronto novamente.",
+        } as const;
+      default:
+        return null;
+    }
+  }, [networkBannerState]);
 
   return (
     <div className="app-shell">
@@ -2001,7 +2161,11 @@ export default function AppShell() {
           setActiveDirectMessage(null);
         }}
       />
-      <main className={`main-panel${activeDirectMessage ? " main-panel--chat" : ""}`}>
+      <main
+        className={`main-panel${activeDirectMessage ? " main-panel--chat" : ""}${
+          showNetworkBanner ? " main-panel--network-status" : ""
+        }`}
+      >
         {!activeDirectMessage ? (
           <header className="main-panel__navbar">
             <div className="main-panel__navbar-left">
@@ -2057,6 +2221,22 @@ export default function AppShell() {
           </header>
         ) : null}
 
+        {showNetworkBanner && networkBannerMeta ? (
+          <section
+            className={`main-panel__network-banner main-panel__network-banner--${networkBannerMeta.tone}`}
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >
+            <div className="main-panel__network-banner-dot" aria-hidden="true" />
+            <MaterialSymbolIcon className="main-panel__network-banner-icon" name={networkBannerMeta.icon} size={18} />
+            <div className="main-panel__network-banner-copy">
+              <strong className="main-panel__network-banner-title">{networkBannerMeta.title}</strong>
+              <span className="main-panel__network-banner-subtitle">{networkBannerMeta.subtitle}</span>
+            </div>
+          </section>
+        ) : null}
+
         <section className={`main-panel__content${activeDirectMessage ? " main-panel__content--chat" : ""}`}>
           <div className="main-panel__workspace">
             {chatViewDirectMessage && currentUserId && chatCurrentUser ? (
@@ -2074,6 +2254,8 @@ export default function AppShell() {
                     firebaseUid: chatViewDirectMessage.firebaseUid,
                     aboutText: chatViewDirectMessage.aboutText,
                     bannerColor: chatViewDirectMessage.bannerColor ?? null,
+                    themePrimaryColor: chatViewDirectMessage.themePrimaryColor ?? null,
+                    themeAccentColor: chatViewDirectMessage.themeAccentColor ?? null,
                     bannerKey: chatViewDirectMessage.bannerKey ?? null,
                     bannerHash: chatViewDirectMessage.bannerHash ?? null,
                     bannerSrc: chatViewDirectMessage.bannerSrc,
@@ -2102,7 +2284,7 @@ export default function AppShell() {
             {!activeDirectMessage && activeFriendsTab !== "pending" ? (
               <section className="main-panel__friends" aria-label="Lista de amigos">
                 <div className="main-panel__friends-search">
-                  <MaterialSymbolIcon className="main-panel__friends-search-icon" name="manage_search" size={18} />
+                  <MaterialSymbolIcon className="main-panel__friends-search-icon" name="search" size={18} />
                   <input
                     className="main-panel__friends-search-input"
                     type="text"

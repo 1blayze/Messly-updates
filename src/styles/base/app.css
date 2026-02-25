@@ -191,8 +191,16 @@ body {
   min-height: 0;
 }
 
+.main-panel--network-status {
+  grid-template-rows: var(--app-navbar-height) auto 1fr;
+}
+
 .main-panel--chat {
   grid-template-rows: 1fr;
+}
+
+.main-panel--chat.main-panel--network-status {
+  grid-template-rows: auto 1fr;
 }
 
 .main-panel__navbar {
@@ -202,6 +210,80 @@ body {
   padding: 0 16px;
   border-bottom: 1px solid var(--border-subtle);
   background: var(--cool-neutral-600);
+}
+
+.main-panel__network-banner {
+  display: grid;
+  grid-template-columns: 10px 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-height: 52px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.main-panel__network-banner--offline {
+  background: linear-gradient(180deg, rgba(197, 67, 67, 0.18), rgba(197, 67, 67, 0.10));
+}
+
+.main-panel__network-banner--reconnecting {
+  background: linear-gradient(180deg, rgba(222, 162, 36, 0.16), rgba(222, 162, 36, 0.08));
+}
+
+.main-panel__network-banner--restored {
+  background: linear-gradient(180deg, rgba(67, 173, 120, 0.14), rgba(67, 173, 120, 0.08));
+}
+
+.main-panel__network-banner-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: 0 0 0 0 currentColor;
+  animation: app-network-pulse 1.65s ease-out infinite;
+}
+
+.main-panel__network-banner-icon {
+  color: currentColor;
+  opacity: 0.95;
+}
+
+.main-panel__network-banner-copy {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.main-panel__network-banner-title {
+  color: #f6f8fb;
+  font-size: 13px;
+  line-height: 1.15;
+  font-weight: 700;
+}
+
+.main-panel__network-banner-subtitle {
+  color: rgba(246, 248, 251, 0.78);
+  font-size: 12px;
+  line-height: 1.15;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.main-panel__network-banner--offline {
+  color: #ff8f8f;
+}
+
+.main-panel__network-banner--reconnecting {
+  color: #f0c96d;
+}
+
+.main-panel__network-banner--reconnecting .main-panel__network-banner-icon {
+  animation: app-network-spin 1s linear infinite;
+}
+
+.main-panel__network-banner--restored {
+  color: #7dd8a3;
 }
 
 .main-panel__navbar-left {
@@ -365,6 +447,34 @@ body {
   align-items: center;
   gap: 8px;
   padding: 0 12px;
+}
+
+@keyframes app-network-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.22);
+  }
+  70% {
+    box-shadow: 0 0 0 8px rgba(255, 255, 255, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(255, 255, 255, 0);
+  }
+}
+
+@keyframes app-network-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .main-panel__network-banner-dot,
+  .main-panel__network-banner--reconnecting .main-panel__network-banner-icon {
+    animation: none;
+  }
 }
 
 .main-panel__friends-search:focus-within {

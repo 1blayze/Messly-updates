@@ -61,6 +61,7 @@ const LOAD_OLDER_THRESHOLD_PX = 120;
 const TWEMOJI_BASE_URL = "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/";
 const TWEMOJI_CACHE_LIMIT = 400;
 const INITIAL_MESSAGE_CACHE_TTL_MS = 5 * 60_000;
+const STALE_MESSAGE_SEED_CACHE_TTL_MS = 30 * 60_000;
 const INITIAL_LOADING_SKELETON_ROWS = 8;
 const MESSAGE_PROFILE_POPOVER_WIDTH = 300;
 const MESSAGE_PROFILE_POPOVER_MIN_HEIGHT = 240;
@@ -87,6 +88,98 @@ const twemojiHtmlCache = new Map<string, string>();
 const TWEMOJI_IMAGE_TAG_PATTERN = /<img\b[^>]*class="[^"]*dm-chat__twemoji[^"]*"[^>]*>/gi;
 const TWEMOJI_LINE_BREAK_PATTERN = /<br\s*\/?>/gi;
 const TWEMOJI_EMPTY_ENTITY_PATTERN = /(?:&nbsp;|&#8205;|&#x200d;|&#xfe0f;)/gi;
+
+type ParsedHexRgb = {
+  red: number;
+  green: number;
+  blue: number;
+};
+
+function parseHexThemeColor(hexColor: string | null | undefined): ParsedHexRgb | null {
+  const normalized = normalizeBannerColor(hexColor);
+  if (!normalized) {
+    return null;
+  }
+
+  const value = normalized.replace("#", "");
+  if (value.length !== 6) {
+    return null;
+  }
+
+  const red = Number.parseInt(value.slice(0, 2), 16);
+  const green = Number.parseInt(value.slice(2, 4), 16);
+  const blue = Number.parseInt(value.slice(4, 6), 16);
+  if ([red, green, blue].some((channel) => Number.isNaN(channel))) {
+    return null;
+  }
+
+  return { red, green, blue };
+}
+
+function clampColorByte(value: number): number {
+  return Math.max(0, Math.min(255, Math.round(value)));
+}
+
+function rgbToHexThemeColor(rgb: ParsedHexRgb): string {
+  const toHex = (value: number): string => clampColorByte(value).toString(16).padStart(2, "0");
+  return `#${toHex(rgb.red)}${toHex(rgb.green)}${toHex(rgb.blue)}`;
+}
+
+function hexToRgbaThemeColor(hexColor: string | null | undefined, alpha: number): string | null {
+  const rgb = parseHexThemeColor(hexColor);
+  if (!rgb) {
+    return null;
+  }
+
+  const safeAlpha = Math.max(0, Math.min(1, alpha));
+  return `rgba(${rgb.red}, ${rgb.green}, ${rgb.blue}, ${safeAlpha})`;
+}
+
+function shadeHexThemeColor(hexColor: string | null | undefined, multiplier: number): string | null {
+  const rgb = parseHexThemeColor(hexColor);
+  if (!rgb) {
+    return null;
+  }
+  const safeMultiplier = Math.max(0, multiplier);
+  return rgbToHexThemeColor({
+    red: rgb.red * safeMultiplier,
+    green: rgb.green * safeMultiplier,
+    blue: rgb.blue * safeMultiplier,
+  });
+}
+
+function mixHexThemeColors(hexA: string | null | undefined, hexB: string | null | undefined, ratioB: number): string | null {
+  const rgbA = parseHexThemeColor(hexA);
+  const rgbB = parseHexThemeColor(hexB);
+  if (!rgbA || !rgbB) {
+    return rgbToHexThemeColor(rgbA ?? rgbB ?? { red: 0, green: 0, blue: 0 });
+  }
+
+  const t = Math.max(0, Math.min(1, ratioB));
+  const inv = 1 - t;
+  return rgbToHexThemeColor({
+    red: rgbA.red * inv + rgbB.red * t,
+    green: rgbA.green * inv + rgbB.green * t,
+    blue: rgbA.blue * inv + rgbB.blue * t,
+  });
+}
+
+function getHexThemeRelativeLuminance(hexColor: string | null | undefined): number | null {
+  const rgb = parseHexThemeColor(hexColor);
+  if (!rgb) {
+    return null;
+  }
+
+  const toLinear = (channel: number): number => {
+    const normalized = channel / 255;
+    return normalized <= 0.04045 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
+  };
+
+  const red = toLinear(rgb.red);
+  const green = toLinear(rgb.green);
+  const blue = toLinear(rgb.blue);
+  return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+}
 
 interface MessageRow {
   id: string;
@@ -232,6 +325,8 @@ export interface DirectMessageChatParticipant {
   firebaseUid?: string;
   aboutText?: string;
   bannerColor?: string | null;
+  themePrimaryColor?: string | null;
+  themeAccentColor?: string | null;
   bannerKey?: string | null;
   bannerHash?: string | null;
   bannerSrc?: string;
@@ -241,6 +336,8 @@ export interface DirectMessageChatParticipant {
 interface MessageProfileExtra {
   bannerSrc: string;
   bannerColor: string | null;
+  themePrimaryColor: string | null;
+  themeAccentColor: string | null;
   aboutText: string;
 }
 
@@ -248,6 +345,8 @@ interface UserProfileExtraRow {
   banner_key?: string | null;
   banner_hash?: string | null;
   banner_color?: string | null;
+  profile_theme_primary_color?: string | null;
+  profile_theme_accent_color?: string | null;
   created_at?: string | null;
   about?: string | null;
 }
@@ -255,6 +354,8 @@ interface UserProfileExtraRow {
 interface TargetProfileCacheEntry {
   bannerSrc: string;
   bannerColor: string | null;
+  themePrimaryColor: string | null;
+  themeAccentColor: string | null;
   aboutText: string;
   memberSinceLabel: string;
   hasCustomBannerAsset: boolean;
@@ -323,21 +424,28 @@ const CONVERSATION_CACHE_PERSIST_KEY = "messly:dm-cache:v1";
 const CONVERSATION_CACHE_PERSIST_MAX_ENTRIES = 12;
 const CONVERSATION_CACHE_PERSIST_MAX_MESSAGES = 36;
 const USER_PROFILE_EXTRA_SELECT_VARIANTS: readonly string[] = [
+  "banner_key,banner_hash,banner_color,profile_theme_primary_color,profile_theme_accent_color,created_at,about",
   "banner_key,banner_hash,banner_color,created_at,about",
   "banner_key,banner_hash,created_at,about",
+  "banner_key,banner_hash,banner_color,profile_theme_primary_color,profile_theme_accent_color,about",
   "banner_key,banner_hash,banner_color,about",
   "banner_key,banner_hash,about",
   "banner_key,banner_hash,created_at",
   "banner_key,banner_hash",
+  "profile_theme_primary_color,profile_theme_accent_color,created_at,about",
+  "profile_theme_primary_color,profile_theme_accent_color,about",
   "created_at,about",
   "about",
   "created_at",
 ];
 const USER_PROFILE_EXTRA_LIGHT_SELECT_VARIANTS: readonly string[] = [
+  "banner_key,banner_hash,banner_color,profile_theme_primary_color,profile_theme_accent_color,about",
   "banner_key,banner_hash,banner_color,about",
   "banner_key,banner_hash,about",
+  "banner_key,banner_hash,banner_color,profile_theme_primary_color,profile_theme_accent_color",
   "banner_key,banner_hash,banner_color",
   "banner_key,banner_hash",
+  "profile_theme_primary_color,profile_theme_accent_color,about",
   "about",
 ];
 const conversationMessagesCache = new Map<string, ConversationMessagesCacheEntry>();
@@ -383,6 +491,30 @@ function isUsersMissingColumnError(messageRaw: string): boolean {
     message.includes("does not exist") ||
     message.includes("not found")
   );
+}
+
+function getSafeDraftAttachmentUploadErrorMessage(error: unknown): string {
+  const message = String(error instanceof Error ? error.message : error ?? "").trim();
+  if (!message) {
+    return "Falha no upload.";
+  }
+
+  const normalized = message.toLowerCase();
+  if (
+    normalized.includes("missing required environment variable:") && normalized.includes("r2_")
+  ) {
+    return "Nao foi possivel enviar o anexo agora. Tente novamente em instantes.";
+  }
+
+  if (
+    normalized.includes("nosuchbucket") ||
+    normalized.includes("the specified bucket does not exist") ||
+    (normalized.includes("error invoking remote method") && normalized.includes("media:upload-attachment"))
+  ) {
+    return "Nao foi possivel enviar o anexo agora. Tente novamente em instantes.";
+  }
+
+  return message;
 }
 
 async function queryUserProfileExtras(
@@ -495,6 +627,32 @@ function getConversationMessagesCache(conversationId: string): ConversationMessa
 
   conversationMessagesCache.delete(conversationId);
   conversationMessagesCache.set(conversationId, cached);
+
+  return {
+    messages: cached.messages.map(cloneMessageForCache),
+    nextCursor: cached.nextCursor ? { ...cached.nextCursor } : null,
+    hasMoreBefore: cached.hasMoreBefore,
+    deletedMessageIds: [...cached.deletedMessageIds],
+    attachmentUrlMap: { ...cached.attachmentUrlMap },
+    attachmentThumbUrlMap: { ...cached.attachmentThumbUrlMap },
+    cachedAt: cached.cachedAt,
+  };
+}
+
+function getStaleConversationMessagesCache(
+  conversationId: string,
+  maxAgeMs = STALE_MESSAGE_SEED_CACHE_TTL_MS,
+): ConversationMessagesCacheEntry | null {
+  hydrateConversationCacheFromStorage();
+
+  const cached = conversationMessagesCache.get(conversationId);
+  if (!cached) {
+    return null;
+  }
+
+  if (Date.now() - cached.cachedAt > Math.max(CONVERSATION_CACHE_TTL_MS, maxAgeMs)) {
+    return null;
+  }
 
   return {
     messages: cached.messages.map(cloneMessageForCache),
@@ -667,6 +825,51 @@ function sortMessages(messages: ChatMessageItem[]): ChatMessageItem[] {
   const sorted = [...messages];
   sorted.sort(compareMessagesChronologically);
   return sorted;
+}
+
+function upsertMessages(current: ChatMessageItem[], incomingMessages: ChatMessageItem[]): ChatMessageItem[] {
+  if (incomingMessages.length === 0) {
+    return current;
+  }
+
+  const next = [...current];
+  const indexById = new Map<string, number>();
+  const indexByClientId = new Map<string, number>();
+
+  next.forEach((message, index) => {
+    indexById.set(message.id, index);
+    if (message.clientId) {
+      indexByClientId.set(message.clientId, index);
+    }
+  });
+
+  for (const incoming of incomingMessages) {
+    const byIdIndex = indexById.get(incoming.id);
+    const byClientIdIndex = incoming.clientId ? indexByClientId.get(incoming.clientId) : undefined;
+    const existingIndex = byIdIndex ?? byClientIdIndex;
+
+    if (typeof existingIndex === "number") {
+      const merged = {
+        ...next[existingIndex],
+        ...incoming,
+      };
+      next[existingIndex] = merged;
+      indexById.set(merged.id, existingIndex);
+      if (merged.clientId) {
+        indexByClientId.set(merged.clientId, existingIndex);
+      }
+      continue;
+    }
+
+    next.push(incoming);
+    const addedIndex = next.length - 1;
+    indexById.set(incoming.id, addedIndex);
+    if (incoming.clientId) {
+      indexByClientId.set(incoming.clientId, addedIndex);
+    }
+  }
+
+  return sortMessages(next);
 }
 
 function areFlatRecordValuesEqual(
@@ -1693,7 +1896,7 @@ export default function DirectMessageChatView({
   const [editingValue, setEditingValue] = useState("");
   const [isSavingEdit, setIsSavingEdit] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<ChatMessageItem | null>(null);
-  const [isDeletingMessage, setIsDeletingMessage] = useState(false);
+  const [deletingMessageIds, setDeletingMessageIds] = useState<Set<string>>(() => new Set());
   const [replyTarget, setReplyTarget] = useState<ReplyTarget | null>(null);
   const [highlightMessageId, setHighlightMessageId] = useState<string | null>(null);
   const [mediaViewerState, setMediaViewerState] = useState<MediaViewerState | null>(null);
@@ -1709,6 +1912,8 @@ export default function DirectMessageChatView({
   const [targetBannerHasCustomAsset, setTargetBannerHasCustomAsset] = useState(false);
   const [isTargetProfileResolved, setIsTargetProfileResolved] = useState(false);
   const [targetBannerColor, setTargetBannerColor] = useState<string | null>(null);
+  const [targetThemePrimaryColor, setTargetThemePrimaryColor] = useState<string | null>(null);
+  const [targetThemeAccentColor, setTargetThemeAccentColor] = useState<string | null>(null);
   const [targetAboutText, setTargetAboutText] = useState<string>("");
   const [canExpandBiography, setCanExpandBiography] = useState(false);
   const [targetMemberSinceLabel, setTargetMemberSinceLabel] = useState<string>("");
@@ -1842,6 +2047,12 @@ export default function DirectMessageChatView({
     if (targetBannerHasCustomAsset || hasCustomBannerImage) {
       return undefined;
     }
+    const normalizedThemePrimary = normalizeBannerColor(targetThemePrimaryColor);
+    if (normalizedThemePrimary) {
+      return {
+        background: normalizedThemePrimary,
+      };
+    }
     const normalized = normalizeBannerColor(targetBannerColor);
     if (!normalized) {
       return undefined;
@@ -1849,7 +2060,71 @@ export default function DirectMessageChatView({
     return {
       background: normalized,
     };
-  }, [isTargetProfileResolved, targetBannerColor, targetBannerHasCustomAsset, targetBannerSrc]);
+  }, [isTargetProfileResolved, targetBannerColor, targetBannerHasCustomAsset, targetBannerSrc, targetThemePrimaryColor]);
+  const targetSidebarProfileThemeInlineStyle = useMemo<CSSProperties | undefined>(() => {
+    if (!isTargetProfileResolved) {
+      return undefined;
+    }
+
+    const primaryBase = normalizeBannerColor(targetThemePrimaryColor) ?? null;
+    const accentBase = normalizeBannerColor(targetThemeAccentColor) ?? null;
+    if (!primaryBase && !accentBase) {
+      return undefined;
+    }
+
+    const effectivePrimary = primaryBase ?? accentBase;
+    const effectiveAccent = accentBase ?? primaryBase;
+    const luminances = [getHexThemeRelativeLuminance(effectivePrimary), getHexThemeRelativeLuminance(effectiveAccent)].filter(
+      (value): value is number => typeof value === "number",
+    );
+    const averageLuminance = luminances.length > 0 ? luminances.reduce((sum, value) => sum + value, 0) / luminances.length : null;
+    const maxLuminance = luminances.length > 0 ? Math.max(...luminances) : null;
+    const isLightTheme = (averageLuminance ?? 0) >= 0.62;
+    const isNearBlackTheme = (maxLuminance ?? 1) <= 0.022;
+
+    let panelBg = effectiveAccent ?? "#262626";
+    let sidebarBg = panelBg;
+    let textColor = isLightTheme ? "#171b23" : "#ffffff";
+    let mutedTextColor = isLightTheme ? "rgba(23, 27, 35, 0.76)" : "rgba(228, 234, 242, 0.86)";
+    let subtleTextColor = isLightTheme ? "rgba(23, 27, 35, 0.68)" : "rgba(209, 217, 230, 0.9)";
+    let linkHoverColor = isLightTheme ? "rgba(14, 17, 23, 0.92)" : "rgba(235, 241, 250, 0.96)";
+    let metaBg = isLightTheme
+      ? shadeHexThemeColor(mixHexThemeColors(effectiveAccent, effectivePrimary, 0.05), 0.93) ?? "#ededf0"
+      : shadeHexThemeColor(mixHexThemeColors(effectiveAccent, effectivePrimary, 0.12), 0.6) ?? "#1d2026";
+    let metaBorder = isLightTheme
+      ? hexToRgbaThemeColor(effectiveAccent, 0.14) ?? "rgba(17, 20, 28, 0.08)"
+      : hexToRgbaThemeColor(effectiveAccent, 0.22) ?? "rgba(255, 255, 255, 0.06)";
+    let footerBorder = isLightTheme ? "rgba(23, 27, 35, 0.08)" : "rgba(255, 255, 255, 0.06)";
+    let footerBg = panelBg;
+
+    if (isNearBlackTheme) {
+      panelBg = "#000000";
+      sidebarBg = "#000000";
+      textColor = "#ffffff";
+      mutedTextColor = "rgba(231, 236, 245, 0.86)";
+      subtleTextColor = "rgba(214, 221, 233, 0.88)";
+      linkHoverColor = "#ffffff";
+      metaBg = "#1b1d22";
+      metaBorder = "rgba(255, 255, 255, 0.07)";
+      footerBorder = "rgba(255, 255, 255, 0.07)";
+      footerBg = "#000000";
+    }
+
+    return {
+      ["--dm-chat-profile-sidebar-bg" as const]: sidebarBg,
+      ["--dm-chat-profile-panel-bg" as const]: panelBg,
+      ["--dm-chat-profile-avatar-ring" as const]: panelBg,
+      ["--dm-chat-profile-presence-ring" as const]: panelBg,
+      ["--dm-chat-profile-text" as const]: textColor,
+      ["--dm-chat-profile-muted" as const]: mutedTextColor,
+      ["--dm-chat-profile-link" as const]: subtleTextColor,
+      ["--dm-chat-profile-link-hover" as const]: linkHoverColor,
+      ["--dm-chat-profile-meta-bg" as const]: metaBg,
+      ["--dm-chat-profile-meta-border" as const]: metaBorder,
+      ["--dm-chat-profile-footer-bg" as const]: footerBg,
+      ["--dm-chat-profile-footer-border" as const]: footerBorder,
+    } as CSSProperties;
+  }, [isTargetProfileResolved, targetThemeAccentColor, targetThemePrimaryColor]);
   const targetHasCustomBannerImage = useMemo(() => {
     const trimmed = String(targetBannerSrc ?? "").trim();
     if (!trimmed) {
@@ -1931,6 +2206,8 @@ export default function DirectMessageChatView({
     const targetId = String(targetUser.userId ?? "").trim();
     const seedAboutText = String(targetUser.aboutText ?? "").trim();
     const seedBannerColor = normalizeBannerColor(targetUser.bannerColor) ?? null;
+    const seedThemePrimaryColor = normalizeBannerColor(targetUser.themePrimaryColor) ?? null;
+    const seedThemeAccentColor = normalizeBannerColor(targetUser.themeAccentColor) ?? null;
     const seedBannerKey = String(targetUser.bannerKey ?? "").trim() || null;
     const seedBannerHash = String(targetUser.bannerHash ?? "").trim() || null;
     const seedBannerSrcRaw = String(targetUser.bannerSrc ?? "").trim();
@@ -1940,6 +2217,8 @@ export default function DirectMessageChatView({
     const hasProfileSeed =
       seedHasCustomBannerAsset ||
       Boolean(seedBannerColor) ||
+      Boolean(seedThemePrimaryColor) ||
+      Boolean(seedThemeAccentColor) ||
       Boolean(seedAboutText) ||
       Boolean(seedMemberSinceLabel);
     const cached = targetId ? targetProfileCache.get(targetId) ?? null : null;
@@ -1949,6 +2228,8 @@ export default function DirectMessageChatView({
       setTargetBannerSrc(cached.bannerSrc);
       setTargetBannerHasCustomAsset(cached.hasCustomBannerAsset);
       setTargetBannerColor(cached.bannerColor);
+      setTargetThemePrimaryColor(cached.themePrimaryColor);
+      setTargetThemeAccentColor(cached.themeAccentColor);
       setTargetAboutText(cached.aboutText);
       setCanExpandBiography(false);
       setTargetMemberSinceLabel(cached.memberSinceLabel);
@@ -1957,6 +2238,8 @@ export default function DirectMessageChatView({
       setTargetBannerSrc(seedBannerSrc);
       setTargetBannerHasCustomAsset(seedHasCustomBannerAsset);
       setTargetBannerColor(seedBannerColor);
+      setTargetThemePrimaryColor(seedThemePrimaryColor);
+      setTargetThemeAccentColor(seedThemeAccentColor);
       setTargetAboutText(seedAboutText);
       setCanExpandBiography(false);
       setTargetMemberSinceLabel(seedMemberSinceLabel);
@@ -1974,16 +2257,39 @@ export default function DirectMessageChatView({
         if (cancelled) {
           return;
         }
-        const normalizedBannerColor = normalizeBannerColor(bannerRow?.banner_color) ?? seedBannerColor;
+        const bannerRowHasBannerColor = bannerRow ? Object.prototype.hasOwnProperty.call(bannerRow, "banner_color") : false;
+        const bannerRowHasThemePrimaryColor = bannerRow
+          ? Object.prototype.hasOwnProperty.call(bannerRow, "profile_theme_primary_color")
+          : false;
+        const bannerRowHasThemeAccentColor = bannerRow
+          ? Object.prototype.hasOwnProperty.call(bannerRow, "profile_theme_accent_color")
+          : false;
+        const normalizedBannerColor = bannerRowHasBannerColor
+          ? normalizeBannerColor(bannerRow?.banner_color) ?? null
+          : seedBannerColor;
+        const normalizedThemePrimaryColor = bannerRowHasThemePrimaryColor
+          ? normalizeBannerColor(bannerRow?.profile_theme_primary_color) ?? null
+          : seedThemePrimaryColor;
+        const normalizedThemeAccentColor = bannerRowHasThemeAccentColor
+          ? normalizeBannerColor(bannerRow?.profile_theme_accent_color) ?? null
+          : seedThemeAccentColor;
         const resolvedAboutText = String(bannerRow?.about ?? seedAboutText).trim();
         const resolvedMemberSince = formatMemberSinceDate(bannerRow?.created_at ?? targetUser.memberSinceAt) || "Data nao disponivel";
-        const resolvedBannerKey = String(bannerRow?.banner_key ?? seedBannerKey ?? "").trim() || null;
-        const resolvedBannerHash = String(bannerRow?.banner_hash ?? seedBannerHash ?? "").trim() || null;
+        const bannerRowHasBannerKey = bannerRow ? Object.prototype.hasOwnProperty.call(bannerRow, "banner_key") : false;
+        const bannerRowHasBannerHash = bannerRow ? Object.prototype.hasOwnProperty.call(bannerRow, "banner_hash") : false;
+        const resolvedBannerKey = String(
+          (bannerRowHasBannerKey ? bannerRow?.banner_key : seedBannerKey) ?? "",
+        ).trim() || null;
+        const resolvedBannerHash = String(
+          (bannerRowHasBannerHash ? bannerRow?.banner_hash : seedBannerHash) ?? "",
+        ).trim() || null;
         const hasCustomBannerAsset = Boolean(resolvedBannerKey);
 
         if (!cancelled) {
           setTargetBannerHasCustomAsset(hasCustomBannerAsset);
           setTargetBannerColor(normalizedBannerColor);
+          setTargetThemePrimaryColor(normalizedThemePrimaryColor);
+          setTargetThemeAccentColor(normalizedThemeAccentColor);
           setTargetAboutText(resolvedAboutText);
           setCanExpandBiography(false);
           setTargetMemberSinceLabel(resolvedMemberSince);
@@ -1994,6 +2300,8 @@ export default function DirectMessageChatView({
           const fallbackEntry: TargetProfileCacheEntry = {
             bannerSrc: defaultBanner,
             bannerColor: normalizedBannerColor,
+            themePrimaryColor: normalizedThemePrimaryColor,
+            themeAccentColor: normalizedThemeAccentColor,
             aboutText: resolvedAboutText,
             memberSinceLabel: resolvedMemberSince,
             hasCustomBannerAsset: false,
@@ -2006,6 +2314,8 @@ export default function DirectMessageChatView({
         targetProfileCache.set(targetId, {
           bannerSrc: cached?.bannerSrc ?? seedBannerSrc,
           bannerColor: normalizedBannerColor,
+          themePrimaryColor: normalizedThemePrimaryColor,
+          themeAccentColor: normalizedThemeAccentColor,
           aboutText: resolvedAboutText,
           memberSinceLabel: resolvedMemberSince,
           hasCustomBannerAsset: true,
@@ -2021,6 +2331,8 @@ export default function DirectMessageChatView({
         targetProfileCache.set(targetId, {
           bannerSrc: resolvedBannerSrc,
           bannerColor: normalizedBannerColor,
+          themePrimaryColor: normalizedThemePrimaryColor,
+          themeAccentColor: normalizedThemeAccentColor,
           aboutText: resolvedAboutText,
           memberSinceLabel: resolvedMemberSince,
           hasCustomBannerAsset: true,
@@ -2031,6 +2343,8 @@ export default function DirectMessageChatView({
             setTargetBannerSrc(seedBannerSrc);
             setTargetBannerHasCustomAsset(seedHasCustomBannerAsset);
             setTargetBannerColor(seedBannerColor);
+            setTargetThemePrimaryColor(seedThemePrimaryColor);
+            setTargetThemeAccentColor(seedThemeAccentColor);
             setTargetAboutText(seedAboutText);
             setCanExpandBiography(false);
             setTargetMemberSinceLabel(seedMemberSinceLabel);
@@ -2039,6 +2353,8 @@ export default function DirectMessageChatView({
             targetProfileCache.set(targetId, {
               bannerSrc: seedBannerSrc,
               bannerColor: seedBannerColor,
+              themePrimaryColor: seedThemePrimaryColor,
+              themeAccentColor: seedThemeAccentColor,
               aboutText: seedAboutText,
               memberSinceLabel: seedMemberSinceLabel || "Data nao disponivel",
               hasCustomBannerAsset: seedHasCustomBannerAsset,
@@ -2047,6 +2363,8 @@ export default function DirectMessageChatView({
             setTargetBannerSrc(defaultBanner);
             setTargetBannerHasCustomAsset(false);
             setTargetBannerColor(null);
+            setTargetThemePrimaryColor(null);
+            setTargetThemeAccentColor(null);
             setTargetAboutText("");
             setCanExpandBiography(false);
             setTargetMemberSinceLabel("Data nao disponivel");
@@ -2055,6 +2373,8 @@ export default function DirectMessageChatView({
             targetProfileCache.set(targetId, {
               bannerSrc: defaultBanner,
               bannerColor: null,
+              themePrimaryColor: null,
+              themeAccentColor: null,
               aboutText: "",
               memberSinceLabel: "Data nao disponivel",
               hasCustomBannerAsset: false,
@@ -2070,8 +2390,11 @@ export default function DirectMessageChatView({
       cancelled = true;
     };
   }, [
+    isSidebarFullProfileOpen,
     targetUser.aboutText,
     targetUser.bannerColor,
+    targetUser.themeAccentColor,
+    targetUser.themePrimaryColor,
     targetUser.bannerHash,
     targetUser.bannerKey,
     targetUser.bannerSrc,
@@ -2141,6 +2464,24 @@ export default function DirectMessageChatView({
     }
     return messageProfileExtrasByUserId[openMessageProfileUserId]?.bannerColor ?? null;
   }, [messageProfileExtrasByUserId, openMessageProfileUserId, targetBannerColor, targetUser.userId]);
+  const openMessageProfileThemePrimaryColor = useMemo(() => {
+    if (!openMessageProfileUserId) {
+      return null;
+    }
+    if (openMessageProfileUserId === targetUser.userId) {
+      return targetThemePrimaryColor;
+    }
+    return messageProfileExtrasByUserId[openMessageProfileUserId]?.themePrimaryColor ?? null;
+  }, [messageProfileExtrasByUserId, openMessageProfileUserId, targetThemePrimaryColor, targetUser.userId]);
+  const openMessageProfileThemeAccentColor = useMemo(() => {
+    if (!openMessageProfileUserId) {
+      return null;
+    }
+    if (openMessageProfileUserId === targetUser.userId) {
+      return targetThemeAccentColor;
+    }
+    return messageProfileExtrasByUserId[openMessageProfileUserId]?.themeAccentColor ?? null;
+  }, [messageProfileExtrasByUserId, openMessageProfileUserId, targetThemeAccentColor, targetUser.userId]);
   const openMessageProfileAboutText = useMemo(() => {
     if (!openMessageProfileUserId) {
       return "";
@@ -2171,6 +2512,8 @@ export default function DirectMessageChatView({
           [safeUserId]: {
             bannerSrc: String(resolvedBanner ?? "").trim() || defaultBanner,
             bannerColor: normalizeBannerColor(row?.banner_color) ?? null,
+            themePrimaryColor: normalizeBannerColor(row?.profile_theme_primary_color) ?? null,
+            themeAccentColor: normalizeBannerColor(row?.profile_theme_accent_color) ?? null,
             aboutText: String(row?.about ?? "").trim(),
           },
         };
@@ -2185,6 +2528,8 @@ export default function DirectMessageChatView({
           [safeUserId]: {
             bannerSrc: defaultBanner,
             bannerColor: null,
+            themePrimaryColor: null,
+            themeAccentColor: null,
             aboutText: "",
           },
         };
@@ -2873,10 +3218,19 @@ export default function DirectMessageChatView({
     let initialLoadSettled = false;
 
     const cachedConversation = getConversationMessagesCache(conversationId);
+    const staleConversationSeed = cachedConversation ? null : getStaleConversationMessagesCache(conversationId);
     const cachedConversationHasMessages = Boolean(cachedConversation && cachedConversation.messages.length > 0);
+    const staleConversationHasMessages = Boolean(staleConversationSeed && staleConversationSeed.messages.length > 0);
     const preloadedConversation = getCachedInitialChatMessages(conversationId, INITIAL_MESSAGE_CACHE_TTL_MS);
+    const stalePreloadedConversation =
+      preloadedConversation || cachedConversationHasMessages || staleConversationHasMessages
+        ? null
+        : getCachedInitialChatMessages(conversationId, STALE_MESSAGE_SEED_CACHE_TTL_MS);
     const preloadedWindow = preloadedConversation ? normalizeListedMessages(preloadedConversation.messages ?? []) : null;
-    const preloadedHasSeed = Boolean(preloadedWindow);
+    const stalePreloadedWindow = stalePreloadedConversation
+      ? normalizeListedMessages(stalePreloadedConversation.messages ?? [])
+      : null;
+    const preloadedHasSeed = Boolean(preloadedWindow || stalePreloadedWindow || staleConversationHasMessages);
 
     if (cachedConversationHasMessages && cachedConversation) {
       setMessages(cachedConversation.messages);
@@ -2891,6 +3245,19 @@ export default function DirectMessageChatView({
         source: "conversation",
         messageCount: cachedConversation.messages.length,
       });
+    } else if (staleConversationHasMessages && staleConversationSeed) {
+      setMessages(staleConversationSeed.messages);
+      setNextCursor(staleConversationSeed.nextCursor);
+      setHasMoreBefore(staleConversationSeed.hasMoreBefore);
+      setDeletedMessageIds(new Set(staleConversationSeed.deletedMessageIds ?? []));
+      setAttachmentUrlMap(staleConversationSeed.attachmentUrlMap);
+      setAttachmentThumbUrlMap(staleConversationSeed.attachmentThumbUrlMap);
+      previousMessageCountRef.current = staleConversationSeed.messages.length;
+      logChatPerf("open:cache-hit", {
+        conversationId,
+        source: "conversation-stale-seed",
+        messageCount: staleConversationSeed.messages.length,
+      });
     } else if (preloadedConversation && preloadedWindow) {
       setMessages(preloadedWindow.visibleMessages);
       setNextCursor(preloadedConversation.nextCursor ?? null);
@@ -2903,6 +3270,19 @@ export default function DirectMessageChatView({
         conversationId,
         source: "preload",
         messageCount: preloadedWindow.visibleMessages.length,
+      });
+    } else if (stalePreloadedConversation && stalePreloadedWindow) {
+      setMessages(stalePreloadedWindow.visibleMessages);
+      setNextCursor(stalePreloadedConversation.nextCursor ?? null);
+      setHasMoreBefore(Boolean(stalePreloadedConversation.nextCursor));
+      setDeletedMessageIds(new Set(stalePreloadedWindow.deletedIds));
+      setAttachmentUrlMap({});
+      setAttachmentThumbUrlMap({});
+      previousMessageCountRef.current = stalePreloadedWindow.visibleMessages.length;
+      logChatPerf("open:cache-hit", {
+        conversationId,
+        source: "preload-stale-seed",
+        messageCount: stalePreloadedWindow.visibleMessages.length,
       });
     } else {
       setMessages([]);
@@ -3603,12 +3983,15 @@ export default function DirectMessageChatView({
           thumbUrl,
         };
       } catch (error) {
+        if (typeof console !== "undefined" && typeof console.error === "function") {
+          console.error("[chat] attachment upload failed", error);
+        }
         setDraftAttachments((current) =>
           current.map((item) =>
             item.id === attachment.id
               ? {
                   ...item,
-                  uploadError: error instanceof Error ? error.message : "Falha no upload.",
+                  uploadError: getSafeDraftAttachmentUploadErrorMessage(error),
                 }
               : item,
           ),
@@ -3699,7 +4082,7 @@ export default function DirectMessageChatView({
         const serverMessage = await insertMessage(content, "text", textClientId, replyPayload ?? undefined);
         setMessages((current) => {
           const withoutOptimistic = current.filter((message) => !(message.clientId === textClientId && message.optimistic));
-          const nextMessages = sortMessages([...withoutOptimistic, serverMessage]);
+          const nextMessages = upsertMessages(withoutOptimistic, [serverMessage]);
           return nextMessages;
         });
         void markConversationAsRead([serverMessage]);
@@ -3744,7 +4127,7 @@ export default function DirectMessageChatView({
 
         if (successfulAttachments.length > 0) {
           const nextAttachmentMessages = successfulAttachments.map((item) => item.attachmentMessage);
-          setMessages((current) => sortMessages([...current, ...nextAttachmentMessages]));
+          setMessages((current) => upsertMessages(current, nextAttachmentMessages));
 
           setAttachmentUrlMap((current) => {
             const nextMap = { ...current };
@@ -3889,7 +4272,7 @@ export default function DirectMessageChatView({
 
         setMessages((current) => {
           const withoutOptimistic = current.filter((item) => !(item.clientId === retryClientId && item.optimistic));
-          return sortMessages([...withoutOptimistic, resent]);
+          return upsertMessages(withoutOptimistic, [resent]);
         });
       } catch (error) {
         reportClientError(error, {
@@ -4028,8 +4411,15 @@ export default function DirectMessageChatView({
     const targetId = deleteTarget.id;
     const deleteTargetSnapshot = deleteTarget;
     const snapshot = messages;
+    if (deletingMessageIds.has(targetId)) {
+      return;
+    }
     const alreadyKnownAsDeleted = deletedMessageIds.has(targetId);
-    setIsDeletingMessage(true);
+    setDeletingMessageIds((current) => {
+      const next = new Set(current);
+      next.add(targetId);
+      return next;
+    });
     setDeleteTarget(null);
     setDeletedMessageIds((current) => {
       const next = new Set(current);
@@ -4066,9 +4456,16 @@ export default function DirectMessageChatView({
       setDeleteTarget(deleteTargetSnapshot);
       setLoadError(error instanceof Error ? error.message : "Nao foi possivel excluir a mensagem.");
     } finally {
-      setIsDeletingMessage(false);
+      setDeletingMessageIds((current) => {
+        if (!current.has(targetId)) {
+          return current;
+        }
+        const next = new Set(current);
+        next.delete(targetId);
+        return next;
+      });
     }
-  }, [canDeleteMessage, deleteTarget, deletedMessageIds, messages]);
+  }, [canDeleteMessage, deleteTarget, deletedMessageIds, deletingMessageIds, messages]);
 
   const handlePickAttachments = useCallback((event: ChangeEvent<HTMLInputElement>): void => {
     const pickedFiles = Array.from(event.currentTarget.files ?? []);
@@ -4130,6 +4527,7 @@ export default function DirectMessageChatView({
   const currentViewerItem = mediaViewerState ? mediaViewerState.items[mediaViewerState.index] ?? null : null;
   const shouldShowSidebarProfileMetaCard = Boolean(targetAboutText) || Boolean(targetMemberSinceLabel);
   const targetMemberSinceLabelForFullProfile = targetMemberSinceLabel || "Data nao disponivel";
+  const isDeletingCurrentDeleteTarget = Boolean(deleteTarget && deletingMessageIds.has(deleteTarget.id));
   const handleDownloadViewerMedia = useCallback((): void => {
     if (!currentViewerItem) {
       return;
@@ -6740,7 +7138,11 @@ export default function DirectMessageChatView({
         </div>
 
         {!isCallLayoutActive ? (
-        <aside className="dm-chat__profile-sidebar" aria-label={`Perfil de ${safeTargetDisplayName}`}>
+        <aside
+          className="dm-chat__profile-sidebar"
+          aria-label={`Perfil de ${safeTargetDisplayName}`}
+          style={targetSidebarProfileThemeInlineStyle}
+        >
           <section className="dm-chat__profile-panel">
             <div className="dm-chat__profile-banner-wrap" style={targetBannerInlineStyle}>
               {targetHasCustomBannerImage ? (
@@ -6862,6 +7264,8 @@ export default function DirectMessageChatView({
                 avatarSrc={openMessageProfileAvatarSrc}
                 bannerSrc={openMessageProfileBannerSrc}
                 bannerColor={openMessageProfileBannerColor}
+                themePrimaryColor={openMessageProfileThemePrimaryColor}
+                themeAccentColor={openMessageProfileThemeAccentColor}
                 displayName={openMessageProfileDisplayName}
                 username={openMessageProfileUsername}
                 aboutText={openMessageProfileAboutText}
@@ -6901,6 +7305,8 @@ export default function DirectMessageChatView({
                   avatarSrc={targetAvatarSrc}
                   bannerSrc={targetBannerSrc}
                   bannerColor={targetBannerColor}
+                  themePrimaryColor={targetThemePrimaryColor}
+                  themeAccentColor={targetThemeAccentColor}
                   displayName={safeTargetDisplayName}
                   username={safeTargetUsername}
                   viewMode="full"
@@ -7038,7 +7444,7 @@ export default function DirectMessageChatView({
         title="Excluir mensagem"
         ariaLabel="Confirmar exclusao de mensagem"
         onClose={() => {
-          if (!isDeletingMessage) {
+          if (!isDeletingCurrentDeleteTarget) {
             setDeleteTarget(null);
           }
         }}
@@ -7050,7 +7456,7 @@ export default function DirectMessageChatView({
               type="button"
               className="dm-chat__delete-modal-btn"
               onClick={() => setDeleteTarget(null)}
-              disabled={isDeletingMessage}
+              disabled={isDeletingCurrentDeleteTarget}
             >
               Cancelar
             </button>
@@ -7058,7 +7464,7 @@ export default function DirectMessageChatView({
               type="button"
               className="dm-chat__delete-modal-btn dm-chat__delete-modal-btn--danger"
               onClick={() => void handleConfirmDelete()}
-              disabled={isDeletingMessage}
+              disabled={isDeletingCurrentDeleteTarget}
             >
               Excluir
             </button>

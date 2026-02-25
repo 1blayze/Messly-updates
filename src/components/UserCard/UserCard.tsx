@@ -10,6 +10,8 @@ import {
   dispatchSidebarCallToggleSound,
   type SidebarCallStateDetail,
 } from "../../services/calls/callUiPresence";
+import { firebaseAuth } from "../../services/firebase";
+import { normalizeBannerColor } from "../../services/profile/bannerColor";
 import { supabase } from "../../services/supabase";
 import MaterialSymbolIcon from "../ui/MaterialSymbolIcon";
 import UserCardMini from "../UserCardMini/UserCardMini";
@@ -17,6 +19,58 @@ import UserProfilePopover from "../UserProfilePopover/UserProfilePopover";
 import styles from "./UserCard.module.css";
 
 const SIDEBAR_CALL_PERSIST_KEY = "messly:sidebar-call-state:v2";
+const PROFILE_PLUS_THEME_STORAGE_KEY_PREFIX = "messly:profile-plus-theme:";
+const PROFILE_PLUS_THEME_UPDATED_EVENT = "messly:profile-plus-theme-updated";
+
+interface PersistedProfilePlusThemeSettings {
+  v?: number;
+  primary?: string | null;
+  accent?: string | null;
+}
+
+interface ProfilePlusThemeState {
+  primary: string | null;
+  accent: string | null;
+}
+
+function buildProfilePlusThemeStorageKey(userUid: string | null | undefined): string {
+  const normalizedUid = String(userUid ?? "").trim();
+  if (!normalizedUid) {
+    return `${PROFILE_PLUS_THEME_STORAGE_KEY_PREFIX}guest`;
+  }
+  return `${PROFILE_PLUS_THEME_STORAGE_KEY_PREFIX}${normalizedUid}`;
+}
+
+function readProfilePlusThemeState(): ProfilePlusThemeState {
+  if (typeof window === "undefined") {
+    return { primary: null, accent: null };
+  }
+
+  const candidateKeys = Array.from(
+    new Set([
+      buildProfilePlusThemeStorageKey(firebaseAuth.currentUser?.uid ?? null),
+      buildProfilePlusThemeStorageKey(null),
+    ]),
+  );
+
+  for (const storageKey of candidateKeys) {
+    try {
+      const raw = window.localStorage.getItem(storageKey);
+      if (!raw) {
+        continue;
+      }
+      const parsed = JSON.parse(raw) as PersistedProfilePlusThemeSettings | null;
+      return {
+        primary: normalizeBannerColor(parsed?.primary ?? null),
+        accent: normalizeBannerColor(parsed?.accent ?? null),
+      };
+    } catch {
+      // Ignore malformed local cache.
+    }
+  }
+
+  return { primary: null, accent: null };
+}
 
 interface UserCardProps {
   userId?: string | null;
@@ -49,6 +103,7 @@ export default function UserCard({
   const [isProfileOpen, setIsProfileOpen] = useState(false);
   const [isFullProfileOpen, setIsFullProfileOpen] = useState(false);
   const [isVoiceDetailsOpen, setIsVoiceDetailsOpen] = useState(false);
+  const [profileThemeState, setProfileThemeState] = useState<ProfilePlusThemeState>(() => readProfilePlusThemeState());
   const [sidebarCallState, setSidebarCallState] = useState<SidebarCallStateDetail>({
     active: false,
     conversationId: null,
@@ -108,6 +163,10 @@ export default function UserCard({
   const lastPingLabel = sidebarCallState.lastPingMs == null ? "-- ms" : `${Math.max(0, Math.round(sidebarCallState.lastPingMs))} ms`;
   const packetLossLabel = sidebarCallState.packetLossPercent == null ? "--%" : `${sidebarCallState.packetLossPercent.toFixed(1)}%`;
   const shouldShowCallStrip = sidebarCallState.active && sidebarCallState.phase !== "incoming";
+
+  useEffect(() => {
+    setProfileThemeState(readProfilePlusThemeState());
+  }, [userId]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -279,6 +338,27 @@ export default function UserCard({
   }, [isProfileOpen, isVoiceDetailsOpen]);
 
   useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const handleProfileThemeUpdated = (event: Event): void => {
+      const currentAuthUid = String(firebaseAuth.currentUser?.uid ?? "").trim();
+      const detail = (event as CustomEvent<{ userUid?: string | null } | undefined>).detail;
+      const updatedUid = String(detail?.userUid ?? "").trim();
+      if (updatedUid && currentAuthUid && updatedUid !== currentAuthUid) {
+        return;
+      }
+      setProfileThemeState(readProfilePlusThemeState());
+    };
+
+    window.addEventListener(PROFILE_PLUS_THEME_UPDATED_EVENT, handleProfileThemeUpdated as EventListener);
+    return () => {
+      window.removeEventListener(PROFILE_PLUS_THEME_UPDATED_EVENT, handleProfileThemeUpdated as EventListener);
+    };
+  }, []);
+
+  useEffect(() => {
     if (!shouldShowCallStrip) {
       setIsVoiceDetailsOpen(false);
     }
@@ -377,6 +457,8 @@ export default function UserCard({
             avatarSrc={safeAvatarSrc}
             bannerSrc={bannerSrc}
             bannerColor={bannerColor}
+            themePrimaryColor={profileThemeState.primary}
+            themeAccentColor={profileThemeState.accent}
             displayName={safeDisplayName}
             username={safeUsername}
             aboutText={aboutText}
@@ -490,6 +572,8 @@ export default function UserCard({
                   avatarSrc={safeAvatarSrc}
                   bannerSrc={bannerSrc}
                   bannerColor={bannerColor}
+                  themePrimaryColor={profileThemeState.primary}
+                  themeAccentColor={profileThemeState.accent}
                   displayName={safeDisplayName}
                   username={safeUsername}
                   aboutText={aboutText}

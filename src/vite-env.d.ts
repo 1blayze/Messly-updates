@@ -137,6 +137,7 @@ interface WindowsBehaviorSettingsRestoreResult {
 
 interface ElectronApi {
   platform: string;
+  arch?: string;
   getSignedMediaUrl?: (payload: GetSignedMediaUrlPayload) => Promise<GetSignedMediaUrlResult>;
   uploadProfileMedia?: (payload: UploadProfileMediaPayload) => Promise<UploadProfileMediaResult>;
   uploadAttachment?: (payload: UploadAttachmentPayload) => Promise<UploadAttachmentResult>;

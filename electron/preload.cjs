@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("electronAPI", {
   platform: process.platform,
+  arch: process.arch,
   getSignedMediaUrl: (payload) => ipcRenderer.invoke("media:get-signed-url", payload),
   uploadProfileMedia: (payload) => ipcRenderer.invoke("media:upload-profile", payload),
   uploadAttachment: (payload) => ipcRenderer.invoke("media:upload-attachment", payload),

@@ -28,6 +28,8 @@ interface SidebarIdentity {
   username: string;
   about: string;
   bannerColor: string | null;
+  themePrimaryColor: string | null;
+  themeAccentColor: string | null;
   avatarKey: string | null;
   avatarHash: string | null;
   avatarUrl: string | null;
@@ -45,6 +47,8 @@ export interface SidebarDirectMessageSelection {
   firebaseUid?: string;
   aboutText?: string;
   bannerColor?: string | null;
+  themePrimaryColor?: string | null;
+  themeAccentColor?: string | null;
   bannerKey?: string | null;
   bannerHash?: string | null;
   bannerSrc?: string;
@@ -71,6 +75,7 @@ interface ProfileMediaUpdatedDetail {
   userId: string;
   avatar_key?: string | null;
   avatar_hash?: string | null;
+  banner_color?: string | null;
   banner_key?: string | null;
   banner_hash?: string | null;
 }
@@ -81,6 +86,8 @@ interface ProfileUpdatedDetail {
   username?: string | null;
   about?: string | null;
   banner_color?: string | null;
+  profile_theme_primary_color?: string | null;
+  profile_theme_accent_color?: string | null;
 }
 
 interface DmUserRow {
@@ -94,6 +101,8 @@ interface DmUserRow {
   firebase_uid?: string | null;
   about?: string | null;
   banner_color?: string | null;
+  profile_theme_primary_color?: string | null;
+  profile_theme_accent_color?: string | null;
   banner_key?: string | null;
   banner_hash?: string | null;
   created_at?: string | null;
@@ -121,6 +130,8 @@ interface DirectMessageItem {
   firebaseUid?: string;
   aboutText?: string;
   bannerColor?: string | null;
+  themePrimaryColor?: string | null;
+  themeAccentColor?: string | null;
   bannerKey?: string | null;
   bannerHash?: string | null;
   bannerSrc?: string;
@@ -138,6 +149,8 @@ interface CachedSidebarIdentity {
   username: string;
   about: string;
   bannerColor: string | null;
+  themePrimaryColor: string | null;
+  themeAccentColor: string | null;
   avatarKey: string | null;
   avatarHash: string | null;
   avatarUrl: string | null;
@@ -148,7 +161,7 @@ interface CachedSidebarIdentity {
 const SIDEBAR_IDENTITY_CACHE_PREFIX = "messly:sidebar-identity:";
 const DIRECT_MESSAGES_CACHE_PREFIX = "messly:direct-messages:";
 const SIDEBAR_RESOLVED_MEDIA_CACHE_PREFIX = "messly:sidebar-media:";
-const DIRECT_MESSAGES_CACHE_VERSION = 5;
+const DIRECT_MESSAGES_CACHE_VERSION = 6;
 const DM_PRELOAD_LIMIT = 30;             
 const DM_PRELOAD_HOVER_DEBOUNCE_MS = 150; 
 const DM_PRELOAD_MAX_AGE_MS = 90_000;
@@ -181,6 +194,8 @@ function toSidebarSelection(dm: DirectMessageItem): SidebarDirectMessageSelectio
     firebaseUid: dm.firebaseUid,
     aboutText: dm.aboutText,
     bannerColor: dm.bannerColor ?? null,
+    themePrimaryColor: dm.themePrimaryColor ?? null,
+    themeAccentColor: dm.themeAccentColor ?? null,
     bannerKey: dm.bannerKey ?? null,
     bannerHash: dm.bannerHash ?? null,
     bannerSrc: dm.bannerSrc,
@@ -238,6 +253,8 @@ function readSidebarIdentityCache(firebaseUid: string | null | undefined): Cache
       username: String(parsed.username ?? "").trim(),
       about: String(parsed.about ?? ""),
       bannerColor: normalizeBannerColor(parsed.bannerColor) ?? null,
+      themePrimaryColor: normalizeBannerColor((parsed as { themePrimaryColor?: string | null }).themePrimaryColor) ?? null,
+      themeAccentColor: normalizeBannerColor((parsed as { themeAccentColor?: string | null }).themeAccentColor) ?? null,
       avatarKey: parsed.avatarKey ?? null,
       avatarHash: parsed.avatarHash ?? null,
       avatarUrl: parsed.avatarUrl ?? null,
@@ -262,6 +279,8 @@ function writeSidebarIdentityCache(firebaseUid: string | null | undefined, ident
       username: identity.username,
       about: identity.about,
       bannerColor: identity.bannerColor,
+      themePrimaryColor: identity.themePrimaryColor,
+      themeAccentColor: identity.themeAccentColor,
       avatarKey: identity.avatarKey,
       avatarHash: identity.avatarHash,
       avatarUrl: identity.avatarUrl,
@@ -306,6 +325,10 @@ function readDirectMessagesCache(userId: string | null | undefined): DirectMessa
         const firebaseUid = String((casted as { firebaseUid?: string | null }).firebaseUid ?? "").trim();
         const aboutText = String((casted as { aboutText?: string | null }).aboutText ?? "").trim();
         const bannerColor = normalizeBannerColor((casted as { bannerColor?: string | null }).bannerColor) ?? null;
+        const themePrimaryColor =
+          normalizeBannerColor((casted as { themePrimaryColor?: string | null }).themePrimaryColor) ?? null;
+        const themeAccentColor =
+          normalizeBannerColor((casted as { themeAccentColor?: string | null }).themeAccentColor) ?? null;
         const bannerKey = String((casted as { bannerKey?: string | null }).bannerKey ?? "").trim() || null;
         const bannerHash = String((casted as { bannerHash?: string | null }).bannerHash ?? "").trim() || null;
         const bannerSrc = String((casted as { bannerSrc?: string | null }).bannerSrc ?? "").trim();
@@ -320,6 +343,8 @@ function readDirectMessagesCache(userId: string | null | undefined): DirectMessa
           ...(firebaseUid ? { firebaseUid } : {}),
           ...(aboutText ? { aboutText } : {}),
           ...(bannerColor ? { bannerColor } : {}),
+          ...(themePrimaryColor ? { themePrimaryColor } : {}),
+          ...(themeAccentColor ? { themeAccentColor } : {}),
           ...(bannerKey ? { bannerKey } : {}),
           ...(bannerHash ? { bannerHash } : {}),
           ...(bannerSrc ? { bannerSrc } : {}),
@@ -488,16 +513,26 @@ function mergeDirectMessagesWithoutAvatarDowngrade(
     if (!mergedItem.aboutText && currentItem.aboutText) {
       mergedItem.aboutText = currentItem.aboutText;
     }
-    if (!mergedItem.bannerColor && currentItem.bannerColor) {
+    if (typeof mergedItem.bannerColor === "undefined" && currentItem.bannerColor) {
       mergedItem.bannerColor = currentItem.bannerColor;
     }
-    if (!mergedItem.bannerKey && currentItem.bannerKey) {
+    if (typeof mergedItem.themePrimaryColor === "undefined" && currentItem.themePrimaryColor) {
+      mergedItem.themePrimaryColor = currentItem.themePrimaryColor;
+    }
+    if (typeof mergedItem.themeAccentColor === "undefined" && currentItem.themeAccentColor) {
+      mergedItem.themeAccentColor = currentItem.themeAccentColor;
+    }
+    if (typeof mergedItem.bannerKey === "undefined" && currentItem.bannerKey) {
       mergedItem.bannerKey = currentItem.bannerKey;
     }
-    if (!mergedItem.bannerHash && currentItem.bannerHash) {
+    if (typeof mergedItem.bannerHash === "undefined" && currentItem.bannerHash) {
       mergedItem.bannerHash = currentItem.bannerHash;
     }
-    if (!mergedItem.bannerSrc && currentItem.bannerSrc) {
+    if (
+      typeof mergedItem.bannerSrc === "undefined" &&
+      currentItem.bannerSrc &&
+      (Boolean(mergedItem.bannerKey) || Boolean(mergedItem.bannerHash))
+    ) {
       mergedItem.bannerSrc = currentItem.bannerSrc;
     }
     if (!mergedItem.memberSinceAt && currentItem.memberSinceAt) {
@@ -526,6 +561,8 @@ function areDirectMessageListsEqual(current: DirectMessageItem[], next: DirectMe
       (currentItem.firebaseUid ?? "") !== (nextItem.firebaseUid ?? "") ||
       (currentItem.aboutText ?? "") !== (nextItem.aboutText ?? "") ||
       (currentItem.bannerColor ?? "") !== (nextItem.bannerColor ?? "") ||
+      (currentItem.themePrimaryColor ?? "") !== (nextItem.themePrimaryColor ?? "") ||
+      (currentItem.themeAccentColor ?? "") !== (nextItem.themeAccentColor ?? "") ||
       (currentItem.bannerKey ?? "") !== (nextItem.bannerKey ?? "") ||
       (currentItem.bannerHash ?? "") !== (nextItem.bannerHash ?? "") ||
       (currentItem.bannerSrc ?? "") !== (nextItem.bannerSrc ?? "") ||
@@ -674,6 +711,8 @@ const DEFAULT_IDENTITY: SidebarIdentity = {
   username: "username",
   about: "",
   bannerColor: null,
+  themePrimaryColor: null,
+  themeAccentColor: null,
   avatarKey: null,
   avatarHash: null,
   avatarUrl: null,
@@ -682,9 +721,9 @@ const DEFAULT_IDENTITY: SidebarIdentity = {
 };
 
 const USER_PROFILE_SELECT_COLUMNS =
-  "id,username,display_name,email,firebase_uid,about,banner_color,avatar_key,avatar_hash,avatar_url,banner_key,banner_hash";
+  "id,username,display_name,email,firebase_uid,about,banner_color,profile_theme_primary_color,profile_theme_accent_color,avatar_key,avatar_hash,avatar_url,banner_key,banner_hash";
 const USER_PROFILE_SELECT_COLUMNS_WITHOUT_AVATAR_URL =
-  "id,username,display_name,email,firebase_uid,about,banner_color,avatar_key,avatar_hash,banner_key,banner_hash";
+  "id,username,display_name,email,firebase_uid,about,banner_color,profile_theme_primary_color,profile_theme_accent_color,avatar_key,avatar_hash,banner_key,banner_hash";
 const USER_PROFILE_SELECT_COLUMNS_FALLBACK = "id,username,display_name,email,firebase_uid,about";
 
 function isUsersSchemaColumnCacheError(message: string): boolean {
@@ -798,6 +837,8 @@ function buildIdentityFromSession(_email: string | null | undefined, displayName
     username: DEFAULT_IDENTITY.username,
     about: "",
     bannerColor: null,
+    themePrimaryColor: null,
+    themeAccentColor: null,
     avatarKey: null,
     avatarHash: null,
     avatarUrl: null,
@@ -833,6 +874,8 @@ export default function DirectMessagesSidebar({
       username: resolvedUsername,
       about: String(cached.about ?? ""),
       bannerColor: normalizeBannerColor(cached.bannerColor) ?? null,
+      themePrimaryColor: normalizeBannerColor(cached.themePrimaryColor) ?? null,
+      themeAccentColor: normalizeBannerColor(cached.themeAccentColor) ?? null,
       avatarKey: cached.avatarKey,
       avatarHash: cached.avatarHash,
       avatarUrl: cached.avatarUrl,
@@ -925,6 +968,8 @@ export default function DirectMessagesSidebar({
       username: resolvedUsername,
       about: String(cached.about ?? ""),
       bannerColor: normalizeBannerColor(cached.bannerColor) ?? null,
+      themePrimaryColor: normalizeBannerColor(cached.themePrimaryColor) ?? null,
+      themeAccentColor: normalizeBannerColor(cached.themeAccentColor) ?? null,
       avatarKey: cached.avatarKey,
       avatarHash: cached.avatarHash,
       avatarUrl: cached.avatarUrl,
@@ -970,6 +1015,8 @@ export default function DirectMessagesSidebar({
       identity.username !== DEFAULT_IDENTITY.username ||
       Boolean(identity.about) ||
       Boolean(identity.bannerColor) ||
+      Boolean(identity.themePrimaryColor) ||
+      Boolean(identity.themeAccentColor) ||
       Boolean(identity.avatarKey) ||
       Boolean(identity.avatarHash) ||
       Boolean(identity.bannerKey) ||
@@ -1004,6 +1051,8 @@ export default function DirectMessagesSidebar({
               username?: string | null;
               about?: string | null;
               banner_color?: string | null;
+              profile_theme_primary_color?: string | null;
+              profile_theme_accent_color?: string | null;
               avatar_key?: string | null;
               avatar_hash?: string | null;
               avatar_url?: string | null;
@@ -1060,6 +1109,8 @@ export default function DirectMessagesSidebar({
           username: resolvedUsername || current.username,
           about: String(row.about ?? "").trim(),
           bannerColor: normalizeBannerColor(row.banner_color) ?? null,
+          themePrimaryColor: normalizeBannerColor(row.profile_theme_primary_color) ?? null,
+          themeAccentColor: normalizeBannerColor(row.profile_theme_accent_color) ?? null,
           avatarKey: (row.avatar_key ?? "").trim() || null,
           avatarHash: (row.avatar_hash ?? "").trim() || null,
           avatarUrl: (row.avatar_url ?? "").trim() || null,
@@ -1113,8 +1164,21 @@ export default function DirectMessagesSidebar({
           next.bannerHash = detail.banner_hash ?? null;
         }
 
+        if (Object.prototype.hasOwnProperty.call(detail, "banner_color")) {
+          next.bannerColor = normalizeBannerColor(detail.banner_color) ?? null;
+        }
+
         return next;
       });
+
+      const bannerKeyTouched = Object.prototype.hasOwnProperty.call(detail, "banner_key");
+      const bannerHashTouched = Object.prototype.hasOwnProperty.call(detail, "banner_hash");
+      const bannerRemoved =
+        (bannerKeyTouched && detail.banner_key == null) || (bannerHashTouched && detail.banner_hash == null);
+
+      if (bannerRemoved) {
+        setBannerSrc(getDefaultBannerUrl());
+      }
     };
 
     window.addEventListener("messly:profile-media-updated", handleProfileMediaUpdated as EventListener);
@@ -1145,12 +1209,20 @@ export default function DirectMessagesSidebar({
         const nextBannerColor = Object.prototype.hasOwnProperty.call(detail, "banner_color")
           ? normalizeBannerColor(detail.banner_color) ?? null
           : current.bannerColor;
+        const nextThemePrimaryColor = Object.prototype.hasOwnProperty.call(detail, "profile_theme_primary_color")
+          ? normalizeBannerColor(detail.profile_theme_primary_color) ?? null
+          : current.themePrimaryColor;
+        const nextThemeAccentColor = Object.prototype.hasOwnProperty.call(detail, "profile_theme_accent_color")
+          ? normalizeBannerColor(detail.profile_theme_accent_color) ?? null
+          : current.themeAccentColor;
 
         if (
           current.username === nextUsername &&
           current.displayName === nextDisplayName &&
           current.about === nextAbout &&
-          current.bannerColor === nextBannerColor
+          current.bannerColor === nextBannerColor &&
+          current.themePrimaryColor === nextThemePrimaryColor &&
+          current.themeAccentColor === nextThemeAccentColor
         ) {
           return current;
         }
@@ -1161,7 +1233,63 @@ export default function DirectMessagesSidebar({
           displayName: nextDisplayName,
           about: nextAbout,
           bannerColor: nextBannerColor,
+          themePrimaryColor: nextThemePrimaryColor,
+          themeAccentColor: nextThemeAccentColor,
         };
+      });
+
+      setDirectMessages((current) => {
+        let changed = false;
+        const updated = current.map((item) => {
+          if (item.userId !== detail.userId) {
+            return item;
+          }
+
+          const nextUsername = normalizeIdentityUsername(detail.username ?? item.username);
+          const nextDisplayName = normalizeIdentityDisplayName(detail.display_name ?? item.displayName, nextUsername, item.displayName);
+          const nextAbout = Object.prototype.hasOwnProperty.call(detail, "about")
+            ? String(detail.about ?? "").trim()
+            : (item.aboutText ?? "");
+          const nextBannerColor = Object.prototype.hasOwnProperty.call(detail, "banner_color")
+            ? normalizeBannerColor(detail.banner_color) ?? null
+            : item.bannerColor ?? null;
+          const nextThemePrimaryColor = Object.prototype.hasOwnProperty.call(detail, "profile_theme_primary_color")
+            ? normalizeBannerColor(detail.profile_theme_primary_color) ?? null
+            : item.themePrimaryColor ?? null;
+          const nextThemeAccentColor = Object.prototype.hasOwnProperty.call(detail, "profile_theme_accent_color")
+            ? normalizeBannerColor(detail.profile_theme_accent_color) ?? null
+            : item.themeAccentColor ?? null;
+
+          if (
+            item.username === nextUsername &&
+            item.displayName === nextDisplayName &&
+            (item.aboutText ?? "") === nextAbout &&
+            (item.bannerColor ?? null) === nextBannerColor &&
+            (item.themePrimaryColor ?? null) === nextThemePrimaryColor &&
+            (item.themeAccentColor ?? null) === nextThemeAccentColor
+          ) {
+            return item;
+          }
+
+          changed = true;
+          return {
+            ...item,
+            username: nextUsername,
+            displayName: nextDisplayName,
+            aboutText: nextAbout,
+            bannerColor: nextBannerColor,
+            themePrimaryColor: nextThemePrimaryColor,
+            themeAccentColor: nextThemeAccentColor,
+          };
+        });
+
+        if (!changed) {
+          return current;
+        }
+        if (identity.userId) {
+          writeDirectMessagesCache(identity.userId, updated);
+        }
+        return updated;
       });
 
     };
@@ -1170,7 +1298,7 @@ export default function DirectMessagesSidebar({
     return () => {
       window.removeEventListener("messly:profile-updated", handleProfileUpdated as EventListener);
     };
-  }, []);
+  }, [identity.userId]);
 
   useEffect(() => {
     let isMounted = true;
@@ -1278,7 +1406,7 @@ export default function DirectMessagesSidebar({
       const usersWithLegacyAvatar = await supabase
         .from("users")
         .select(
-          "id,username,display_name,avatar_key,avatar_hash,avatar_url,status,firebase_uid,about,banner_color,banner_key,banner_hash,created_at",
+          "id,username,display_name,avatar_key,avatar_hash,avatar_url,status,firebase_uid,about,banner_color,profile_theme_primary_color,profile_theme_accent_color,banner_key,banner_hash,created_at",
         )
         .in("id", otherUserIds);
 
@@ -1289,7 +1417,7 @@ export default function DirectMessagesSidebar({
         const usersWithoutLegacyAvatar = await supabase
           .from("users")
           .select(
-            "id,username,display_name,avatar_key,avatar_hash,status,firebase_uid,about,banner_color,banner_key,banner_hash,created_at",
+            "id,username,display_name,avatar_key,avatar_hash,status,firebase_uid,about,banner_color,profile_theme_primary_color,profile_theme_accent_color,banner_key,banner_hash,created_at",
           )
           .in("id", otherUserIds);
         users = usersWithoutLegacyAvatar.data as DmUserRow[] | null;
@@ -1322,6 +1450,8 @@ export default function DirectMessagesSidebar({
         const displayName = normalizeIdentityDisplayName(targetUser?.display_name, username, username);
         const aboutText = String(targetUser?.about ?? "").trim();
         const bannerColor = normalizeBannerColor(targetUser?.banner_color) ?? null;
+        const themePrimaryColor = normalizeBannerColor(targetUser?.profile_theme_primary_color) ?? null;
+        const themeAccentColor = normalizeBannerColor(targetUser?.profile_theme_accent_color) ?? null;
         const bannerKey = String(targetUser?.banner_key ?? "").trim() || null;
         const bannerHash = String(targetUser?.banner_hash ?? "").trim() || null;
         const memberSinceAt = String(targetUser?.created_at ?? "").trim() || null;
@@ -1343,6 +1473,8 @@ export default function DirectMessagesSidebar({
           firebaseUid: String(targetUser?.firebase_uid ?? "").trim() || undefined,
           aboutText,
           bannerColor,
+          themePrimaryColor,
+          themeAccentColor,
           bannerKey,
           bannerHash,
           memberSinceAt,
@@ -1389,7 +1521,7 @@ export default function DirectMessagesSidebar({
             let changed = false;
             const updated = current.map((item) => {
               const warmedBannerSrc = bannerSrcByUserId.get(item.userId);
-              if (!warmedBannerSrc || item.bannerSrc === warmedBannerSrc) {
+              if (!warmedBannerSrc || !item.bannerKey || item.bannerSrc === warmedBannerSrc) {
                 return item;
               }
               changed = true;
@@ -1906,6 +2038,8 @@ export default function DirectMessagesSidebar({
       firebaseUid: dm.firebaseUid,
       aboutText: dm.aboutText,
       bannerColor: dm.bannerColor ?? null,
+      themePrimaryColor: dm.themePrimaryColor ?? null,
+      themeAccentColor: dm.themeAccentColor ?? null,
       bannerKey: dm.bannerKey ?? null,
       bannerHash: dm.bannerHash ?? null,
       bannerSrc: dm.bannerSrc,
@@ -2001,6 +2135,8 @@ export default function DirectMessagesSidebar({
                         firebaseUid: dm.firebaseUid,
                         aboutText: dm.aboutText,
                         bannerColor: dm.bannerColor ?? null,
+                        themePrimaryColor: dm.themePrimaryColor ?? null,
+                        themeAccentColor: dm.themeAccentColor ?? null,
                         bannerKey: dm.bannerKey ?? null,
                         bannerHash: dm.bannerHash ?? null,
                         bannerSrc: dm.bannerSrc,

@@ -630,6 +630,10 @@ async function sendMessage(payload: SendPayload, userId: string): Promise<Messag
     await insertAttachmentMetadata(insertedMessage.id, payload.conversationId, payload.attachment);
   }
 
+  if (messageType === "text" && !payload.attachment) {
+    return mapMessage(insertedMessage, null);
+  }
+
   const hydrated = await loadMessageById(insertedMessage.id);
   if (hydrated) {
     return hydrated;
@@ -768,17 +772,24 @@ async function deleteMessage(payload: DeletePayload, userId: string): Promise<Me
 
 async function enforceActionRateLimits(uid: string, payload: InputPayload): Promise<void> {
   if (payload.action === "send") {
-    await enforceRateLimit(`send:${uid}`, 5, 5_000, ROUTE, {
-      action: payload.action,
-    });
-    await enforceRateLimit(`send-burst:${uid}`, 3, 1_000, ROUTE, {
-      action: payload.action,
-    });
-    if (payload.type !== "text") {
-      await enforceRateLimit(`send-attachment:${uid}`, 20, 60_000, ROUTE, {
+    const checks: Array<Promise<unknown>> = [
+      enforceRateLimit(`send:${uid}`, 5, 5_000, ROUTE, {
         action: payload.action,
-      });
+      }),
+      enforceRateLimit(`send-burst:${uid}`, 3, 1_000, ROUTE, {
+        action: payload.action,
+      }),
+    ];
+
+    if (payload.type !== "text") {
+      checks.push(
+        enforceRateLimit(`send-attachment:${uid}`, 20, 60_000, ROUTE, {
+          action: payload.action,
+        }),
+      );
     }
+
+    await Promise.all(checks);
     return;
   }
 

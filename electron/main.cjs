@@ -35,6 +35,7 @@ const MAX_SIGNED_URL_TTL_SECONDS = 300;
 const DEFAULT_SIGNED_URL_TTL_SECONDS = 300;
 const START_MINIMIZED_ARG = "--start-minimized";
 const APP_ICONS_DIR = path.resolve(__dirname, "..", "src", "assets", "images", "img");
+const STATUS_PANEL_MASCOT_PATH = path.resolve(__dirname, "..", "src", "assets", "images", "mews.png");
 const WINDOWS_BEHAVIOR_SETTINGS_FILE = "windows-behavior-settings.json";
 const DEFAULT_WINDOWS_BEHAVIOR_SETTINGS = Object.freeze({
   startMinimized: true,
@@ -64,6 +65,399 @@ let mainWindowRef = null;
 let appTray = null;
 let isAppQuitting = false;
 let windowsBehaviorSettings = null;
+let statusPanelWindowRef = null;
+let statusPanelMode = null;
+let statusPanelMascotDataUrlCache = null;
+
+function getStatusPanelMascotDataUrl() {
+  if (statusPanelMascotDataUrlCache !== null) {
+    return statusPanelMascotDataUrlCache;
+  }
+  try {
+    const imageBytes = fs.readFileSync(STATUS_PANEL_MASCOT_PATH);
+    statusPanelMascotDataUrlCache = `data:image/png;base64,${imageBytes.toString("base64")}`;
+  } catch {
+    statusPanelMascotDataUrlCache = "";
+  }
+  return statusPanelMascotDataUrlCache;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function buildStatusPanelHtml(payload) {
+  const title = escapeHtml(payload?.title || "Carregando");
+  const subtitle = escapeHtml(payload?.subtitle || "");
+  const showSubtitle = Boolean(subtitle);
+  const detail = escapeHtml(payload?.detail || "");
+  const progressText = escapeHtml(payload?.progressText || "");
+  const progressValue = Math.max(0, Math.min(100, Number(payload?.progressPercent ?? 0)));
+  const showProgress = Boolean(payload?.showProgress);
+  const showProgressBar = payload?.showProgressBar !== false;
+  const mascotSrc = getStatusPanelMascotDataUrl();
+  const hasFooter = Boolean(progressText || detail);
+
+  return `<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Messly Status</title>
+  <style>
+    :root {
+      color-scheme: dark;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      background: transparent;
+      font-family: Segoe UI, system-ui, sans-serif;
+      overflow: hidden;
+      user-select: none;
+    }
+    body {
+      background:
+        radial-gradient(220px 220px at 78% 14%, rgba(255,255,255,0.04), transparent 72%),
+        radial-gradient(200px 200px at 18% 84%, rgba(255,255,255,0.03), transparent 76%),
+        linear-gradient(180deg, #25272d 0%, #1f2127 100%);
+    }
+    .panel {
+      width: 100%;
+      height: 100%;
+      border-radius: 22px;
+      border: 0;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.015)),
+        rgba(31, 33, 39, 0.96);
+      box-shadow:
+        0 14px 30px rgba(0,0,0,0.28);
+      overflow: hidden;
+      display: grid;
+      grid-template-rows: 1fr ${hasFooter ? "auto" : "0px"};
+      padding: 22px 20px 18px;
+      -webkit-app-region: drag;
+    }
+    .center {
+      align-self: center;
+      display: grid;
+      justify-items: center;
+      gap: 12px;
+      text-align: center;
+    }
+    .mascotWrap {
+      width: 112px;
+      height: 112px;
+      border-radius: 999px;
+      display: grid;
+      place-items: center;
+      position: relative;
+      background: transparent;
+      box-shadow: none;
+      animation: mascotOrbit 4.2s ease-in-out infinite;
+    }
+    .mascotWrap::before {
+      content: "";
+      position: absolute;
+      inset: 8px;
+      border-radius: 999px;
+      background:
+        radial-gradient(circle at 35% 30%, rgba(255,255,255,0.12), transparent 62%),
+        radial-gradient(circle, rgba(138, 154, 255, 0.16) 0%, rgba(138, 154, 255, 0.02) 58%, rgba(138,154,255,0) 74%);
+      filter: blur(6px);
+      opacity: 0.85;
+      animation: haloPulse 2.8s ease-in-out infinite;
+      pointer-events: none;
+    }
+    .mascotWrap::after {
+      content: "";
+      position: absolute;
+      content: none;
+    }
+    .mascot {
+      width: 92px;
+      height: 92px;
+      object-fit: contain;
+      display: block;
+      pointer-events: none;
+      filter:
+        drop-shadow(0 8px 14px rgba(0,0,0,0.26))
+        drop-shadow(0 0 10px rgba(255,255,255,0.04));
+      animation: mascotFloat 2.8s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+    }
+    .mascotFallback {
+      width: 54px;
+      height: 54px;
+      border-radius: 999px;
+      border: 2px solid rgba(255,255,255,0.9);
+      border-top-color: transparent;
+      animation: spin 0.9s linear infinite;
+    }
+    .title {
+      margin: 0;
+      color: #f3f6fb;
+      font-size: 17px;
+      line-height: 1.2;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+    }
+    .subtitle {
+      margin: 0;
+      color: rgba(223,230,241,0.72);
+      font-size: 12px;
+      line-height: 1.35;
+      max-width: 240px;
+    }
+    .progress {
+      width: 100%;
+      height: 8px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.05);
+      overflow: hidden;
+      margin-top: 4px;
+    }
+    .progressFill {
+      height: 100%;
+      width: ${showProgress ? `${progressValue}%` : "28%"};
+      border-radius: inherit;
+      background: linear-gradient(90deg, #5b86ff 0%, #5ec7d8 100%);
+      box-shadow: 0 0 14px rgba(94, 199, 216, 0.28);
+      transition: width 140ms ease;
+      animation: ${showProgress ? "none" : "indeterminate 1.1s ease-in-out infinite"};
+      transform-origin: left center;
+    }
+    .footer {
+      display: ${hasFooter ? "grid" : "none"};
+      gap: 4px;
+      align-content: end;
+    }
+    .detail {
+      margin: 0;
+      color: rgba(210,218,231,0.58);
+      font-size: 10px;
+      line-height: 1.2;
+      text-align: center;
+      min-height: 12px;
+      letter-spacing: 0.02em;
+    }
+    .progressText {
+      margin: 0;
+      color: rgba(226,233,244,0.72);
+      font-size: 11px;
+      line-height: 1.2;
+      text-align: center;
+      min-height: 14px;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    @keyframes mascotFloat {
+      0%, 100% { transform: translate3d(0, 0px, 0) rotate(0deg) scale(1); }
+      25% { transform: translate3d(0, -2px, 0) rotate(-1deg) scale(1.01); }
+      50% { transform: translate3d(0, -5px, 0) rotate(0.8deg) scale(1.02); }
+      75% { transform: translate3d(0, -2px, 0) rotate(-0.6deg) scale(1.01); }
+    }
+    @keyframes haloPulse {
+      0%, 100% { opacity: 0.45; transform: scale(0.94); }
+      50% { opacity: 0.88; transform: scale(1.05); }
+    }
+    @keyframes mascotOrbit {
+      0%, 100% { transform: translate3d(0, 0, 0); }
+      50% { transform: translate3d(0, -1px, 0); }
+    }
+    @keyframes indeterminate {
+      0% { transform: translateX(-68%) scaleX(0.45); }
+      50% { transform: translateX(30%) scaleX(0.65); }
+      100% { transform: translateX(160%) scaleX(0.45); }
+    }
+  </style>
+</head>
+<body>
+  <main class="panel" aria-live="polite" aria-label="Status do aplicativo">
+    <section class="center">
+      <div class="mascotWrap" aria-hidden="true">
+        ${
+          mascotSrc
+            ? `<img class="mascot" src="${mascotSrc}" alt="" />`
+            : `<div class="mascotFallback"></div>`
+        }
+      </div>
+      <div>
+        <p class="title">${title}</p>
+        ${showSubtitle ? `<p class="subtitle">${subtitle}</p>` : ""}
+      </div>
+      ${
+        showProgressBar
+          ? `<div class="progress" aria-hidden="true">
+        <div class="progressFill"></div>
+      </div>`
+          : ""
+      }
+    </section>
+    <footer class="footer">
+      <p class="progressText">${progressText}</p>
+      <p class="detail">${detail}</p>
+    </footer>
+  </main>
+</body>
+</html>`;
+}
+
+function getStatusPanelWindow() {
+  if (statusPanelWindowRef && !statusPanelWindowRef.isDestroyed()) {
+    return statusPanelWindowRef;
+  }
+
+  const window = new BrowserWindow({
+    width: 340,
+    height: 340,
+    minWidth: 340,
+    minHeight: 340,
+    maxWidth: 340,
+    maxHeight: 340,
+    show: false,
+    frame: false,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    transparent: false,
+    backgroundColor: "#090b10",
+    roundedCorners: true,
+    movable: true,
+    focusable: true,
+    autoHideMenuBar: true,
+    title: "",
+    icon: CHILD_WINDOW_ICON_PATH || MAIN_WINDOW_ICON_PATH,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  });
+
+  if (typeof window.setMenu === "function") {
+    window.setMenu(null);
+  }
+  if (typeof window.removeMenu === "function") {
+    window.removeMenu();
+  }
+  window.setMenuBarVisibility(false);
+
+  window.on("closed", () => {
+    if (statusPanelWindowRef === window) {
+      statusPanelWindowRef = null;
+      statusPanelMode = null;
+    }
+  });
+
+  statusPanelWindowRef = window;
+  return window;
+}
+
+function showStatusPanel(payload, mode = "generic") {
+  const panelWindow = getStatusPanelWindow();
+  statusPanelMode = mode;
+  const html = buildStatusPanelHtml(payload);
+  const dataUrl = `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
+
+  if (panelWindow.isDestroyed()) {
+    return;
+  }
+
+  if (panelWindow.webContents && !panelWindow.webContents.isDestroyed()) {
+    void panelWindow.loadURL(dataUrl).catch(() => {});
+  }
+
+  if (!panelWindow.isVisible()) {
+    panelWindow.once("ready-to-show", () => {
+      if (!panelWindow.isDestroyed()) {
+        panelWindow.show();
+      }
+    });
+  } else {
+    panelWindow.show();
+  }
+}
+
+function hideStatusPanel(options = {}) {
+  const mode = typeof options === "string" ? options : options?.mode;
+  const panelWindow = statusPanelWindowRef;
+  if (!panelWindow || panelWindow.isDestroyed()) {
+    statusPanelWindowRef = null;
+    statusPanelMode = null;
+    return;
+  }
+  if (mode && statusPanelMode && statusPanelMode !== mode) {
+    return;
+  }
+  statusPanelMode = null;
+  panelWindow.destroy();
+}
+
+function syncStatusPanelWithUpdaterState(nextState) {
+  if (!nextState || typeof nextState !== "object") {
+    return;
+  }
+  if (statusPanelMode === "startup") {
+    return;
+  }
+
+  if (nextState.status === "checking") {
+    if (statusPanelMode !== "update-check") {
+      showStatusPanel(
+        {
+          title: "Checando atualizacoes",
+          subtitle: "",
+          detail: "",
+          progressText: "",
+          showProgressBar: false,
+          showProgress: false,
+        },
+        "update-check",
+      );
+    }
+    return;
+  }
+
+  if (nextState.status === "downloading") {
+    if (statusPanelMode !== "update-download") {
+      showStatusPanel(
+        {
+          title: "Baixando atualizacao",
+          subtitle: "",
+          detail: `v${String(nextState.currentVersion ?? app.getVersion?.() ?? "0.0.0")}`,
+          progressText: "Baixando...",
+          progressPercent: 18,
+          showProgress: false,
+        },
+        "update-download",
+      );
+    }
+    return;
+  }
+
+  if (nextState.status === "downloaded") {
+    hideStatusPanel({ mode: "update-check" });
+    hideStatusPanel({ mode: "update-download" });
+    return;
+  }
+
+  if (nextState.status === "available" || nextState.status === "unavailable" || nextState.status === "error" || nextState.status === "disabled") {
+    hideStatusPanel({ mode: "update-check" });
+    hideStatusPanel({ mode: "update-download" });
+  }
+}
 
 function trimTransparentEdges(image) {
   if (!image || image.isEmpty()) {
@@ -324,6 +718,16 @@ function createAppTray() {
   return appTray;
 }
 
+function destroyAppTray() {
+  if (!appTray) {
+    return;
+  }
+  try {
+    appTray.destroy?.();
+  } catch {}
+  appTray = null;
+}
+
 function createDisabledUpdater(reason) {
   const state = {
     enabled: false,
@@ -363,6 +767,7 @@ function createDisabledUpdater(reason) {
 }
 
 function broadcastUpdaterState(nextState) {
+  syncStatusPanelWithUpdaterState(nextState);
   const windows = BrowserWindow.getAllWindows();
   for (const window of windows) {
     if (window.isDestroyed()) {
@@ -645,18 +1050,51 @@ function registerIpcHandlers() {
     if (!appUpdater?.checkForUpdates) {
       throw new Error("Updater indisponivel.");
     }
+    showStatusPanel(
+      {
+        title: "Checando atualizacoes",
+        subtitle: "",
+        detail: "",
+        progressText: "",
+        showProgressBar: false,
+        showProgress: false,
+      },
+      "update-check",
+    );
     return appUpdater.checkForUpdates();
   });
   ipcMain.handle("updater:download", async () => {
     if (!appUpdater?.downloadUpdate) {
       throw new Error("Updater indisponivel.");
     }
+    showStatusPanel(
+      {
+        title: "Checando atualizacoes",
+        subtitle: "",
+        detail: `v${String(app.getVersion?.() ?? "0.0.0")}`,
+        progressText: "",
+        showProgressBar: false,
+        showProgress: false,
+      },
+      "update-download",
+    );
     return appUpdater.downloadUpdate();
   });
   ipcMain.handle("updater:install", async () => {
     if (!appUpdater?.installUpdate) {
       throw new Error("Updater indisponivel.");
     }
+    showStatusPanel(
+      {
+        title: "Aplicando atualizacao",
+        subtitle: "",
+        detail: `v${String(app.getVersion?.() ?? "0.0.0")}`,
+        progressText: "",
+        showProgressBar: false,
+        showProgress: false,
+      },
+      "update-install",
+    );
     return appUpdater.installUpdate();
   });
   ipcMain.handle("windows-settings:get", async () => ({ ...loadWindowsBehaviorSettings() }));
@@ -714,11 +1152,18 @@ function createMainWindow() {
       return;
     }
     if (shouldStartMinimizedThisLaunch()) {
-      mainWindow.show();
-      mainWindow.minimize();
+      if (loadWindowsBehaviorSettings().closeToTray) {
+        createAppTray();
+        mainWindow.hide();
+      } else {
+        mainWindow.show();
+        mainWindow.minimize();
+      }
+      hideStatusPanel({ mode: "startup" });
       return;
     }
     mainWindow.show();
+    hideStatusPanel({ mode: "startup" });
   });
   let devToolsProgrammaticOpenEvents = 0;
   let isRedockingDevTools = false;
@@ -772,6 +1217,13 @@ function createMainWindow() {
   };
 
   const toggleDockedDevTools = (event, input) => {
+    const inputType = String(input?.type ?? "").toLowerCase();
+    if (inputType !== "keydown" && inputType !== "rawkeydown") {
+      return;
+    }
+    if (input?.isAutoRepeat) {
+      return;
+    }
     const key = String(input?.key ?? "").toLowerCase();
     const ctrlOrMeta = Boolean(input?.control || input?.meta);
     const isCtrlShiftI = ctrlOrMeta && Boolean(input?.shift) && key === "i";
@@ -962,6 +1414,22 @@ app.whenReady().then(() => {
     return;
   }
   Menu.setApplicationMenu(null);
+  if (process.platform === "win32" && typeof app.setAppUserModelId === "function") {
+    try {
+      app.setAppUserModelId("com.blayze.messly");
+    } catch {}
+  }
+  showStatusPanel(
+    {
+      title: "Carregando",
+      subtitle: "Preparando o aplicativo...",
+      detail: "",
+      progressText: "",
+      showProgressBar: false,
+      showProgress: false,
+    },
+    "startup",
+  );
   loadWindowsBehaviorSettings();
   appUpdater = createConfiguredAppUpdater();
   appUpdater.setBroadcaster(broadcastUpdaterState);
@@ -980,6 +1448,8 @@ app.whenReady().then(() => {
 
 app.on("before-quit", () => {
   isAppQuitting = true;
+  destroyAppTray();
+  hideStatusPanel();
 });
 
 app.on("window-all-closed", () => {
