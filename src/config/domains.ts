@@ -2,10 +2,10 @@ import { getRuntimeAppApiUrl, getRuntimeGatewayUrl } from "./runtimeApiConfig";
 
 export const DOMAIN = "messly.site";
 
-export const API_URL = "https://api.messly.site";
+export const API_URL = "https://messly.site";
 export const CDN_URL = "https://cdn.messly.site";
-export const GATEWAY_URL = "wss://gateway.messly.site";
-export const ASSETS_URL = "https://assets.messly.site";
+export const GATEWAY_URL = "wss://messly.site";
+export const ASSETS_URL = "https://messly.site";
 const LOCAL_GATEWAY_HTTP_URL = "http://127.0.0.1:8788";
 const LOCAL_GATEWAY_MEDIA_URL = "http://127.0.0.1:8788/media/public";
 const LOCAL_GATEWAY_WS_URL = "ws://127.0.0.1:8788/gateway";
