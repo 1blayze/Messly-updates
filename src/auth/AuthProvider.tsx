@@ -110,17 +110,17 @@ const FALLBACK_AUTH_CONTEXT: AuthContextValue = {
   knownAccounts: [],
   signUp: async () => ({ user: null, profile: null, needsEmailConfirmation: true }),
   verifyEmailCode: async () => {
-    throw new Error("Sessao de autenticacao indisponivel.");
+    throw new Error("Sessão de autenticação indisponível.");
   },
   resendVerificationCode: async () => undefined,
   signIn: async () => {
-    throw new Error("Sessao de autenticacao indisponivel.");
+    throw new Error("Sessão de autenticação indisponível.");
   },
   signOut: async () => undefined,
   refreshSession: async () => null,
   getCurrentSession: async () => null,
   authenticateAccount: async () => {
-    throw new Error("Sessao de autenticacao indisponivel.");
+    throw new Error("Sessão de autenticação indisponível.");
   },
   signOutCurrent: async () => undefined,
   forgetKnownAccount: async () => undefined,
@@ -308,7 +308,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             setSession(null);
             setUser(null);
             setProfile(null);
-            setError("Sua conta nao existe mais. Faca login novamente.");
+            setError("Sua conta não existe mais. Faça login novamente.");
             dispatch(authActions.authSignedOut());
             setAuthReady(true);
             setIsLoading(false);
@@ -431,7 +431,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (!isMounted) {
           return;
         }
-        const message = bootstrapError instanceof Error ? bootstrapError.message : "Falha ao inicializar sessao.";
+        const message = bootstrapError instanceof Error ? bootstrapError.message : "Falha ao inicializar sessão.";
         setError(message);
         dispatch(authActions.authErrorChanged(message));
       } finally {
@@ -477,13 +477,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const normalizedUserEmail = normalizeEmail(email);
       const normalizedPassword = String(password ?? "");
       if (!normalizedUserEmail || !normalizedPassword) {
-        throw new Error("Informe email e senha para continuar.");
+        throw new Error("Informe e-mail e senha para continuar.");
       }
 
       const nextSession = await authService.login(normalizedUserEmail, normalizedPassword);
       const signedUser = mapSupabaseUser(nextSession.user ?? null);
       if (!signedUser) {
-        throw new Error("Sessao nao retornada pelo Supabase.");
+        throw new Error("Sessão não retornada pelo Supabase.");
       }
 
       await applySessionAndProfile(nextSession);
@@ -508,7 +508,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const normalizedUserEmail = normalizeEmail(email);
       const normalizedPassword = String(password ?? "");
       if (!normalizedUserEmail || normalizedPassword.length < 8) {
-        throw new Error("Informe email valido e senha com pelo menos 8 caracteres.");
+        throw new Error("Informe e-mail válido e senha com pelo menos 8 caracteres.");
       }
 
       const displayName = String(profileInput.displayName ?? "").trim();
@@ -516,22 +516,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const username = normalizeUsername(usernameInput);
 
       if (!displayName) {
-        throw new Error("Informe um nome de exibicao.");
+        throw new Error("Informe um nome de exibição.");
       }
 
       const usernameValidation = validateUsernameInput(usernameInput);
       if (!usernameValidation.isValid) {
-        throw new Error(usernameValidation.message ?? "Nome de usuario invalido.");
+        throw new Error(usernameValidation.message ?? "Nome de usuário inválido.");
       }
 
       const turnstileToken = String(securityInput?.turnstileToken ?? "").trim();
       const registrationFingerprint = String(securityInput?.registrationFingerprint ?? "").trim();
       if (requiresSignupSecurityVerification) {
         if (!turnstileToken) {
-          throw new Error("Verificacao de seguranca obrigatoria.");
+          throw new Error("Verificação de segurança obrigatória.");
         }
         if (!registrationFingerprint) {
-          throw new Error("Nao foi possivel validar este dispositivo.");
+          throw new Error("Não foi possível validar este dispositivo.");
         }
       }
 
@@ -588,13 +588,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const normalizedUserEmail = normalizeEmail(email);
       const normalizedCode = String(code ?? "").trim();
       if (!normalizedUserEmail || !normalizedCode) {
-        throw new Error("Informe email e codigo para continuar.");
+        throw new Error("Informe e-mail e código para continuar.");
       }
 
       const nextSession = await authService.verifyEmailCode(normalizedUserEmail, normalizedCode);
       const verifiedUser = mapSupabaseUser(nextSession.user ?? null);
       if (!verifiedUser) {
-        throw new Error("Sessao nao retornada pelo Supabase.");
+        throw new Error("Sessão não retornada pelo Supabase.");
       }
 
       await applySessionAndProfile(nextSession);
@@ -614,7 +614,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     async (email: string): Promise<void> => {
       const normalizedUserEmail = normalizeEmail(email);
       if (!normalizedUserEmail) {
-        throw new Error("Informe um email valido.");
+        throw new Error("Informe um e-mail válido.");
       }
 
       await authService.resendVerification(normalizedUserEmail);

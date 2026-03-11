@@ -5,7 +5,7 @@ import ServerRail from "../components/layout/ServerRail";
 import type { SidebarDirectMessageSelection } from "../components/layout/DirectMessagesSidebar";
 import MaterialSymbolIcon from "../components/ui/MaterialSymbolIcon";
 import AvatarImage from "../components/ui/AvatarImage";
-import DirectMessageChatView, { type DirectMessageChatParticipant } from "../components/chat/DirectMessageChatView";
+import type { DirectMessageChatParticipant } from "../components/chat/DirectMessageChatView";
 import msgIcon from "../assets/icons/ui/Chat.svg";
 import spotifyLogo from "../assets/icons/ui/spotify.svg";
 import musicalIcon from "../assets/icons/ui/musical.svg";
@@ -42,9 +42,11 @@ import {
 type AppSettingsViewModule = typeof import("../components/settings/AppSettingsView");
 type DirectMessagesSidebarModule = typeof import("../components/layout/DirectMessagesSidebar");
 type UserProfilePopoverModule = typeof import("../components/UserProfilePopover/UserProfilePopover");
+type DirectMessageChatViewModule = typeof import("../components/chat/DirectMessageChatView");
 let appSettingsViewPreloadPromise: Promise<AppSettingsViewModule> | null = null;
 let directMessagesSidebarPreloadPromise: Promise<DirectMessagesSidebarModule> | null = null;
 let userProfilePopoverPreloadPromise: Promise<UserProfilePopoverModule> | null = null;
+let directMessageChatViewPreloadPromise: Promise<DirectMessageChatViewModule> | null = null;
 
 function preloadAppSettingsView(): Promise<AppSettingsViewModule> {
   if (!appSettingsViewPreloadPromise) {
@@ -67,9 +69,17 @@ function preloadUserProfilePopover(): Promise<UserProfilePopoverModule> {
   return userProfilePopoverPreloadPromise;
 }
 
+function preloadDirectMessageChatView(): Promise<DirectMessageChatViewModule> {
+  if (!directMessageChatViewPreloadPromise) {
+    directMessageChatViewPreloadPromise = import("../components/chat/DirectMessageChatView");
+  }
+  return directMessageChatViewPreloadPromise;
+}
+
 const AppSettingsView = lazy(preloadAppSettingsView);
 const DirectMessagesSidebar = lazy(preloadDirectMessagesSidebar);
 const UserProfilePopover = lazy(preloadUserProfilePopover);
+const DirectMessageChatView = lazy(preloadDirectMessageChatView);
 
 type FriendsTab = "online" | "all" | "pending";
 type PendingDirection = "incoming" | "outgoing";
@@ -262,6 +272,23 @@ function PendingProfileFallback(): JSX.Element {
         <span className="main-panel__pending-profile-skeleton-line main-panel__pending-profile-skeleton-line--wide" />
       </div>
     </div>
+  );
+}
+
+function ChatViewFallback(): JSX.Element {
+  return (
+    <section className="startup-shell-panel startup-shell-panel--chat" role="status" aria-live="polite" aria-busy="true">
+      <div className="startup-shell-panel__stack">
+        <span className="startup-shell-panel__line startup-shell-panel__line--title" />
+        <span className="startup-shell-panel__line" />
+        <span className="startup-shell-panel__line startup-shell-panel__line--short" />
+      </div>
+      <div className="startup-shell-panel__stack">
+        <span className="startup-shell-panel__line startup-shell-panel__line--wide" />
+        <span className="startup-shell-panel__line" />
+        <span className="startup-shell-panel__line startup-shell-panel__line--wide" />
+      </div>
+    </section>
   );
 }
 
@@ -1185,6 +1212,38 @@ export default function AppShell() {
 
     void preloadUserProfilePopover();
   }, [openPendingProfile]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    if (activeDirectMessage || sidebarDirectMessages.length > 0) {
+      const idleWindow = window as Window & {
+        requestIdleCallback?: (callback: () => void, options?: { timeout?: number }) => number;
+        cancelIdleCallback?: (handle: number) => void;
+      };
+
+      const preload = (): void => {
+        void preloadDirectMessageChatView();
+      };
+
+      const timeoutId = window.setTimeout(preload, activeDirectMessage ? 40 : 140);
+      const idleId =
+        typeof idleWindow.requestIdleCallback === "function"
+          ? idleWindow.requestIdleCallback(preload, { timeout: 1_600 })
+          : null;
+
+      return () => {
+        window.clearTimeout(timeoutId);
+        if (idleId !== null && typeof idleWindow.cancelIdleCallback === "function") {
+          idleWindow.cancelIdleCallback(idleId);
+        }
+      };
+    }
+
+    return;
+  }, [activeDirectMessage, sidebarDirectMessages.length]);
 
   const handleOpenSettings = useCallback((section: SettingsSection = "account"): void => {
     setSettingsInitialSection(section);
@@ -3198,46 +3257,48 @@ export default function AppShell() {
           <div className="main-panel__workspace">
             {chatViewDirectMessage && chatCurrentUser ? (
               <div className={`main-panel__chat-view${activeDirectMessage ? "" : " main-panel__chat-view--hidden"}`}>
-                <DirectMessageChatView
-                  conversationId={chatViewDirectMessage.conversationId}
-                  currentUserId={chatCurrentUser.userId}
-                  currentUser={chatCurrentUser}
-                  targetUser={{
-                    userId: chatViewDirectMessage.userId,
-                    username: chatViewDirectMessage.username,
-                    displayName: chatViewDirectMessage.displayName,
-                    avatarSrc: chatViewDirectMessage.avatarSrc,
-                    presenceState: chatViewDirectMessage.presenceState,
-                    spotifyActivity:
-                      chatViewDirectMessage.spotifyActivity ?? activeDirectMessageFriend?.spotifyActivity ?? null,
-                    firebaseUid: chatViewDirectMessage.firebaseUid,
-                    aboutText: chatViewDirectMessage.aboutText,
-                    bannerColor: chatViewDirectMessage.bannerColor ?? null,
-                    themePrimaryColor: chatViewDirectMessage.themePrimaryColor ?? null,
-                    themeAccentColor: chatViewDirectMessage.themeAccentColor ?? null,
-                    bannerKey: chatViewDirectMessage.bannerKey ?? null,
-                    bannerHash: chatViewDirectMessage.bannerHash ?? null,
-                    bannerSrc: chatViewDirectMessage.bannerSrc,
-                    memberSinceAt: chatViewDirectMessage.memberSinceAt ?? null,
-                  }}
-                  onOpenSettings={handleOpenSettings}
-                  isTargetFriend={Boolean(activeDirectMessageFriend)}
-                  onUnfriendTarget={
-                    activeDirectMessageFriend
-                      ? async () => {
-                          await handleUnfriend(activeDirectMessageFriend);
-                        }
-                      : undefined
-                  }
-                  onAddFriendTarget={async () => {
-                    await handleAddFriendTargetUser(chatViewDirectMessage.userId);
-                  }}
-                  isTargetFriendRequestPending={isActiveDirectMessagePendingOutgoingRequest}
-                  mutualFriends={activeDirectMessageMutualFriends}
-                  onBlockTarget={async () => {
-                    await handleBlockTargetUser(chatViewDirectMessage.userId);
-                  }}
-                />
+                <Suspense fallback={<ChatViewFallback />}>
+                  <DirectMessageChatView
+                    conversationId={chatViewDirectMessage.conversationId}
+                    currentUserId={chatCurrentUser.userId}
+                    currentUser={chatCurrentUser}
+                    targetUser={{
+                      userId: chatViewDirectMessage.userId,
+                      username: chatViewDirectMessage.username,
+                      displayName: chatViewDirectMessage.displayName,
+                      avatarSrc: chatViewDirectMessage.avatarSrc,
+                      presenceState: chatViewDirectMessage.presenceState,
+                      spotifyActivity:
+                        chatViewDirectMessage.spotifyActivity ?? activeDirectMessageFriend?.spotifyActivity ?? null,
+                      firebaseUid: chatViewDirectMessage.firebaseUid,
+                      aboutText: chatViewDirectMessage.aboutText,
+                      bannerColor: chatViewDirectMessage.bannerColor ?? null,
+                      themePrimaryColor: chatViewDirectMessage.themePrimaryColor ?? null,
+                      themeAccentColor: chatViewDirectMessage.themeAccentColor ?? null,
+                      bannerKey: chatViewDirectMessage.bannerKey ?? null,
+                      bannerHash: chatViewDirectMessage.bannerHash ?? null,
+                      bannerSrc: chatViewDirectMessage.bannerSrc,
+                      memberSinceAt: chatViewDirectMessage.memberSinceAt ?? null,
+                    }}
+                    onOpenSettings={handleOpenSettings}
+                    isTargetFriend={Boolean(activeDirectMessageFriend)}
+                    onUnfriendTarget={
+                      activeDirectMessageFriend
+                        ? async () => {
+                            await handleUnfriend(activeDirectMessageFriend);
+                          }
+                        : undefined
+                    }
+                    onAddFriendTarget={async () => {
+                      await handleAddFriendTargetUser(chatViewDirectMessage.userId);
+                    }}
+                    isTargetFriendRequestPending={isActiveDirectMessagePendingOutgoingRequest}
+                    mutualFriends={activeDirectMessageMutualFriends}
+                    onBlockTarget={async () => {
+                      await handleBlockTargetUser(chatViewDirectMessage.userId);
+                    }}
+                  />
+                </Suspense>
               </div>
             ) : null}
 

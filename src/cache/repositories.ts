@@ -1,6 +1,7 @@
 import Dexie from "dexie";
 import { messlyCacheDb } from "./messlyCacheDb";
 import type {
+  CachedChatInitialSnapshotRecord,
   CachedConversationRecord,
   CachedMessageRecord,
   CachedPresenceRecord,
@@ -115,4 +116,99 @@ export async function writePresenceCache(
       await messlyCacheDb.presenceSnapshots.bulkPut(rows);
     }
   });
+}
+
+export interface ChatInitialSnapshotCacheRecord {
+  conversationId: string;
+  messages: Array<Record<string, unknown>>;
+  nextCursor: { createdAt: string; id: string } | null;
+  updatedAtMs: number;
+}
+
+export async function readChatInitialSnapshotsCache(
+  accountId: string,
+  maxEntries = 12,
+): Promise<ChatInitialSnapshotCacheRecord[]> {
+  const rows = await messlyCacheDb.chatInitialSnapshots.where("accountId").equals(accountId).toArray();
+  return rows
+    .sort((left, right) => Number(right.updatedAtMs ?? 0) - Number(left.updatedAtMs ?? 0))
+    .slice(0, Math.max(1, Math.trunc(maxEntries)))
+    .map(({ accountId: _accountId, ...entry }) => ({
+      conversationId: entry.conversationId,
+      messages: Array.isArray(entry.messages) ? entry.messages : [],
+      nextCursor:
+        entry.nextCursor &&
+        typeof entry.nextCursor === "object" &&
+        typeof entry.nextCursor.createdAt === "string" &&
+        typeof entry.nextCursor.id === "string"
+          ? { createdAt: entry.nextCursor.createdAt, id: entry.nextCursor.id }
+          : null,
+      updatedAtMs: Number(entry.updatedAtMs ?? 0) || Date.now(),
+    }));
+}
+
+export async function writeChatInitialSnapshotCache(
+  accountId: string,
+  conversationId: string,
+  snapshot: {
+    messages: Array<Record<string, unknown>>;
+    nextCursor: { createdAt: string; id: string } | null;
+    updatedAtMs?: number;
+  },
+): Promise<void> {
+  const normalizedConversationId = String(conversationId ?? "").trim();
+  if (!normalizedConversationId) {
+    return;
+  }
+
+  const row: CachedChatInitialSnapshotRecord = {
+    accountId,
+    conversationId: normalizedConversationId,
+    messages: Array.isArray(snapshot.messages) ? snapshot.messages : [],
+    nextCursor:
+      snapshot.nextCursor &&
+      typeof snapshot.nextCursor.createdAt === "string" &&
+      typeof snapshot.nextCursor.id === "string"
+        ? {
+            createdAt: snapshot.nextCursor.createdAt,
+            id: snapshot.nextCursor.id,
+          }
+        : null,
+    updatedAtMs: Number(snapshot.updatedAtMs ?? Date.now()) || Date.now(),
+  };
+
+  await messlyCacheDb.chatInitialSnapshots.put(row);
+}
+
+export async function trimChatInitialSnapshotsCache(
+  accountId: string,
+  options: {
+    maxEntries?: number;
+    minUpdatedAtMs?: number;
+  } = {},
+): Promise<void> {
+  const maxEntries = Math.max(1, Math.trunc(Number(options.maxEntries ?? 12) || 12));
+  const minUpdatedAtMs = Number(options.minUpdatedAtMs ?? 0);
+  const rows = await messlyCacheDb.chatInitialSnapshots.where("accountId").equals(accountId).toArray();
+  if (rows.length === 0) {
+    return;
+  }
+
+  const sorted = rows.sort((left, right) => Number(right.updatedAtMs ?? 0) - Number(left.updatedAtMs ?? 0));
+  const staleRows = sorted.filter((row, index) => {
+    if (index >= maxEntries) {
+      return true;
+    }
+    if (Number.isFinite(minUpdatedAtMs) && minUpdatedAtMs > 0) {
+      return Number(row.updatedAtMs ?? 0) < minUpdatedAtMs;
+    }
+    return false;
+  });
+
+  if (staleRows.length === 0) {
+    return;
+  }
+
+  const staleKeys = staleRows.map((row) => [accountId, row.conversationId] as [string, string]);
+  await messlyCacheDb.chatInitialSnapshots.bulkDelete(staleKeys);
 }

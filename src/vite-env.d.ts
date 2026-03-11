@@ -297,6 +297,25 @@ interface ElectronStartupSnapshotCacheHints {
   hiddenConversationCount: number;
 }
 
+interface ElectronStartupPerformanceMark {
+  name: string;
+  atMs: number;
+  details?: Record<string, unknown>;
+}
+
+interface ElectronStartupPerformanceMetrics {
+  processEntryToWhenReadyMs: number | null;
+  processEntryToCreateWindowMs: number | null;
+  processEntryToWindowReadyToShowMs: number | null;
+  processEntryToFirstFrameMs: number | null;
+  processEntryToWindowRevealMs: number | null;
+}
+
+interface ElectronStartupPerformanceSnapshot {
+  marks: ElectronStartupPerformanceMark[];
+  metrics: ElectronStartupPerformanceMetrics;
+}
+
 interface ElectronStartupSnapshot {
   generatedAt: string;
   appVersion: string | null;
@@ -305,6 +324,7 @@ interface ElectronStartupSnapshot {
   windowsSettings: WindowsBehaviorSettings | null;
   apiConfig: ElectronStartupSnapshotApiConfig | null;
   cacheHints: ElectronStartupSnapshotCacheHints | null;
+  startupPerformance?: ElectronStartupPerformanceSnapshot | null;
 }
 
 interface RendererFirstFrameReadyPayload {
@@ -371,6 +391,7 @@ interface MesslyAuthApi {
 interface ElectronApi {
   platform: string;
   arch?: string;
+  isPackaged?: boolean;
   getStartupSnapshot?: () => Promise<ElectronStartupSnapshot>;
   signalRendererFirstFrameReady?: (payload: RendererFirstFrameReadyPayload) => void;
   getSignedMediaUrl?: (payload: GetSignedMediaUrlPayload) => Promise<GetSignedMediaUrlResult>;

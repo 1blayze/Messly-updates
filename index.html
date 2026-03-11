@@ -37,24 +37,28 @@
         position: fixed;
         inset: 0;
         display: flex;
-        align-items: center;
+        align-items: flex-start;
         justify-content: center;
+        padding-top: clamp(40px, 12vh, 110px);
         z-index: 999999;
         background: var(--messly-loader-bg);
         will-change: opacity, transform;
       }
 
       .messly-loading-inner {
-        width: min(88vw, 320px);
+        width: min(88vw, 260px);
         text-align: center;
+        display: grid;
+        justify-items: center;
+        gap: 16px;
       }
 
       .messly-loading-logo {
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        width: 82px;
-        height: 82px;
+        width: 76px;
+        height: 76px;
         user-select: none;
         -webkit-user-drag: none;
         transform-origin: 50% 50%;
@@ -67,35 +71,36 @@
         height: 100%;
       }
 
-      .messly-loading-text {
-        margin-top: 22px;
-        text-align: center;
-        animation: none;
-        transition: none;
-        transform: none;
+      .messly-loading-progress {
+        width: min(220px, 58vw);
+        height: 6px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.16);
+        overflow: hidden;
       }
 
-      .messly-loading-title {
-        font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-        font-size: 14px;
-        font-weight: 600;
-        letter-spacing: 1.6px;
-        color: #e5e7eb;
-        text-transform: uppercase;
-        animation: none;
-        transition: none;
-        transform: none;
+      .messly-loading-progress-fill {
+        width: 42%;
+        height: 100%;
+        border-radius: inherit;
+        background: linear-gradient(90deg, #e6edf9 0%, #ffffff 100%);
+        transform-origin: 0 50%;
+        animation: messlyLoaderBar 1.35s ease-in-out infinite;
       }
 
-      .messly-loading-subtitle {
-        margin-top: 8px;
-        font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-        font-size: 12px;
-        font-weight: 400;
-        color: #9ca3af;
-        animation: none;
-        transition: none;
-        transform: none;
+      @keyframes messlyLoaderBar {
+        0% {
+          transform: translateX(-8%) scaleX(0.78);
+          opacity: 0.82;
+        }
+        50% {
+          transform: translateX(40%) scaleX(1);
+          opacity: 1;
+        }
+        100% {
+          transform: translateX(120%) scaleX(0.82);
+          opacity: 0.82;
+        }
       }
 
       @keyframes messlyLogoBreath {
@@ -130,9 +135,8 @@
             <path d="M37.6265 36.0055C35.3643 34.3295 33.3882 32.3183 30.6753 31.0417C32.1862 36.9103 34.1052 42.5899 36.7458 48.3531L45.7643 42.4982C42.9813 40.2764 40.399 38.2147 37.6265 36.0055Z" fill="white"/>
           </svg>
         </div>
-        <div class="messly-loading-text">
-          <div class="messly-loading-title">ATIVANDO COMPONENTES</div>
-          <div class="messly-loading-subtitle">Conectando</div>
+        <div class="messly-loading-progress" aria-hidden="true">
+          <div class="messly-loading-progress-fill"></div>
         </div>
       </div>
     </div>

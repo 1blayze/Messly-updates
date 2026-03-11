@@ -33,6 +33,7 @@ const startupSnapshotPromise = ipcRenderer
 const electronAPI = Object.freeze({
   platform: process.platform,
   arch: process.arch,
+  isPackaged: !process.defaultApp,
   getStartupSnapshot: () => startupSnapshotPromise,
   signalRendererFirstFrameReady: (payload) => ipcRenderer.send("app:renderer-first-frame-ready", payload),
   getSignedMediaUrl: (payload) => ipcRenderer.invoke("media:get-signed-url", payload),

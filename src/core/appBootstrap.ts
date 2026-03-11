@@ -3,10 +3,12 @@ import { messlyCacheDb } from "../cache/messlyCacheDb";
 import { supabase } from "../lib/supabaseClient";
 import { setRealtimeCacheAccountScope, readCachedConversations, readCachedPresence, readCachedProfiles } from "../realtime/cache";
 import { authService } from "../services/auth";
+import { primeInitialChatCacheForStartup, setChatMessagesCacheAccountScope } from "../services/chat/chatApi";
 import { spotifyListenAlongService } from "../services/connections/spotifyListenAlong";
 import { friendsService } from "../services/friends";
 import { gatewayService } from "../services/gateway";
 import { notificationsService } from "../services/notifications";
+import { markRuntimePerf, measureRuntimePerf } from "../services/observability/runtimePerformance";
 import { presenceService } from "../services/presence";
 import { presenceController } from "../services/presence/presenceController";
 import { fetchProfileById } from "../services/profile/profileService";
@@ -83,12 +85,20 @@ async function warmSupabaseRealtime(): Promise<void> {
 }
 
 let appShellWarmupPromise: Promise<unknown> | null = null;
+let directMessageChatWarmupPromise: Promise<unknown> | null = null;
 
 function warmAppShellChunk(): Promise<unknown> {
   if (!appShellWarmupPromise) {
     appShellWarmupPromise = import("../app/AppShell");
   }
   return appShellWarmupPromise;
+}
+
+function warmDirectMessageChatChunk(): Promise<unknown> {
+  if (!directMessageChatWarmupPromise) {
+    directMessageChatWarmupPromise = import("../components/chat/DirectMessageChatView");
+  }
+  return directMessageChatWarmupPromise;
 }
 
 interface RuntimeCacheSnapshot {
@@ -200,6 +210,7 @@ class AppBootstrapController {
     this.runId += 1;
     this.activeUserId = null;
     this.runningPromise = null;
+    setChatMessagesCacheAccountScope("guest");
     stopRuntimeServices();
     setRealtimeCacheAccountScope("guest");
     this.commit({
@@ -230,6 +241,10 @@ class AppBootstrapController {
     const currentRunId = this.runId + 1;
     this.runId = currentRunId;
     this.activeUserId = userId;
+    markRuntimePerf("bootstrap:start", {
+      userId,
+      runId: currentRunId,
+    });
 
     this.commit({
       phase: "running",
@@ -241,6 +256,7 @@ class AppBootstrapController {
     });
 
     const execute = async (): Promise<void> => {
+      setChatMessagesCacheAccountScope(userId);
       setRealtimeCacheAccountScope(userId);
       stopRuntimeServices();
 
@@ -281,7 +297,14 @@ class AppBootstrapController {
       if (!updateRunning("Carregando cache local", 0.16, "Restaurando dados locais")) {
         return;
       }
-      const cacheSnapshot = await warmLocalRuntimeCache();
+      const [cacheSnapshot] = await Promise.all([
+        warmLocalRuntimeCache(),
+        primeInitialChatCacheForStartup({
+          accountId: userId,
+          maxEntries: 12,
+          maxAgeMs: 15 * 60_000,
+        }),
+      ]);
       hydrateStoreFromRuntimeCache(cacheSnapshot);
 
       if (!updateRunning("Preparando interface", 0.72, "Aquecendo shell inicial")) {
@@ -302,6 +325,14 @@ class AppBootstrapController {
         detailText: "Messly pronto",
         progress: 1,
         error: null,
+      });
+      markRuntimePerf("bootstrap:ready", {
+        userId,
+        runId: currentRunId,
+      });
+      measureRuntimePerf("bootstrap_total", "bootstrap:start", "bootstrap:ready", {
+        userId,
+        runId: currentRunId,
       });
 
       // Background boot: executa tarefas pesadas sem bloquear a primeira renderizacao do AppShell.
@@ -338,6 +369,9 @@ class AppBootstrapController {
       runDeferred("profile", async () => {
         await fetchProfileById(userId).catch(() => null);
       });
+      runDeferred("chat-view-chunk", async () => {
+        await warmDirectMessageChatChunk();
+      }, 140);
     };
 
     this.runningPromise = execute()
@@ -345,6 +379,11 @@ class AppBootstrapController {
         if (currentRunId !== this.runId) {
           return;
         }
+        markRuntimePerf("bootstrap:error", {
+          userId,
+          runId: currentRunId,
+          reason: resolveErrorMessage(error),
+        });
 
         this.commit({
           phase: "error",

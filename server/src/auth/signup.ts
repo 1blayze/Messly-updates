@@ -149,11 +149,52 @@ function mapSignupProviderError(deps: AuthDependencies, error: unknown): AuthHtt
     message: message || "unknown",
   });
 
+  if (
+    normalized.includes("already registered") ||
+    normalized.includes("already exists") ||
+    normalized.includes("email_exists")
+  ) {
+    return new AuthHttpError(409, "EMAIL_ALREADY_REGISTERED", "Email already registered.");
+  }
+
   if (normalized.includes("rate limit") || normalized.includes("too many")) {
     return new AuthHttpError(429, "REGISTRATION_TOO_MANY_ATTEMPTS", REGISTRATION_RATE_LIMIT_MESSAGE);
   }
 
   return new AuthHttpError(400, "REGISTRATION_UNABLE", REGISTRATION_ERROR_MESSAGE);
+}
+
+interface SignupProviderUser {
+  id?: string | null;
+  email?: string | null;
+  email_confirmed_at?: string | null;
+  confirmed_at?: string | null;
+  confirmation_sent_at?: string | null;
+  identities?: unknown;
+}
+
+function extractSignupProviderUser(signupResult: unknown): SignupProviderUser | null {
+  const user = (
+    signupResult as {
+      data?: {
+        user?: unknown;
+      };
+    }
+  )?.data?.user;
+  if (!user || typeof user !== "object") {
+    return null;
+  }
+  return user as SignupProviderUser;
+}
+
+function isExistingRegisteredUser(user: SignupProviderUser | null): boolean {
+  if (!user) {
+    return false;
+  }
+  if (!Array.isArray(user.identities)) {
+    return false;
+  }
+  return user.identities.length === 0;
 }
 
 function mapResendProviderError(error: unknown): AuthHttpError {
@@ -276,6 +317,43 @@ export async function handleSignup(
       leaseId = null;
       throw mapSignupProviderError(deps, signupResult.error);
     }
+
+    const signupUser = extractSignupProviderUser(signupResult);
+    if (isExistingRegisteredUser(signupUser)) {
+      try {
+        await releaseRegistrationLease(deps, leaseId, "provider_existing_account");
+      } catch (leaseReleaseError) {
+        deps.logger?.warn("registration_lease_release_failed", {
+          stage: "provider_existing_account",
+          leaseId,
+          reason: leaseReleaseError instanceof Error ? leaseReleaseError.message : String(leaseReleaseError),
+        });
+      }
+      leaseId = null;
+      throw new AuthHttpError(409, "EMAIL_ALREADY_REGISTERED", "Email already registered.");
+    }
+
+    if (!signupUser) {
+      try {
+        await releaseRegistrationLease(deps, leaseId, "provider_user_missing");
+      } catch (leaseReleaseError) {
+        deps.logger?.warn("registration_lease_release_failed", {
+          stage: "provider_user_missing",
+          leaseId,
+          reason: leaseReleaseError instanceof Error ? leaseReleaseError.message : String(leaseReleaseError),
+        });
+      }
+      leaseId = null;
+      throw new AuthHttpError(502, "AUTH_PROVIDER_ERROR", "Supabase signup did not return a user.");
+    }
+
+    deps.logger?.info("signup_verification_issued", {
+      userId: signupUser.id ?? null,
+      emailDomain: preparedRiskInput.emailDomain,
+      confirmationSentAt: signupUser.confirmation_sent_at ?? null,
+      emailConfirmedAt: signupUser.email_confirmed_at ?? signupUser.confirmed_at ?? null,
+      identitiesCount: Array.isArray(signupUser.identities) ? signupUser.identities.length : null,
+    });
 
     try {
       await consumeRegistrationLease(deps, leaseId);

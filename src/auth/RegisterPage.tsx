@@ -363,20 +363,20 @@ export default function RegisterPage() {
 
     if (requiresSignupSecurityVerification && !turnstileSiteKey) {
       setFormMessageTone("error");
-      setFormMessage("Nao foi possivel iniciar a verificacao de seguranca. Tente novamente em instantes.");
+      setFormMessage("Não foi possível iniciar a verificação de segurança. Tente novamente em instantes.");
       return;
     }
 
     if (requiresSignupSecurityVerification && !turnstileToken) {
       setVerificationState("error");
-      setCaptchaError("Conclua a verificacao de seguranca antes de continuar.");
+      setCaptchaError("Conclua a verificação de segurança antes de continuar.");
       turnstileRef.current?.reset();
       return;
     }
 
     if (requiresSignupSecurityVerification && !registrationFingerprint) {
       setFormMessageTone("error");
-      setFormMessage("Nao foi possivel validar este dispositivo. Recarregue a tela e tente novamente.");
+      setFormMessage("Não foi possível validar este dispositivo. Recarregue a tela e tente novamente.");
       return;
     }
 
@@ -434,7 +434,7 @@ export default function RegisterPage() {
       if (requiresSignupSecurityVerification && CAPTCHA_RESET_ERROR_CODES.has(errorCode)) {
         setTurnstileToken("");
         setVerificationState(errorCode === "CAPTCHA_EXPIRED" ? "expired" : "error");
-        setCaptchaError("A verificacao de seguranca expirou ou falhou. Confirme novamente.");
+        setCaptchaError("A verificação de segurança expirou ou falhou. Confirme novamente.");
         turnstileRef.current?.reset();
       }
       const friendly = toFriendlySupabaseAuthError(error);
@@ -458,7 +458,7 @@ export default function RegisterPage() {
     setOtpMessage(null);
     try {
       await resendVerificationCode(pendingEmail);
-      setOtpMessage("Reenviamos um novo codigo para seu email.");
+      setOtpMessage("Reenviamos um novo código para seu e-mail.");
       setResendCooldown(35);
     } catch (error) {
       setOtpError(toFriendlySupabaseAuthError(error));
@@ -470,11 +470,11 @@ export default function RegisterPage() {
     event.preventDefault();
     const sanitizedCode = otpCode.trim();
     if (!pendingEmail) {
-      setOtpError("Email não encontrado para verificar. Refazer cadastro.");
+      setOtpError("E-mail não encontrado para verificar. Refaça o cadastro.");
       return;
     }
     if (!sanitizedCode) {
-      setOtpError("Digite o código recebido por email.");
+      setOtpError("Digite o código recebido por e-mail.");
       return;
     }
     if (sanitizedCode.length !== 6) {
@@ -528,9 +528,10 @@ export default function RegisterPage() {
   const normalizedUsernamePreview = formatUsernameForDisplay(username);
   const canSubmitRegistration =
     !isSubmitting;
+  const shouldShowCaptchaDiagnostic = import.meta.env.DEV && Boolean(captchaDiagnostic);
 
-  const title = stage === "form" ? "Criar conta" : "Confirme seu email";
-  const subtitle = stage === "form" ? "Crie sua conta para começar a conversar." : "Confirme seu email para continuar.";
+  const title = stage === "form" ? "Criar conta" : "Confirme seu e-mail";
+  const subtitle = stage === "form" ? "Crie sua conta para começar a conversar." : "Confirme seu e-mail para continuar.";
 
   return (
     <div className="auth-page auth-page--register">
@@ -708,7 +709,7 @@ export default function RegisterPage() {
             </div>
 
             {shouldRenderCaptcha ? (
-              <div className="auth-field auth-field--captcha">
+              <div className="auth-field auth-field--captcha" aria-live="polite">
                 <TurnstileWidget
                   ref={turnstileRef}
                   className="auth-turnstile"
@@ -726,14 +727,14 @@ export default function RegisterPage() {
                     setTurnstileToken("");
                     if (requiresSignupSecurityVerification) {
                       setVerificationState("error");
-                      setCaptchaError("A verificacao de seguranca falhou. Tente novamente.");
+                      setCaptchaError("A verificação de segurança falhou. Tente novamente.");
                     }
                   }}
                   onExpire={() => {
                     setTurnstileToken("");
                     if (requiresSignupSecurityVerification) {
                       setVerificationState("expired");
-                      setCaptchaError("A verificacao expirou. Confirme novamente para continuar.");
+                      setCaptchaError("A verificação expirou. Confirme novamente para continuar.");
                       turnstileRef.current?.reset();
                     }
                   }}
@@ -741,7 +742,7 @@ export default function RegisterPage() {
                     setTurnstileToken("");
                     if (requiresSignupSecurityVerification) {
                       setVerificationState("timeout");
-                      setCaptchaError("Tempo esgotado na verificacao. Tente novamente.");
+                      setCaptchaError("Tempo esgotado na verificação. Tente novamente.");
                       turnstileRef.current?.reset();
                     }
                   }}
@@ -756,13 +757,13 @@ export default function RegisterPage() {
                   }}
                 />
                 {!registrationFingerprint && requiresSignupSecurityVerification ? (
-                  <p className="auth-note">Preparando verificacao do dispositivo...</p>
+                  <p className="auth-note">Preparando verificação do dispositivo...</p>
                 ) : null}
                 {!requiresSignupSecurityVerification ? (
-                  <p className="auth-note">Verificacao de seguranca opcional no aplicativo instalado.</p>
+                  <p className="auth-note">Verificação de segurança opcional no aplicativo instalado.</p>
                 ) : null}
-                {captchaDiagnostic ? (
-                  <p className="auth-note auth-note--diagnostic">Diagnostico captcha: {captchaDiagnostic}</p>
+                {shouldShowCaptchaDiagnostic ? (
+                  <p className="auth-note auth-note--diagnostic">Diagnóstico do captcha: {captchaDiagnostic}</p>
                 ) : null}
                 {captchaError ? <p className="auth-feedback auth-feedback--error">{captchaError}</p> : null}
               </div>
@@ -810,7 +811,7 @@ export default function RegisterPage() {
                 inputMode="numeric"
                 maxLength={6}
                 value={otpCode}
-                onChange={(event) => setOtpCode(event.target.value.replace(/\\D/g, ""))}
+                onChange={(event) => setOtpCode(event.target.value.replace(/\D/g, ""))}
                 autoComplete="one-time-code"
                 disabled={isVerifyingOtp}
                 required

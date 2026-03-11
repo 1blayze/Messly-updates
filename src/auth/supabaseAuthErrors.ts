@@ -12,23 +12,23 @@ export function toFriendlySupabaseAuthError(error: unknown): string {
   const normalizedCode = code.toUpperCase();
 
   if (normalizedCode === "EMAIL_ALREADY_REGISTERED") {
-    return "Este email ja esta cadastrado.";
+    return "Este e-mail já está cadastrado.";
   }
 
   if (normalizedCode === "EMAIL_VERIFICATION_REQUIRED") {
-    return "Confirme seu email para continuar.";
+    return "Confirme seu e-mail para continuar.";
   }
 
   if (normalizedCode === "INVALID_VERIFICATION_CODE") {
-    return "Codigo invalido. Tente novamente.";
+    return "Código inválido. Tente novamente.";
   }
 
   if (normalizedCode === "OTP_MAX_ATTEMPTS") {
-    return "Limite de tentativas atingido. Solicite um novo codigo.";
+    return "Limite de tentativas atingido. Solicite um novo código.";
   }
 
   if (normalizedCode === "VERIFICATION_NOT_FOUND") {
-    return "Nenhum codigo de verificacao ativo foi encontrado para este email.";
+    return "Nenhum código de verificação ativo foi encontrado para este e-mail.";
   }
 
   if (normalizedCode === "AUTH_RATE_LIMITED") {
@@ -51,7 +51,7 @@ export function toFriendlySupabaseAuthError(error: unknown): string {
     normalizedCode === "CAPTCHA_NETWORK_ERROR" ||
     normalizedCode === "CAPTCHA_VALIDATION_FAILED"
   ) {
-    return "Falha na verificacao de seguranca. Tente novamente.";
+    return "Falha na verificação de segurança. Tente novamente.";
   }
 
   if (normalized.includes("invalid login credentials")) {
@@ -59,15 +59,15 @@ export function toFriendlySupabaseAuthError(error: unknown): string {
   }
 
   if (normalized.includes("user already registered")) {
-    return "Este email já está cadastrado.";
+    return "Este e-mail já está cadastrado.";
   }
 
   if (normalized.includes("email not confirmed")) {
-    return "Confirme seu email para concluir o login.";
+    return "Confirme seu e-mail para concluir o login.";
   }
 
   if (normalized.includes("verification") && normalized.includes("email")) {
-    return "Verifique seu email para continuar.";
+    return "Verifique seu e-mail para continuar.";
   }
 
   if (normalized.includes("otp") || normalized.includes("token")) {
@@ -97,7 +97,7 @@ export function toFriendlySupabaseAuthError(error: unknown): string {
   }
 
   if (normalized.includes("request this after") || normalized.includes("for security purposes")) {
-    return "Aguarde alguns segundos antes de reenviar o codigo.";
+    return "Aguarde alguns segundos antes de reenviar o código.";
   }
 
   if (
@@ -112,9 +112,9 @@ export function toFriendlySupabaseAuthError(error: unknown): string {
       normalized.includes("localhost:8788") ||
       normalized.includes("127.0.0.1:8788")
     ) {
-      return "Falha ao conectar com o gateway local de autenticacao. Reinicie o ambiente com npm run dev:electron.";
+      return "Falha ao conectar com o gateway local de autenticação. Reinicie o ambiente com npm run dev:electron.";
     }
-    return "Falha de rede ao autenticar. Verifique sua conexao.";
+    return "Falha de rede ao autenticar. Verifique sua conexão.";
   }
 
   if (message) {

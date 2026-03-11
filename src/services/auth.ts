@@ -259,8 +259,7 @@ function isInstalledDesktopRuntime(): boolean {
   if (!isDesktopRuntime()) {
     return false;
   }
-  const protocol = String(window.location?.protocol ?? "").trim().toLowerCase();
-  return protocol === "file:";
+  return Boolean(window.electronAPI?.isPackaged);
 }
 
 function shouldFallbackToDirectSupabaseSignup(error: unknown): boolean {

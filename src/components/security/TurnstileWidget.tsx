@@ -14,6 +14,7 @@ const TURNSTILE_LOAD_MAX_ATTEMPTS = 2;
 const TURNSTILE_RETRY_BASE_DELAY_MS = 1_500;
 const TURNSTILE_RETRY_MAX_DELAY_MS = 15_000;
 const TURNSTILE_ERROR_VISIBLE_AFTER_RETRIES = 3;
+const TURNSTILE_COMPACT_BREAKPOINT_PX = 420;
 
 interface TurnstileRenderOptions {
   sitekey: string;
@@ -71,14 +72,14 @@ function classifyTurnstileError(error: unknown): { code: string; message: string
   if (normalized.includes("timed out")) {
     return {
       code: "TURNSTILE_SCRIPT_TIMEOUT",
-      message: "Tempo limite ao carregar a verificacao de seguranca.",
+      message: "Tempo limite ao carregar a verificação de segurança.",
       rawError,
     };
   }
   if (normalized.includes("did not initialize")) {
     return {
       code: "TURNSTILE_API_NOT_INITIALIZED",
-      message: "Script do Turnstile carregou, mas a API nao inicializou.",
+      message: "Script do Turnstile carregou, mas a API não inicializou.",
       rawError,
     };
   }
@@ -92,14 +93,14 @@ function classifyTurnstileError(error: unknown): { code: string; message: string
   if (normalized.includes("render unavailable")) {
     return {
       code: "TURNSTILE_RENDER_UNAVAILABLE",
-      message: "API do Turnstile indisponivel para renderizacao.",
+      message: "API do Turnstile indisponível para renderização.",
       rawError,
     };
   }
 
   return {
     code: "TURNSTILE_UNKNOWN_ERROR",
-    message: "Falha inesperada ao iniciar a verificacao de seguranca.",
+    message: "Falha inesperada ao iniciar a verificação de segurança.",
     rawError,
   };
 }
@@ -247,6 +248,7 @@ function TurnstileWidgetInner(
   });
   const [isLoading, setIsLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [isCompactSize, setIsCompactSize] = useState(false);
 
   callbacksRef.current = {
     onVerify,
@@ -269,6 +271,31 @@ function TurnstileWidgetInner(
     }),
     [],
   );
+
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+      return;
+    }
+
+    const query = window.matchMedia(`(max-width: ${TURNSTILE_COMPACT_BREAKPOINT_PX}px)`);
+    const syncSize = () => {
+      setIsCompactSize(query.matches);
+    };
+
+    syncSize();
+
+    if (typeof query.addEventListener === "function") {
+      query.addEventListener("change", syncSize);
+      return () => {
+        query.removeEventListener("change", syncSize);
+      };
+    }
+
+    query.addListener(syncSize);
+    return () => {
+      query.removeListener(syncSize);
+    };
+  }, []);
 
   useEffect(() => {
     const normalizedSiteKey = String(siteKey ?? "").trim();
@@ -365,7 +392,7 @@ function TurnstileWidgetInner(
             sitekey: normalizedSiteKey,
             theme: "dark",
             appearance: "always",
-            size: "flexible",
+            size: isCompactSize ? "compact" : "flexible",
             callback: (token: string) => {
               if (cancelled) {
                 return;
@@ -402,7 +429,7 @@ function TurnstileWidgetInner(
               }
               reportDiagnostic(
                 "TURNSTILE_WIDGET_TIMEOUT",
-                "Turnstile atingiu timeout de interacao.",
+                "Turnstile atingiu timeout de interação.",
                 retryCountRef.current + 1,
               );
               callbacksRef.current.onTimeout?.();
@@ -529,14 +556,14 @@ function TurnstileWidgetInner(
       }
       widgetIdRef.current = null;
     };
-  }, [siteKey]);
+  }, [siteKey, isCompactSize]);
 
   if (!String(siteKey ?? "").trim()) {
     return (
       <div className={className}>
         {showErrors ? (
           <p className="auth-feedback auth-feedback--error">
-            Verificacao de seguranca indisponivel. Tente novamente em instantes.
+            Verificação de segurança indisponível. Tente novamente em instantes.
           </p>
         ) : null}
       </div>
@@ -545,7 +572,7 @@ function TurnstileWidgetInner(
 
   return (
     <div className={className}>
-      {isLoading ? <p className="auth-note">Carregando verificacao de seguranca...</p> : null}
+      {isLoading ? <p className="auth-note">Carregando verificação de segurança...</p> : null}
       {loadError && showErrors ? <p className="auth-feedback auth-feedback--error">{loadError}</p> : null}
       <div ref={containerRef} className="auth-turnstile-container" />
     </div>

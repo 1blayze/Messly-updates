@@ -19,7 +19,7 @@ export default function VerifyEmailPage() {
 
   async function handleResendEmail(): Promise<void> {
     if (!email) {
-      setErrorMessage("Nao foi possivel identificar seu email.");
+      setErrorMessage("Não foi possível identificar seu e-mail.");
       return;
     }
 
@@ -29,7 +29,7 @@ export default function VerifyEmailPage() {
 
     try {
       await resendVerificationCode(email);
-      setStatusMessage("Codigo de verificacao reenviado.");
+      setStatusMessage("Código de verificação reenviado.");
     } catch (error) {
       setErrorMessage(toFriendlySupabaseAuthError(error));
     } finally {
@@ -45,13 +45,13 @@ export default function VerifyEmailPage() {
   return (
     <div className="auth-page">
       <div className="auth-card auth-card--verify">
-        <h1 className="auth-title">Confirme seu email</h1>
+        <h1 className="auth-title">Confirme seu e-mail</h1>
         <p className="auth-subtitle">
           Verifique sua caixa de entrada para concluir o cadastro.
           <br />
           {email ? (
             <>
-              Endereco: <strong>{email}</strong>
+              Endereço: <strong>{email}</strong>
             </>
           ) : null}
         </p>
@@ -61,7 +61,7 @@ export default function VerifyEmailPage() {
 
         <div className="auth-form">
           <button className="auth-button" type="button" onClick={handleResendEmail} disabled={isResending}>
-            {isResending ? "Reenviando..." : "Reenviar codigo"}
+            {isResending ? "Reenviando..." : "Reenviar código"}
           </button>
 
           <button className="auth-button auth-button--ghost" type="button" onClick={handleBackToLogin}>

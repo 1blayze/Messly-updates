@@ -1,5 +1,11 @@
 import { authService } from "../auth";
+import {
+  readChatInitialSnapshotsCache,
+  trimChatInitialSnapshotsCache,
+  writeChatInitialSnapshotCache,
+} from "../../cache/repositories";
 import { EdgeFunctionError, invokeEdgeJson } from "../edge/edgeClient";
+import { markRuntimePerf, measureRuntimePerf } from "../observability/runtimePerformance";
 import { supabase } from "../supabase";
 import { getRuntimeAppApiUrl, getRuntimeAuthApiUrl, getRuntimeGatewayUrl } from "../../config/runtimeApiConfig";
 
@@ -146,6 +152,9 @@ const INITIAL_MESSAGES_CACHE_KEY = "messly:chat-initial-messages:v1";
 const INITIAL_MESSAGES_CACHE_VERSION = 1;
 const INITIAL_MESSAGES_CACHE_TTL_MS = 5 * 60_000;
 const INITIAL_MESSAGES_CACHE_MAX_ENTRIES = 24;
+const INITIAL_MESSAGES_PERSIST_MAX_ENTRIES = 18;
+const INITIAL_MESSAGES_PERSIST_TTL_MS = 30 * 60_000;
+const INITIAL_MESSAGES_PERSIST_DEBOUNCE_MS = 450;
 const INITIAL_MESSAGES_UNAUTHORIZED_COOLDOWN_MS = 15_000;
 const EDGE_LIST_MESSAGES_UNAUTHORIZED_BYPASS_MS = 5 * 60_000;
 const EDGE_SEND_MESSAGES_UNAUTHORIZED_BYPASS_MS = 5 * 60_000;
@@ -157,11 +166,15 @@ const DELETE_WINDOW_MS = DELETE_WINDOW_HOURS * 60 * 60 * 1000;
 const initialMessagesCache = new Map<string, CachedInitialMessagesEntry>();
 const initialMessagesInFlight = new Map<string, Promise<ListMessagesResponse>>();
 const initialMessagesUnauthorizedCooldown = new Map<string, number>();
+const initialMessagesPersistTimers = new Map<string, number>();
 let globalInitialMessagesUnauthorizedCooldownUntil = 0;
-let initialMessagesCacheHydrated = false;
+let initialMessagesCacheHydratedAccountId: string | null = null;
 let edgeListMessagesUnauthorizedBypassUntil = 0;
 let edgeSendMessagesUnauthorizedBypassUntil = 0;
 let edgeDeleteMessagesUnauthorizedBypassUntil = 0;
+let initialMessagesCacheAccountId = "guest";
+let initialMessagesPersistentWarmupAccountId: string | null = null;
+let initialMessagesPersistentWarmupPromise: Promise<void> | null = null;
 
 export interface SendChatMessageInput {
   conversationId: string;
@@ -172,6 +185,43 @@ export interface SendChatMessageInput {
   replyToSnapshot?: ReplySnapshot | null;
   attachment?: ChatAttachmentMetadata | null;
   payload?: ChatMessagePayload | null;
+}
+
+function normalizeCacheAccountId(accountIdRaw: string | null | undefined): string {
+  return String(accountIdRaw ?? "").trim() || "guest";
+}
+
+function getInitialMessagesStorageKey(accountId: string): string {
+  return `${INITIAL_MESSAGES_CACHE_KEY}:${normalizeCacheAccountId(accountId)}`;
+}
+
+function clearInitialMessagesPersistTimers(): void {
+  if (typeof window === "undefined") {
+    initialMessagesPersistTimers.clear();
+    return;
+  }
+
+  initialMessagesPersistTimers.forEach((timerId) => {
+    window.clearTimeout(timerId);
+  });
+  initialMessagesPersistTimers.clear();
+}
+
+export function setChatMessagesCacheAccountScope(accountIdRaw: string | null | undefined): void {
+  const normalizedAccountId = normalizeCacheAccountId(accountIdRaw);
+  if (normalizedAccountId === initialMessagesCacheAccountId) {
+    return;
+  }
+
+  initialMessagesCacheAccountId = normalizedAccountId;
+  initialMessagesCache.clear();
+  initialMessagesInFlight.clear();
+  initialMessagesUnauthorizedCooldown.clear();
+  globalInitialMessagesUnauthorizedCooldownUntil = 0;
+  initialMessagesCacheHydratedAccountId = null;
+  initialMessagesPersistentWarmupAccountId = null;
+  initialMessagesPersistentWarmupPromise = null;
+  clearInitialMessagesPersistTimers();
 }
 
 function isUnauthorizedChatMessagesError(error: unknown): boolean {
@@ -446,39 +496,288 @@ function cloneListMessagesResponse(response: ListMessagesResponse): ListMessages
   };
 }
 
+function toNullableTrimmedString(value: unknown): string | null {
+  const normalized = String(value ?? "").trim();
+  return normalized ? normalized : null;
+}
+
+function toNullableFiniteNumber(value: unknown): number | null {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function normalizeChatMessageType(value: unknown): ChatMessageType {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  switch (normalized) {
+    case "image":
+    case "video":
+    case "file":
+    case "call_event":
+      return normalized;
+    case "text":
+    default:
+      return "text";
+  }
+}
+
+function normalizeMessageCursor(value: unknown): MessageListCursor | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const cursor = value as Record<string, unknown>;
+  const createdAt = toNullableTrimmedString(cursor.createdAt);
+  const id = toNullableTrimmedString(cursor.id);
+  if (!createdAt || !id) {
+    return null;
+  }
+
+  return {
+    createdAt,
+    id,
+  };
+}
+
+function normalizeChatAttachment(value: unknown): ChatAttachmentMetadata | null {
+  const attachment = toOptionalObject(value);
+  if (!attachment) {
+    return null;
+  }
+
+  const fileKey = toNullableTrimmedString(attachment.fileKey);
+  if (!fileKey) {
+    return null;
+  }
+
+  return {
+    fileKey,
+    originalKey: toNullableTrimmedString(attachment.originalKey),
+    thumbKey: toNullableTrimmedString(attachment.thumbKey),
+    mimeType: toNullableTrimmedString(attachment.mimeType),
+    fileSize: toNullableFiniteNumber(attachment.fileSize),
+    width: toNullableFiniteNumber(attachment.width),
+    height: toNullableFiniteNumber(attachment.height),
+    thumbWidth: toNullableFiniteNumber(attachment.thumbWidth),
+    thumbHeight: toNullableFiniteNumber(attachment.thumbHeight),
+    codec: toNullableTrimmedString(attachment.codec),
+    durationMs: toNullableFiniteNumber(attachment.durationMs),
+  };
+}
+
+function normalizeReplySnapshot(value: unknown): ReplySnapshot | null {
+  const snapshot = toOptionalObject(value);
+  if (!snapshot) {
+    return null;
+  }
+
+  const normalized: ReplySnapshot = {};
+  const authorId = toNullableTrimmedString(snapshot.author_id);
+  const authorName = toNullableTrimmedString(snapshot.author_name);
+  const authorAvatar = toNullableTrimmedString(snapshot.author_avatar);
+  const snippet = toNullableTrimmedString(snapshot.snippet);
+  const messageType = toNullableTrimmedString(snapshot.message_type);
+  const createdAt = toNullableTrimmedString(snapshot.created_at);
+
+  if (authorId) {
+    normalized.author_id = authorId;
+  }
+  if (authorName) {
+    normalized.author_name = authorName;
+  }
+  if (authorAvatar) {
+    normalized.author_avatar = authorAvatar;
+  }
+  if (snippet) {
+    normalized.snippet = snippet;
+  }
+  if (messageType) {
+    normalized.message_type = messageType;
+  }
+  if (createdAt) {
+    normalized.created_at = createdAt;
+  }
+
+  return Object.keys(normalized).length > 0 ? normalized : null;
+}
+
+function toSerializableChatMessageRecord(message: ChatMessageServer): Record<string, unknown> {
+  return {
+    ...cloneChatMessage(message),
+  };
+}
+
+function toSerializableListMessagesResponse(
+  response: ListMessagesResponse,
+): { messages: Array<Record<string, unknown>>; nextCursor: MessageListCursor | null } {
+  const cloned = cloneListMessagesResponse(response);
+  return {
+    messages: cloned.messages.map(toSerializableChatMessageRecord),
+    nextCursor: cloned.nextCursor ? { ...cloned.nextCursor } : null,
+  };
+}
+
+function deserializeCachedChatMessage(value: unknown): ChatMessageServer | null {
+  const message = toOptionalObject(value);
+  if (!message) {
+    return null;
+  }
+
+  const id = toNullableTrimmedString(message.id);
+  const conversationId = toNullableTrimmedString(message.conversation_id);
+  const senderId = toNullableTrimmedString(message.sender_id);
+  const createdAt = toNullableTrimmedString(message.created_at);
+  if (!id || !conversationId || !senderId || !createdAt) {
+    return null;
+  }
+
+  return {
+    id,
+    conversation_id: conversationId,
+    sender_id: senderId,
+    client_id: toNullableTrimmedString(message.client_id),
+    content: typeof message.content === "string" ? message.content : String(message.content ?? ""),
+    type: normalizeChatMessageType(message.type),
+    created_at: createdAt,
+    edited_at: toNullableTrimmedString(message.edited_at),
+    deleted_at: toNullableTrimmedString(message.deleted_at),
+    reply_to_id: toNullableTrimmedString(message.reply_to_id),
+    reply_to_snapshot: normalizeReplySnapshot(message.reply_to_snapshot),
+    call_id: toNullableTrimmedString(message.call_id),
+    payload: toOptionalObject(message.payload),
+    attachment: normalizeChatAttachment(message.attachment),
+  };
+}
+
+function deserializeCachedListMessagesResponse(value: unknown): ListMessagesResponse | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const response = value as Record<string, unknown>;
+  const rawMessages = Array.isArray(response.messages) ? response.messages : [];
+  const messages: ChatMessageServer[] = [];
+
+  for (const item of rawMessages) {
+    const normalized = deserializeCachedChatMessage(item);
+    if (normalized) {
+      messages.push(normalized);
+    }
+  }
+
+  return {
+    messages,
+    nextCursor: normalizeMessageCursor(response.nextCursor),
+  };
+}
+
+function parseCachedInitialMessagesPayload(raw: string): CachedInitialMessagesEntry[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    return [];
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return [];
+  }
+
+  const payload = parsed as Record<string, unknown>;
+  if (Number(payload.version) !== INITIAL_MESSAGES_CACHE_VERSION || !Array.isArray(payload.entries)) {
+    return [];
+  }
+
+  const normalizedEntries: CachedInitialMessagesEntry[] = [];
+  for (const item of payload.entries) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      continue;
+    }
+
+    const entry = item as Record<string, unknown>;
+    const conversationId = toNullableTrimmedString(entry.conversationId);
+    if (!conversationId) {
+      continue;
+    }
+
+    const response = deserializeCachedListMessagesResponse(entry.response);
+    if (!response) {
+      continue;
+    }
+
+    const cachedAt = toNullableFiniteNumber(entry.cachedAt) ?? Date.now();
+    normalizedEntries.push({
+      conversationId,
+      response,
+      cachedAt,
+    });
+  }
+
+  return normalizedEntries;
+}
+
 function hydrateInitialMessagesCacheFromStorage(): void {
-  if (initialMessagesCacheHydrated) {
+  const accountId = normalizeCacheAccountId(initialMessagesCacheAccountId);
+  if (initialMessagesCacheHydratedAccountId === accountId) {
     return;
   }
 
-  initialMessagesCacheHydrated = true;
+  initialMessagesCacheHydratedAccountId = accountId;
 
   if (typeof window === "undefined") {
     return;
   }
 
+  const scopedStorageKey = getInitialMessagesStorageKey(accountId);
+
   try {
-    const raw = window.localStorage.getItem(INITIAL_MESSAGES_CACHE_KEY);
-    if (!raw) {
-      return;
+    const entryMap = new Map<string, CachedInitialMessagesEntry>();
+    const scopedRaw = window.localStorage.getItem(scopedStorageKey);
+    const scopedEntries = scopedRaw ? parseCachedInitialMessagesPayload(scopedRaw) : [];
+    for (const entry of scopedEntries) {
+      entryMap.set(entry.conversationId, entry);
     }
 
-    const parsed = JSON.parse(raw) as CachedInitialMessagesPayload | null;
-    if (!parsed || parsed.version !== INITIAL_MESSAGES_CACHE_VERSION || !Array.isArray(parsed.entries)) {
-      return;
+    if (entryMap.size === 0) {
+      const legacyRaw = window.localStorage.getItem(INITIAL_MESSAGES_CACHE_KEY);
+      const legacyEntries = legacyRaw ? parseCachedInitialMessagesPayload(legacyRaw) : [];
+      for (const entry of legacyEntries) {
+        const current = entryMap.get(entry.conversationId);
+        if (!current || entry.cachedAt > current.cachedAt) {
+          entryMap.set(entry.conversationId, entry);
+        }
+      }
     }
 
-    for (const entry of parsed.entries) {
-      const conversationId = String(entry?.conversationId ?? "").trim();
-      if (!conversationId || !entry?.response || !Array.isArray(entry.response.messages)) {
+    const mergedEntries = Array.from(entryMap.values())
+      .sort((left, right) => Number(left.cachedAt ?? 0) - Number(right.cachedAt ?? 0))
+      .slice(-INITIAL_MESSAGES_CACHE_MAX_ENTRIES);
+
+    for (const entry of mergedEntries) {
+      if (Date.now() - entry.cachedAt > INITIAL_MESSAGES_PERSIST_TTL_MS) {
         continue;
       }
 
-      initialMessagesCache.set(conversationId, {
-        conversationId,
+      initialMessagesCache.set(entry.conversationId, {
+        conversationId: entry.conversationId,
         response: cloneListMessagesResponse(entry.response),
-        cachedAt: Number.isFinite(entry.cachedAt) ? Number(entry.cachedAt) : Date.now(),
+        cachedAt: Number(entry.cachedAt) || Date.now(),
       });
+    }
+
+    if (entryMap.size > 0) {
+      const payload: CachedInitialMessagesPayload = {
+        version: INITIAL_MESSAGES_CACHE_VERSION,
+        entries: mergedEntries.map((entry) => ({
+          conversationId: entry.conversationId,
+          response: cloneListMessagesResponse(entry.response),
+          cachedAt: entry.cachedAt,
+        })),
+      };
+      window.localStorage.setItem(scopedStorageKey, JSON.stringify(payload));
+    }
+
+    if (scopedStorageKey !== INITIAL_MESSAGES_CACHE_KEY) {
+      window.localStorage.removeItem(INITIAL_MESSAGES_CACHE_KEY);
     }
   } catch {
     // ignore local cache parse failures
@@ -491,6 +790,8 @@ function persistInitialMessagesCacheToStorage(): void {
   }
 
   try {
+    const accountId = normalizeCacheAccountId(initialMessagesCacheAccountId);
+    const storageKey = getInitialMessagesStorageKey(accountId);
     const entries = Array.from(initialMessagesCache.values())
       .slice(-INITIAL_MESSAGES_CACHE_MAX_ENTRIES)
       .map((entry) => ({
@@ -504,9 +805,180 @@ function persistInitialMessagesCacheToStorage(): void {
       entries,
     };
 
-    window.localStorage.setItem(INITIAL_MESSAGES_CACHE_KEY, JSON.stringify(payload));
+    window.localStorage.setItem(storageKey, JSON.stringify(payload));
+    if (storageKey !== INITIAL_MESSAGES_CACHE_KEY) {
+      window.localStorage.removeItem(INITIAL_MESSAGES_CACHE_KEY);
+    }
   } catch {
     // ignore local cache write failures
+  }
+}
+
+function persistInitialMessagesSnapshotDebounced(conversationIdRaw: string): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const conversationId = String(conversationIdRaw ?? "").trim();
+  if (!conversationId) {
+    return;
+  }
+
+  const existingTimer = initialMessagesPersistTimers.get(conversationId);
+  if (typeof existingTimer === "number") {
+    window.clearTimeout(existingTimer);
+  }
+
+  const accountIdAtSchedule = normalizeCacheAccountId(initialMessagesCacheAccountId);
+  const timerId = window.setTimeout(() => {
+    initialMessagesPersistTimers.delete(conversationId);
+
+    if (accountIdAtSchedule !== normalizeCacheAccountId(initialMessagesCacheAccountId)) {
+      return;
+    }
+
+    const cacheEntry = initialMessagesCache.get(conversationId);
+    if (!cacheEntry) {
+      return;
+    }
+
+    const serializable = toSerializableListMessagesResponse(cacheEntry.response);
+    void writeChatInitialSnapshotCache(accountIdAtSchedule, conversationId, {
+      messages: serializable.messages,
+      nextCursor: serializable.nextCursor,
+      updatedAtMs: cacheEntry.cachedAt,
+    })
+      .then(() =>
+        trimChatInitialSnapshotsCache(accountIdAtSchedule, {
+          maxEntries: INITIAL_MESSAGES_PERSIST_MAX_ENTRIES,
+          minUpdatedAtMs: Date.now() - INITIAL_MESSAGES_PERSIST_TTL_MS,
+        }),
+      )
+      .catch(() => undefined);
+  }, INITIAL_MESSAGES_PERSIST_DEBOUNCE_MS);
+
+  initialMessagesPersistTimers.set(conversationId, timerId);
+}
+
+export async function primeInitialChatCacheForStartup(options: {
+  accountId?: string | null;
+  maxEntries?: number;
+  maxAgeMs?: number;
+} = {}): Promise<void> {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const accountId = normalizeCacheAccountId(options.accountId ?? initialMessagesCacheAccountId);
+  if (accountId !== normalizeCacheAccountId(initialMessagesCacheAccountId)) {
+    return;
+  }
+
+  markRuntimePerf("chat:prime-cache:start", {
+    accountId,
+    requestedEntries: options.maxEntries ?? null,
+    requestedMaxAgeMs: options.maxAgeMs ?? null,
+  });
+
+  hydrateInitialMessagesCacheFromStorage();
+
+  if (
+    initialMessagesPersistentWarmupAccountId === accountId &&
+    initialMessagesPersistentWarmupPromise
+  ) {
+    await initialMessagesPersistentWarmupPromise;
+    return;
+  }
+
+  const maxEntries = Math.max(
+    1,
+    Math.min(
+      INITIAL_MESSAGES_CACHE_MAX_ENTRIES,
+      Math.trunc(Number(options.maxEntries ?? INITIAL_MESSAGES_PERSIST_MAX_ENTRIES) || INITIAL_MESSAGES_PERSIST_MAX_ENTRIES),
+    ),
+  );
+  const maxAgeMs = Math.max(
+    1_000,
+    Math.trunc(Number(options.maxAgeMs ?? INITIAL_MESSAGES_PERSIST_TTL_MS) || INITIAL_MESSAGES_PERSIST_TTL_MS),
+  );
+  const minUpdatedAtMs = Date.now() - maxAgeMs;
+
+  const warmupPromise = (async () => {
+    let snapshots = await readChatInitialSnapshotsCache(accountId, maxEntries).catch(() => [] as Array<{
+      conversationId: string;
+      messages: Array<Record<string, unknown>>;
+      nextCursor: { createdAt: string; id: string } | null;
+      updatedAtMs: number;
+    }>);
+    if (accountId !== normalizeCacheAccountId(initialMessagesCacheAccountId)) {
+      return;
+    }
+
+    snapshots = snapshots
+      .filter((snapshot) => Number(snapshot.updatedAtMs ?? 0) >= minUpdatedAtMs)
+      .sort((left, right) => Number(left.updatedAtMs ?? 0) - Number(right.updatedAtMs ?? 0));
+
+    for (const snapshot of snapshots) {
+      const conversationId = String(snapshot.conversationId ?? "").trim();
+      if (!conversationId) {
+        continue;
+      }
+
+      const response = deserializeCachedListMessagesResponse({
+        messages: Array.isArray(snapshot.messages) ? snapshot.messages : [],
+        nextCursor: snapshot.nextCursor ?? null,
+      });
+      if (!response) {
+        continue;
+      }
+
+      const existing = initialMessagesCache.get(conversationId);
+      if (existing && Number(existing.cachedAt ?? 0) >= Number(snapshot.updatedAtMs ?? 0)) {
+        continue;
+      }
+
+      initialMessagesCache.delete(conversationId);
+      initialMessagesCache.set(conversationId, {
+        conversationId,
+        response: cloneListMessagesResponse(response),
+        cachedAt: Number(snapshot.updatedAtMs ?? Date.now()) || Date.now(),
+      });
+    }
+
+    while (initialMessagesCache.size > INITIAL_MESSAGES_CACHE_MAX_ENTRIES) {
+      const oldestKey = initialMessagesCache.keys().next().value as string | undefined;
+      if (!oldestKey) {
+        break;
+      }
+      initialMessagesCache.delete(oldestKey);
+    }
+
+    persistInitialMessagesCacheToStorage();
+    await trimChatInitialSnapshotsCache(accountId, {
+      maxEntries: INITIAL_MESSAGES_PERSIST_MAX_ENTRIES,
+      minUpdatedAtMs,
+    }).catch(() => undefined);
+  })();
+
+  initialMessagesPersistentWarmupAccountId = accountId;
+  initialMessagesPersistentWarmupPromise = warmupPromise;
+  try {
+    await warmupPromise;
+  } finally {
+    markRuntimePerf("chat:prime-cache:done", {
+      accountId,
+      cacheEntries: initialMessagesCache.size,
+    });
+    measureRuntimePerf(
+      "chat_prime_cache_duration",
+      "chat:prime-cache:start",
+      "chat:prime-cache:done",
+      { accountId, cacheEntries: initialMessagesCache.size },
+    );
+
+    if (initialMessagesPersistentWarmupPromise === warmupPromise) {
+      initialMessagesPersistentWarmupPromise = null;
+    }
   }
 }
 
@@ -529,6 +1001,7 @@ function writeInitialMessagesCache(conversationId: string, response: ListMessage
   }
 
   persistInitialMessagesCacheToStorage();
+  persistInitialMessagesSnapshotDebounced(conversationId);
 }
 
 function compareMessagesAsc(left: ChatMessageServer, right: ChatMessageServer): number {
@@ -659,18 +1132,59 @@ export async function preloadChatMessages(params: {
     return null;
   }
 
+  markRuntimePerf("chat:preload:start", {
+    conversationId,
+    force: Boolean(params.force),
+    limit: Number.isFinite(params.limit) ? Number(params.limit) : null,
+  });
+
   const maxAgeMs = Number.isFinite(params.maxAgeMs) ? Number(params.maxAgeMs) : 60_000;
   if (!params.force) {
     const cached = getCachedInitialChatMessages(conversationId, maxAgeMs);
     if (cached) {
+      markRuntimePerf("chat:preload:done", {
+        conversationId,
+        source: "memory-cache",
+      });
+      measureRuntimePerf("chat_preload_duration", "chat:preload:start", "chat:preload:done", {
+        conversationId,
+        source: "memory-cache",
+      });
       return cached;
+    }
+
+    await primeInitialChatCacheForStartup({
+      accountId: initialMessagesCacheAccountId,
+      maxEntries: INITIAL_MESSAGES_PERSIST_MAX_ENTRIES,
+      maxAgeMs,
+    });
+    const warmCached = getCachedInitialChatMessages(conversationId, maxAgeMs);
+    if (warmCached) {
+      markRuntimePerf("chat:preload:done", {
+        conversationId,
+        source: "persistent-cache",
+      });
+      measureRuntimePerf("chat_preload_duration", "chat:preload:start", "chat:preload:done", {
+        conversationId,
+        source: "persistent-cache",
+      });
+      return warmCached;
     }
   }
 
   const inFlight = initialMessagesInFlight.get(conversationId);
   if (inFlight) {
     try {
-      return await inFlight;
+      const response = await inFlight;
+      markRuntimePerf("chat:preload:done", {
+        conversationId,
+        source: "in-flight",
+      });
+      measureRuntimePerf("chat_preload_duration", "chat:preload:start", "chat:preload:done", {
+        conversationId,
+        source: "in-flight",
+      });
+      return response;
     } catch {
       return null;
     }
@@ -692,7 +1206,16 @@ export async function preloadChatMessages(params: {
   const inFlightAfterAuth = initialMessagesInFlight.get(conversationId);
   if (inFlightAfterAuth) {
     try {
-      return await inFlightAfterAuth;
+      const response = await inFlightAfterAuth;
+      markRuntimePerf("chat:preload:done", {
+        conversationId,
+        source: "in-flight",
+      });
+      measureRuntimePerf("chat_preload_duration", "chat:preload:start", "chat:preload:done", {
+        conversationId,
+        source: "in-flight",
+      });
+      return response;
     } catch {
       return null;
     }
@@ -710,6 +1233,16 @@ export async function preloadChatMessages(params: {
   try {
     const response = await request;
     clearInitialMessagesUnauthorizedCooldown(conversationId);
+    markRuntimePerf("chat:preload:done", {
+      conversationId,
+      source: "network",
+      messageCount: response.messages.length,
+    });
+    measureRuntimePerf("chat_preload_duration", "chat:preload:start", "chat:preload:done", {
+      conversationId,
+      source: "network",
+      messageCount: response.messages.length,
+    });
     return response;
   } catch (error) {
     if (isUnauthorizedChatMessagesError(error)) {

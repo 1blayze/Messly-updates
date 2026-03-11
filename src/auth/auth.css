@@ -63,6 +63,16 @@
 .auth-card--register {
   max-width: 520px;
   padding: 28px 38px 18px;
+  margin-inline: auto;
+}
+
+.auth-page--register {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100dvh;
+  width: 100%;
+  padding-block: clamp(12px, 3.5vh, 28px);
 }
 
 .auth-card--register .auth-title {
@@ -75,7 +85,7 @@
 }
 
 .auth-card--register .auth-form {
-  gap: 10px;
+  gap: 11px;
 }
 
 .auth-card--register .auth-field {
@@ -144,28 +154,42 @@
 
 .auth-field--captcha {
   gap: 8px;
+  width: 100%;
+  margin-top: 4px;
+  margin-bottom: 4px;
 }
 
 .auth-turnstile {
-  display: grid;
-  gap: 6px;
   width: 100%;
+  display: grid;
+  gap: 8px;
 }
 
 .auth-turnstile-container {
-  min-height: 64px;
-  border-radius: 6px;
   width: 100%;
+  min-height: 64px;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
 }
 
 .auth-turnstile-container > div {
-  width: 100% !important;
-  max-width: none !important;
+  width: min(100%, 360px) !important;
+  max-width: 360px !important;
+  margin-inline: auto !important;
 }
 
 .auth-turnstile-container iframe {
   width: 100% !important;
-  max-width: none !important;
+  max-width: 360px !important;
+  margin-inline: auto !important;
+}
+
+.auth-turnstile .auth-note,
+.auth-turnstile .auth-feedback,
+.auth-field--captcha > .auth-note,
+.auth-field--captcha > .auth-feedback {
+  margin: 0;
 }
 
 .auth-label-row {
@@ -588,6 +612,11 @@
     padding: 16px;
   }
 
+  .auth-page--register {
+    padding-top: 12px;
+    padding-bottom: 12px;
+  }
+
   .auth-brand {
     top: 14px;
     left: 14px;
@@ -623,11 +652,26 @@
   }
 }
 
+@media (max-width: 420px) {
+  .auth-page {
+    padding: 12px;
+  }
+
+  .auth-card--register {
+    padding: 22px 14px 14px;
+  }
+
+  .auth-card--register .auth-form {
+    gap: 10px;
+  }
+}
+
 @media (max-height: 860px) {
   .auth-page--register {
-    place-items: start center;
-    padding-top: 72px;
-    padding-bottom: 14px;
+    align-items: center;
+    justify-content: center;
+    padding-top: 16px;
+    padding-bottom: 16px;
   }
 
   .auth-card--register {
@@ -650,7 +694,9 @@
 
 @media (max-height: 760px) {
   .auth-page--register {
-    padding-top: 66px;
+    align-items: center;
+    justify-content: center;
+    padding-top: 12px;
     padding-bottom: 12px;
   }
 

@@ -1,3 +1,5 @@
+import { markRuntimePerf, measureRuntimePerf } from "../services/observability/runtimePerformance";
+
 export const INITIAL_UI_READY_EVENT = "messly:initial-ui-ready";
 
 export interface StartupUiReadyPayload {
@@ -47,6 +49,21 @@ export function markStartupUiReady(payload: StartupUiReadyPayload): void {
   if (typeof window === "undefined" || hasMarkedStartupUiReady) {
     return;
   }
+
+  markRuntimePerf("renderer:initial-ui-ready", {
+    surface: payload.surface,
+    route: payload.route,
+    bootstrapPhase: payload.bootstrapPhase ?? null,
+  });
+  measureRuntimePerf(
+    "renderer_root_render_to_initial_ui_ready",
+    "renderer:root-render-dispatched",
+    "renderer:initial-ui-ready",
+    {
+      surface: payload.surface,
+      route: payload.route,
+    },
+  );
 
   hasMarkedStartupUiReady = true;
   dismissStartupLoader();

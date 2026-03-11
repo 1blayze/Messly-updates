@@ -43,6 +43,27 @@ function compareVersions(a, b) {
   return aParts.preRelease.localeCompare(bParts.preRelease);
 }
 
+function getErrorMessage(error) {
+  if (error instanceof Error) {
+    const message = String(error.message ?? "").trim();
+    if (message) {
+      return message;
+    }
+  }
+  return String(error ?? "").trim();
+}
+
+function isNoPublishedReleaseError(error) {
+  const normalized = getErrorMessage(error).toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  return (
+    normalized.includes("/releases/latest") &&
+    (normalized.includes("(404)") || normalized.includes("not found"))
+  );
+}
+
 function requestWithRedirects(urlValue, options = {}, redirectCount = 0) {
   return new Promise((resolve, reject) => {
     if (redirectCount > 5) {
@@ -251,12 +272,29 @@ function createAppUpdater(options) {
           totalBytes: Number(chosenAsset?.size ?? 0) || 0,
           progressPercent: 0,
           lastCheckedAt: new Date().toISOString(),
-          errorMessage: hasUpdate ? null : chosenAsset ? null : "Nenhum instalador compatível encontrado no release.",
+          errorMessage: null,
         });
       } catch (error) {
+        if (isNoPublishedReleaseError(error)) {
+          setState({
+            status: "unavailable",
+            currentVersion: normalizeVersion(app.getVersion()),
+            latestVersion: normalizeVersion(app.getVersion()) || null,
+            releaseName: null,
+            publishedAt: null,
+            releaseNotes: null,
+            assetName: null,
+            downloadedBytes: 0,
+            totalBytes: 0,
+            progressPercent: 0,
+            lastCheckedAt: new Date().toISOString(),
+            errorMessage: null,
+          });
+          return getState();
+        }
         setState({
           status: "error",
-          errorMessage: error instanceof Error ? error.message : "Falha ao verificar atualização.",
+          errorMessage: getErrorMessage(error) || "Falha ao verificar atualização.",
           lastCheckedAt: new Date().toISOString(),
         });
       } finally {
@@ -388,6 +426,7 @@ function createAppUpdater(options) {
       const child = spawn(targetPath, ["/S"], {
         detached: true,
         stdio: "ignore",
+        windowsHide: true,
       });
       child.unref();
       app.quit();

@@ -56,17 +56,17 @@ function getUpdaterTitle(state: AppUpdaterState | null): string {
   }
   switch (state.status) {
     case "checking":
-      return "Verificando atualização";
+      return "Verificando atualizações";
     case "available":
       return "Atualização disponível";
     case "downloading":
       return "Baixando atualização";
     case "downloaded":
-      return "Pronta para instalar";
+      return "Atualização pronta";
     case "error":
       return "Falha ao atualizar";
     case "disabled":
-      return "Atualizador desativado";
+      return "Atualização";
     default:
       return "Atualização";
   }
@@ -99,9 +99,9 @@ function getUpdaterTooltipLabel(state: AppUpdaterState | null): string {
 
   switch (state.status) {
     case "downloaded":
-      return "Atualiza\u00e7\u00e3o pronta!";
+      return "Atualização pronta";
     case "available":
-      return "Atualiza\u00e7\u00e3o dispon\u00edvel";
+      return "Atualização disponível";
     default:
       return "";
   }
@@ -146,10 +146,10 @@ function getSafeUpdaterUiErrorMessage(rawMessage: string | null | undefined, fal
   if (!message) {
     return fallbackMessage;
   }
-  const normalized = message.toLowerCase();
   if (isNoPublishedUpdateErrorMessage(message)) {
-    return "Nenhuma versão publicada foi encontrada no repositório de atualizações.";
+    return "Atualizado.";
   }
+  const normalized = message.toLowerCase();
   if (
     normalized.includes("error invoking remote method") ||
     normalized.includes("updater:check") ||
@@ -295,26 +295,24 @@ export default function TopBar({ section = "friends", isCallActive = false, onPr
 
   const updaterBodyText = useMemo(() => {
     if (!updaterState) {
-      return "Clique em Verificar para buscar atualizações.";
+      return "Clique em Verificar para procurar atualizações.";
     }
     if (updaterState.status === "available") {
       return updaterState.latestVersion
-        ? `Versão ${updaterState.latestVersion} pronta para download.`
-        : "Nova versão disponível para download.";
+        ? `Versão ${updaterState.latestVersion} disponível para download.`
+        : "Atualização disponível para download.";
     }
     if (updaterState.status === "downloaded") {
-      return "Atualização baixada. Clique para instalar e reiniciar.";
+      return "Atualização pronta para instalar.";
     }
     if (updaterState.status === "checking") {
-      return "Buscando a última versão no repositório.";
+      return "Verificando atualizações...";
     }
     if (updaterState.status === "unavailable") {
-      return updaterState.latestVersion
-        ? `Você já está na versão ${updaterState.latestVersion}.`
-        : "Nenhuma atualização encontrada.";
+      return "Atualizado.";
     }
     if (updaterState.status === "disabled") {
-      return getSafeUpdaterUiErrorMessage(updaterState.errorMessage, "Atualizador desativado.");
+      return "Atualização indisponível no momento.";
     }
     if (updaterState.status === "error") {
       return getSafeUpdaterUiErrorMessage(updaterState.errorMessage, "Falha ao verificar atualização.");
