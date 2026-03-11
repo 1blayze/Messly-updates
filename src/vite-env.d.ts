@@ -33,6 +33,7 @@ interface UploadProfileMediaPayload {
   bytes: ArrayBuffer | Uint8Array;
   mimeType?: string;
   fileName?: string;
+  accessToken?: string;
 }
 
 interface UploadProfileMediaResult {
@@ -227,6 +228,12 @@ type AppUpdaterStatus =
   | "unavailable"
   | "downloading"
   | "downloaded"
+  | "applying"
+  | "installing"
+  | "relaunching"
+  | "retrying"
+  | "ready"
+  | "failed"
   | "error";
 
 interface AppUpdaterState {

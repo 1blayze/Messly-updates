@@ -120,6 +120,14 @@ function normalizeManagedMediaFileKey(fileKeyRaw: string): string {
 }
 
 function shouldSkipManagedMediaDeleteRequest(): boolean {
+  if (import.meta.env.DEV && typeof window !== "undefined") {
+    const hostname = String(window.location.hostname ?? "").trim().toLowerCase();
+    const apiBase = String(getApiBaseUrl() ?? "").trim();
+    if ((hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1") && apiBase.startsWith("/")) {
+      return true;
+    }
+  }
+
   if (typeof window === "undefined" || typeof window.electronAPI === "undefined") {
     return false;
   }

@@ -127,6 +127,19 @@ function sanitizeAbsoluteMediaUrl(rawUrl: string | null | undefined): string | n
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
       return null;
     }
+
+    // Rewrite legacy hardcoded CDN host to the current configured media base.
+    if (parsed.hostname.toLowerCase() === "cdn.messly.site") {
+      const normalizedKey = sanitizeMediaKey(parsed.pathname.replace(/^\/+/, ""));
+      if (normalizedKey) {
+        const rewritten = new URL(toCdnUrl(normalizedKey));
+        parsed.searchParams.forEach((value, key) => {
+          rewritten.searchParams.set(key, value);
+        });
+        return rewritten.toString();
+      }
+    }
+
     return parsed.toString();
   } catch {
     return null;
@@ -153,13 +166,14 @@ function shouldUsePublicCdn(): boolean {
     return true;
   }
 
-  if (typeof window.electronAPI !== "undefined") {
+  const hostname = String(window.location.hostname ?? "").trim().toLowerCase();
+  if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1") {
+    // In local dev, prefer signed URLs to avoid depending on public CDN DNS/routes.
     return false;
   }
 
-  const hostname = String(window.location.hostname ?? "").trim().toLowerCase();
-  if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1") {
-    return true;
+  if (typeof window.electronAPI !== "undefined") {
+    return false;
   }
 
   return true;

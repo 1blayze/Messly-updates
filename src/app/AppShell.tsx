@@ -143,6 +143,7 @@ interface UserIdentityRow {
   avatar_key?: string | null;
   avatar_hash?: string | null;
   avatar_url?: string | null;
+  updated_at?: string | null;
   banner_key?: string | null;
   banner_hash?: string | null;
   banner_color?: string | null;
@@ -292,8 +293,9 @@ function ChatViewFallback(): JSX.Element {
   );
 }
 
-function getPendingDisplayAvatar(displayName: string, username: string): string {
-  return getNameAvatarUrl(displayName || username || "U");
+function getPendingDisplayAvatar(displayName: string, username: string, userId?: string | null): string {
+  const stableSeed = String(userId ?? "").trim();
+  return getNameAvatarUrl(stableSeed || displayName || username || "U");
 }
 
 function buildPendingAvatarSignature(userRow: UserIdentityRow | undefined, legacyBackupUrl: string): string {
@@ -301,6 +303,7 @@ function buildPendingAvatarSignature(userRow: UserIdentityRow | undefined, legac
     String(userRow?.avatar_key ?? "").trim(),
     String(userRow?.avatar_hash ?? "").trim().toLowerCase(),
     String(userRow?.avatar_url ?? "").trim(),
+    String(userRow?.updated_at ?? "").trim(),
     legacyBackupUrl.trim(),
   ].join("|");
 }
@@ -344,8 +347,9 @@ function arePendingCardsEqual(current: PendingFriendCard[], next: PendingFriendC
   return true;
 }
 
-function getFriendDisplayAvatar(displayName: string, username: string): string {
-  return getNameAvatarUrl(displayName || username || "U");
+function getFriendDisplayAvatar(displayName: string, username: string, userId?: string | null): string {
+  const stableSeed = String(userId ?? "").trim();
+  return getNameAvatarUrl(stableSeed || displayName || username || "U");
 }
 
 function normalizeProfileDisplayName(
@@ -405,6 +409,7 @@ function buildFriendAvatarSignature(userRow: UserIdentityRow | undefined, legacy
     String(userRow?.avatar_key ?? "").trim(),
     String(userRow?.avatar_hash ?? "").trim().toLowerCase(),
     String(userRow?.avatar_url ?? "").trim(),
+    String(userRow?.updated_at ?? "").trim(),
     legacyBackupUrl.trim(),
   ].join("|");
 }
@@ -885,7 +890,7 @@ function readFriendsCache(userId: string | null | undefined): FriendListItem[] |
 
         const username = String(casted.username ?? "").trim() || "username";
         const displayName = normalizeProfileDisplayName(casted.displayName, username, username);
-        const avatarSrc = String(casted.avatarSrc ?? "").trim() || getFriendDisplayAvatar(displayName, username);
+        const avatarSrc = String(casted.avatarSrc ?? "").trim() || getFriendDisplayAvatar(displayName, username, userIdValue);
         const firebaseUid = String((casted as { firebaseUid?: string | null }).firebaseUid ?? "").trim();
         const spotifyActivity = normalizePresenceSpotifyActivity(
           (casted as { spotifyActivity?: unknown }).spotifyActivity ?? null,
@@ -1942,7 +1947,7 @@ export default function AppShell() {
 
       const username = String(userRow.username ?? "").trim() || "username";
       const displayName = normalizeProfileDisplayName(userRow.display_name, username, username);
-      const fallbackAvatar = getFriendDisplayAvatar(displayName, username);
+      const fallbackAvatar = getFriendDisplayAvatar(displayName, username, targetUserId);
 
       let avatarSrc = fallbackAvatar;
       try {
@@ -2139,7 +2144,7 @@ export default function AppShell() {
               userId: friendId,
               username,
               displayName,
-              avatarSrc: cachedAvatar ?? getFriendDisplayAvatar(displayName, username),
+              avatarSrc: cachedAvatar ?? getFriendDisplayAvatar(displayName, username, friendId),
               presenceState: resolvedPresence,
               ...(fallbackSpotifyActivity ? { spotifyActivity: fallbackSpotifyActivity } : {}),
               firebaseUid: String(friendRow?.firebase_uid ?? "").trim() || undefined,
@@ -2156,7 +2161,7 @@ export default function AppShell() {
             friendIds.map(async (friendId) => {
               const friendRow = usersById.get(friendId);
               if (!friendRow) {
-                return [friendId, getFriendDisplayAvatar("U", "U")] as const;
+                return [friendId, getFriendDisplayAvatar("U", "U", friendId)] as const;
               }
 
               const username = String(friendRow.username ?? "").trim() || "username";
@@ -2177,16 +2182,16 @@ export default function AppShell() {
                   if (legacySource) {
                     const resolvedLegacyAvatar = await getAvatarUrl(friendId, legacySource, friendRow.avatar_hash ?? null);
                     avatarSrc = isDefaultAvatarUrl(resolvedLegacyAvatar)
-                      ? getFriendDisplayAvatar(displayName, username)
+                      ? getFriendDisplayAvatar(displayName, username, friendId)
                       : resolvedLegacyAvatar;
                   } else {
-                    avatarSrc = getFriendDisplayAvatar(displayName, username);
+                    avatarSrc = getFriendDisplayAvatar(displayName, username, friendId);
                   }
                 }
                 setCachedFriendAvatar(friendId, avatarSignature, avatarSrc);
                 return [friendId, avatarSrc] as const;
               } catch {
-                const fallbackAvatar = getFriendDisplayAvatar(displayName, username);
+                const fallbackAvatar = getFriendDisplayAvatar(displayName, username, friendId);
                 setCachedFriendAvatar(friendId, avatarSignature, fallbackAvatar);
                 return [friendId, fallbackAvatar] as const;
               }
@@ -2291,7 +2296,7 @@ export default function AppShell() {
               targetUserId,
               username,
               displayName,
-              avatarSrc: cachedAvatar ?? getPendingDisplayAvatar(displayName, username),
+              avatarSrc: cachedAvatar ?? getPendingDisplayAvatar(displayName, username, targetUserId),
               direction: request.addressee_id === currentUserId ? "incoming" : "outgoing",
               createdAt: request.created_at ?? null,
             };
@@ -2304,7 +2309,7 @@ export default function AppShell() {
             targetIds.map(async (id) => {
               const userRow = userMap.get(id);
               if (!userRow) {
-                return [id, getPendingDisplayAvatar("U", "U")] as const;
+                return [id, getPendingDisplayAvatar("U", "U", id)] as const;
               }
 
               const username = (userRow.username ?? "").trim() || "username";
@@ -2325,17 +2330,17 @@ export default function AppShell() {
                   if (legacySource) {
                     const resolvedLegacyAvatar = await getAvatarUrl(id, legacySource, userRow.avatar_hash ?? null);
                     avatarSrc = isDefaultAvatarUrl(resolvedLegacyAvatar)
-                      ? getPendingDisplayAvatar(displayName, username)
+                      ? getPendingDisplayAvatar(displayName, username, id)
                       : resolvedLegacyAvatar;
                   } else {
-                    avatarSrc = getPendingDisplayAvatar(displayName, username);
+                    avatarSrc = getPendingDisplayAvatar(displayName, username, id);
                   }
                 }
 
                 setCachedPendingAvatar(id, avatarSignature, avatarSrc);
                 return [id, avatarSrc] as const;
               } catch {
-                const fallbackAvatar = getPendingDisplayAvatar(displayName, username);
+                const fallbackAvatar = getPendingDisplayAvatar(displayName, username, id);
                 setCachedPendingAvatar(id, avatarSignature, fallbackAvatar);
                 return [id, fallbackAvatar] as const;
               }
@@ -2853,7 +2858,7 @@ export default function AppShell() {
         activeDirectMessage && activeDirectMessage.userId === targetUserId
           ? String(activeDirectMessage.avatarSrc ?? "").trim()
           : "";
-      const fallbackAvatarSrc = getPendingDisplayAvatar(normalizedDisplayName, normalizedUsername);
+      const fallbackAvatarSrc = getPendingDisplayAvatar(normalizedDisplayName, normalizedUsername, targetUserId);
       const requestId =
         String((insertedRequest as { id?: string | null } | null)?.id ?? "").trim() ||
         `pending:${currentUserId}:${targetUserId}`;

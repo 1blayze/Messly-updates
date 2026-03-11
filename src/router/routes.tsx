@@ -20,6 +20,60 @@ function preloadAppShell(): Promise<AppShellModule> {
 const AppShell = lazy(preloadAppShell);
 const RegisterPage = lazy(() => import("../auth/RegisterPage"));
 const VerifyEmailPage = lazy(() => import("../auth/VerifyEmailPage"));
+const STARTUP_FONTS_TIMEOUT_MS = 900;
+const STARTUP_READY_MAX_RETRIES = 10;
+const STARTUP_LAYOUT_STABILITY_DELTA = 1;
+
+function nextFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => resolve());
+  });
+}
+
+async function waitForFontsReady(timeoutMs: number): Promise<void> {
+  if (typeof document === "undefined" || !("fonts" in document)) {
+    return;
+  }
+  const fontSet = (document as Document & {
+    fonts?: {
+      ready: Promise<unknown>;
+    };
+  }).fonts;
+  if (!fontSet?.ready) {
+    return;
+  }
+  await Promise.race([
+    fontSet.ready.then(() => undefined).catch(() => undefined),
+    new Promise<void>((resolve) => {
+      window.setTimeout(resolve, Math.max(180, timeoutMs));
+    }),
+  ]);
+}
+
+function isStartupSurfaceReady(node: HTMLElement | null): node is HTMLElement {
+  if (!node) {
+    return false;
+  }
+  const rect = node.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) {
+    return false;
+  }
+  const style = window.getComputedStyle(node);
+  if (style.display === "none" || style.visibility === "hidden") {
+    return false;
+  }
+  const opacity = Number.parseFloat(style.opacity || "1");
+  return Number.isFinite(opacity) ? opacity > 0.92 : true;
+}
+
+async function hasStableLayout(node: HTMLElement): Promise<boolean> {
+  const before = node.getBoundingClientRect();
+  await nextFrame();
+  const after = node.getBoundingClientRect();
+  const widthDelta = Math.abs(before.width - after.width);
+  const heightDelta = Math.abs(before.height - after.height);
+  return widthDelta <= STARTUP_LAYOUT_STABILITY_DELTA && heightDelta <= STARTUP_LAYOUT_STABILITY_DELTA;
+}
 
 function LoadingScreen() {
   return <div className="auth-loading" aria-hidden="true" />;
@@ -40,8 +94,8 @@ function AuthSurface({ children }: { children: ReactNode }) {
 function AuthBootstrapSplash() {
   return (
     <AppShellFallback
-      statusText="Restaurando sessao"
-      detailText="Carregando sessao, cache e shell inicial"
+      statusText="Carregando Messly"
+      detailText="Preparando aplicativo"
     />
   );
 }
@@ -91,8 +145,8 @@ function AppShellRoute() {
     <Suspense
       fallback={(
         <AppShellFallback
-          statusText="Abrindo Messly"
-          detailText="Montando o shell principal e aquecendo modulos criticos"
+          statusText="Carregando Messly"
+          detailText="Carregando interface"
         />
       )}
     >
@@ -235,22 +289,40 @@ export default function AppRoutes() {
     }
 
     let cancelled = false;
-    let firstFrameId = 0;
-    let secondFrameId = 0;
+    const commitReady = async (): Promise<void> => {
+      await waitForFontsReady(STARTUP_FONTS_TIMEOUT_MS);
 
-    const commitReady = (): void => {
+      for (let attempt = 0; attempt < STARTUP_READY_MAX_RETRIES; attempt += 1) {
+        if (cancelled) {
+          return;
+        }
+
+        await nextFrame();
+        await nextFrame();
+
+        const surfaceNode = document.querySelector<HTMLElement>(
+          `[data-messly-startup-surface="${startupSurface.surface}"]`,
+        );
+        if (!isStartupSurfaceReady(surfaceNode)) {
+          continue;
+        }
+
+        if (!(await hasStableLayout(surfaceNode))) {
+          continue;
+        }
+
+        hasDispatchedInitialReadyRef.current = true;
+        markStartupUiReady({
+          surface: startupSurface.surface,
+          route: startupSurface.route,
+          bootstrapPhase: bootstrap.phase,
+        });
+        return;
+      }
+
       if (cancelled) {
         return;
       }
-
-      const surfaceNode = document.querySelector<HTMLElement>(
-        `[data-messly-startup-surface="${startupSurface.surface}"]`,
-      );
-      const rect = surfaceNode?.getBoundingClientRect();
-      if (!surfaceNode || !rect || rect.width <= 0 || rect.height <= 0) {
-        return;
-      }
-
       hasDispatchedInitialReadyRef.current = true;
       markStartupUiReady({
         surface: startupSurface.surface,
@@ -259,14 +331,10 @@ export default function AppRoutes() {
       });
     };
 
-    firstFrameId = window.requestAnimationFrame(() => {
-      secondFrameId = window.requestAnimationFrame(commitReady);
-    });
+    void commitReady();
 
     return () => {
       cancelled = true;
-      window.cancelAnimationFrame(firstFrameId);
-      window.cancelAnimationFrame(secondFrameId);
     };
   }, [bootstrap.phase, currentUserId, shouldShowLoginNow, shouldShowRestorationShell]);
 

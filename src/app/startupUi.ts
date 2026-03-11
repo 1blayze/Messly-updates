@@ -20,7 +20,16 @@ export function dismissStartupLoader(): void {
     return;
   }
 
-  loadingScreen.remove();
+  if (loadingScreen.dataset.dismissed === "1") {
+    return;
+  }
+  loadingScreen.dataset.dismissed = "1";
+  loadingScreen.style.transition = "opacity 180ms ease, transform 220ms ease";
+  loadingScreen.style.opacity = "0";
+  loadingScreen.style.transform = "translateY(-4px)";
+  window.setTimeout(() => {
+    loadingScreen.remove();
+  }, 220);
 }
 
 export function attachStartupLoaderCleanup(): () => void {

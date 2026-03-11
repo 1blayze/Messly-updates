@@ -4,6 +4,7 @@ import react from "@vitejs/plugin-react";
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
   const supabaseUrl = String(env.VITE_SUPABASE_URL ?? "").trim().replace(/\/+$/, "");
+  const messlyApiUrl = String(env.VITE_MESSLY_API_URL ?? "https://messly.site").trim().replace(/\/+$/, "");
   const supabaseDevProxy = supabaseUrl
     ? {
         "/__supabase": {
@@ -14,6 +15,20 @@ export default defineConfig(({ mode }) => {
         },
       }
     : undefined;
+  const messlyApiDevProxy = messlyApiUrl
+    ? {
+        "/__messly_api": {
+          target: messlyApiUrl,
+          changeOrigin: true,
+          secure: true,
+          rewrite: (path: string) => path.replace(/^\/__messly_api/, ""),
+        },
+      }
+    : undefined;
+  const devProxy = {
+    ...(supabaseDevProxy ?? {}),
+    ...(messlyApiDevProxy ?? {}),
+  };
 
   return {
     base: "./",
@@ -23,6 +38,7 @@ export default defineConfig(({ mode }) => {
         name: "messly-csp-dev-eval-token",
         transformIndexHtml(html) {
           const scriptEvalToken = mode === "production" ? "" : "'unsafe-eval'";
+          const scriptWasmEvalToken = "'wasm-unsafe-eval'";
           const devLocalGatewaySources =
             "http://localhost:8788 http://127.0.0.1:8788 ws://localhost:8788 ws://127.0.0.1:8788";
           const devConnectSources =
@@ -35,6 +51,7 @@ export default defineConfig(({ mode }) => {
               : "http://localhost:8788 http://127.0.0.1:8788";
           return html
             .replace(/__CSP_SCRIPT_EVAL__/g, scriptEvalToken)
+            .replace(/__CSP_SCRIPT_WASM_EVAL__/g, scriptWasmEvalToken)
             .replace(/__CSP_DEV_CONNECT__/g, devConnectSources)
             .replace(/__CSP_DEV_IMG__/g, devImageSources)
             .replace(/__CSP_DEV_MEDIA__/g, devImageSources);
@@ -46,7 +63,7 @@ export default defineConfig(({ mode }) => {
       port: 5173,
       strictPort: true,
       origin: "http://127.0.0.1:5173",
-      proxy: supabaseDevProxy,
+      proxy: devProxy,
       hmr: {
         host: "127.0.0.1",
         protocol: "ws",

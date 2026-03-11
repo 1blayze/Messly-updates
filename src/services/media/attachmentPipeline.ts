@@ -186,6 +186,22 @@ function resolveUploadKindFromKey(
 }
 
 export async function uploadAttachmentBlob(options: UploadAttachmentBlobOptions): Promise<void> {
+  const uploadAttachment = typeof window !== "undefined" ? window.electronAPI?.uploadAttachment : undefined;
+  if (uploadAttachment) {
+    const bytes = await options.file.arrayBuffer();
+    const result = await uploadAttachment({
+      key: options.key,
+      bytes,
+      contentType: String(options.contentType ?? options.file.type ?? "application/octet-stream").trim()
+        || "application/octet-stream",
+    });
+    if (String(result?.key ?? "").trim() !== options.key) {
+      throw new Error("Chave de upload divergente da chave esperada.");
+    }
+    options.onProgress?.(1);
+    return;
+  }
+
   const uploadKind = resolveUploadKindFromKey(options.key, options.file);
   const uploaded = await uploadMediaAsset({
     kind: uploadKind,

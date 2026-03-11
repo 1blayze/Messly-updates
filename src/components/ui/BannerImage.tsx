@@ -7,18 +7,9 @@ type BannerImageProps = Omit<ImgHTMLAttributes<HTMLImageElement>, "src"> & {
 };
 
 function normalizeLocalMediaUrl(src: string): string {
-  if (typeof window === "undefined") {
-    return src;
-  }
-
-  const hostname = String(window.location.hostname ?? "").trim().toLowerCase();
-  if (hostname !== "localhost" && hostname !== "127.0.0.1" && hostname !== "::1") {
-    return src;
-  }
-
   try {
     const parsed = new URL(src);
-    if (parsed.hostname !== "cdn.messly.site") {
+    if (parsed.hostname.toLowerCase() !== "cdn.messly.site") {
       return src;
     }
 

@@ -231,6 +231,12 @@ function createElectronUpdaterAdapter({ app }) {
     if (state.status !== "downloaded") {
       throw new Error("Atualizacao ainda nao foi baixada.");
     }
+    setState({
+      status: "installing",
+      errorMessage: null,
+      progressPercent: 100,
+      downloadedBytes: state.totalBytes || state.downloadedBytes,
+    });
     setImmediate(() => {
       try {
         autoUpdater.quitAndInstall(true, true);

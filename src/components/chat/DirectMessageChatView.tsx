@@ -2174,8 +2174,9 @@ export default function DirectMessageChatView({
       ? normalizedTargetUsername
       : normalizedTargetUsername) ||
     "Usuario";
-  const targetFallbackAvatar = getNameAvatarUrl(targetDisplayNameForFallback || "U");
-  const currentFallbackAvatar = getNameAvatarUrl(currentUser.displayName || currentUser.username || "U");
+  const targetFallbackAvatar = getNameAvatarUrl(String(targetUser.userId ?? "").trim() || targetDisplayNameForFallback || "U");
+  const currentFallbackAvatar =
+    getNameAvatarUrl(String(currentUserId ?? "").trim() || currentUser.displayName || currentUser.username || "U");
   const targetAvatarSrc = (targetUser.avatarSrc || "").trim() || targetFallbackAvatar;
   const currentAvatarSrc = (currentUser.avatarSrc || "").trim() || currentFallbackAvatar;
   const safeTargetDisplayName = targetDisplayNameForFallback;

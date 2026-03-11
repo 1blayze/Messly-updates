@@ -347,17 +347,23 @@ export class GatewayClient {
     this.clearReconnectTimer();
 
     const nextAttempt = this.state.reconnectAttempt + 1;
+    const useSlowBackoff = nextAttempt >= 6;
+    const normalizedAttempt = useSlowBackoff ? nextAttempt - 5 : nextAttempt;
     const delayMs = computeReconnectDelayMs({
-      attempt: nextAttempt,
-      baseDelayMs: 1_000,
-      maxDelayMs: 30_000,
+      attempt: normalizedAttempt,
+      baseDelayMs: useSlowBackoff ? 30_000 : 1_000,
+      maxDelayMs: useSlowBackoff ? 10 * 60_000 : 30_000,
       jitterRatio: 0.25,
     });
+    const shouldShowSlowBackoffMessage = useSlowBackoff && reason.includes("WebSocket");
+    const lastError = shouldShowSlowBackoffMessage
+      ? "Gateway indisponivel no momento. Nova tentativa automatica em breve."
+      : reason;
 
     this.updateState({
       status: "reconnecting",
       reconnectAttempt: nextAttempt,
-      lastError: reason,
+      lastError,
     });
 
     this.reconnectTimerId = window.setTimeout(() => {

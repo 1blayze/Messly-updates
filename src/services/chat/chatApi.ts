@@ -1747,23 +1747,27 @@ export async function deleteChatMessage(messageId: string): Promise<ChatMessageS
     clearEdgeDeleteMessagesUnauthorizedBypass();
     return response.message;
   } catch (error) {
-    if (!isUnauthorizedChatMessagesError(error)) {
+    const unauthorized = isUnauthorizedChatMessagesError(error);
+    const fallbackEligible = isFallbackEligibleChatMessagesError(error);
+    if (!unauthorized && !fallbackEligible) {
       throw error;
     }
 
-    activateEdgeDeleteMessagesUnauthorizedBypass();
-    const refreshed = await authService.refreshSession();
-    if (refreshed?.access_token) {
-      try {
-        const retryResponse = await invokeEdgeJson<DeleteMessageRequest, MessageMutationResponse>(FUNCTION_NAME, request, {
-          requireAuth: true,
-          retries: 0,
-          timeoutMs: 18_000,
-        });
-        clearEdgeDeleteMessagesUnauthorizedBypass();
-        return retryResponse.message;
-      } catch {
-        // Fall through to direct fallback.
+    if (unauthorized) {
+      activateEdgeDeleteMessagesUnauthorizedBypass();
+      const refreshed = await authService.refreshSession();
+      if (refreshed?.access_token) {
+        try {
+          const retryResponse = await invokeEdgeJson<DeleteMessageRequest, MessageMutationResponse>(FUNCTION_NAME, request, {
+            requireAuth: true,
+            retries: 0,
+            timeoutMs: 18_000,
+          });
+          clearEdgeDeleteMessagesUnauthorizedBypass();
+          return retryResponse.message;
+        } catch {
+          // Fall through to direct fallback.
+        }
       }
     }
 

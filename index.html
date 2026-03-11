@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self' __CSP_SCRIPT_EVAL__ http://localhost:5173 http://127.0.0.1:5173 https://challenges.cloudflare.com; script-src-elem 'self' http://localhost:5173 http://127.0.0.1:5173 https://challenges.cloudflare.com; connect-src 'self' http://localhost:5173 http://127.0.0.1:5173 ws://localhost:5173 ws://127.0.0.1:5173 __CSP_DEV_CONNECT__ https://challenges.cloudflare.com https://*.messly.site wss://*.messly.site https://*.supabase.co wss://*.supabase.co https://*.googleapis.com https://*.r2.cloudflarestorage.com https://accounts.spotify.com https://api.spotify.com https://ipapi.co https://ipwho.is; frame-src 'self' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: https: __CSP_DEV_IMG__; media-src 'self' data: blob: __CSP_DEV_MEDIA__; object-src 'none'; base-uri 'self';"
+      content="default-src 'self'; script-src 'self' __CSP_SCRIPT_EVAL__ __CSP_SCRIPT_WASM_EVAL__ http://localhost:5173 http://127.0.0.1:5173 https://challenges.cloudflare.com; script-src-elem 'self' http://localhost:5173 http://127.0.0.1:5173 https://challenges.cloudflare.com; connect-src 'self' http://localhost:5173 http://127.0.0.1:5173 ws://localhost:5173 ws://127.0.0.1:5173 __CSP_DEV_CONNECT__ https://challenges.cloudflare.com https://messly.site https://www.messly.site wss://messly.site wss://www.messly.site https://*.messly.site wss://*.messly.site https://*.supabase.co wss://*.supabase.co https://*.googleapis.com https://*.r2.cloudflarestorage.com https://accounts.spotify.com https://api.spotify.com https://ipapi.co https://ipwho.is; frame-src 'self' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: https: __CSP_DEV_IMG__; media-src 'self' data: blob: __CSP_DEV_MEDIA__; object-src 'none'; base-uri 'self';"
     />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -16,131 +16,25 @@
       href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200"
     />
     <style>
-      :root {
-        color-scheme: dark;
-        --messly-loader-bg: #111314;
-        --messly-loader-muted: #9ca3af;
-      }
+      :root { color-scheme: dark; }
 
       html,
       body {
         margin: 0;
         min-height: 100%;
-        background: var(--messly-loader-bg);
-      }
-
-      body {
-        overflow: hidden;
-      }
-
-      #messly-loading {
-        position: fixed;
-        inset: 0;
-        display: flex;
-        align-items: flex-start;
-        justify-content: center;
-        padding-top: clamp(40px, 12vh, 110px);
-        z-index: 999999;
-        background: var(--messly-loader-bg);
-        will-change: opacity, transform;
-      }
-
-      .messly-loading-inner {
-        width: min(88vw, 260px);
-        text-align: center;
-        display: grid;
-        justify-items: center;
-        gap: 16px;
-      }
-
-      .messly-loading-logo {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        width: 76px;
-        height: 76px;
-        user-select: none;
-        -webkit-user-drag: none;
-        transform-origin: 50% 50%;
-        animation: messlyLogoBreath 3s ease-in-out infinite;
-      }
-
-      .messly-loading-logo svg {
-        display: block;
-        width: 100%;
-        height: 100%;
-      }
-
-      .messly-loading-progress {
-        width: min(220px, 58vw);
-        height: 6px;
-        border-radius: 999px;
-        background: rgba(255, 255, 255, 0.16);
-        overflow: hidden;
-      }
-
-      .messly-loading-progress-fill {
-        width: 42%;
-        height: 100%;
-        border-radius: inherit;
-        background: linear-gradient(90deg, #e6edf9 0%, #ffffff 100%);
-        transform-origin: 0 50%;
-        animation: messlyLoaderBar 1.35s ease-in-out infinite;
-      }
-
-      @keyframes messlyLoaderBar {
-        0% {
-          transform: translateX(-8%) scaleX(0.78);
-          opacity: 0.82;
-        }
-        50% {
-          transform: translateX(40%) scaleX(1);
-          opacity: 1;
-        }
-        100% {
-          transform: translateX(120%) scaleX(0.82);
-          opacity: 0.82;
-        }
-      }
-
-      @keyframes messlyLogoBreath {
-        0% {
-          transform: scale(1);
-        }
-        50% {
-          transform: scale(1.06);
-        }
-        100% {
-          transform: scale(1);
-        }
+        background: #111314;
       }
 
       #root {
         min-height: 100vh;
-        background: var(--messly-loader-bg);
+        background: #111314;
       }
     </style>
     <title>Messly</title>
   </head>
   <body>
-    <div id="messly-loading" aria-hidden="true">
-      <div class="messly-loading-inner">
-        <div class="messly-loading-logo" role="img" aria-label="Messly">
-          <svg width="200" height="160" viewBox="0 0 200 160" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M163.284 49.3419C162.499 49.7511 162.088 49.2314 161.67 48.9264C159.204 47.1269 156.592 45.5194 153.981 43.9073C152.474 42.9764 152.482 42.5054 153.934 41.3721C159.079 37.3542 164.224 33.3354 169.365 29.3128C169.641 29.0968 169.913 28.9209 170.773 29.0825C168.976 36.0404 166.394 42.7109 163.284 49.3419ZM164.05 45.4705C166.059 40.8647 167.892 36.2104 168.856 31.2585C163.658 34.8515 158.709 38.5585 153.934 42.7409C157.034 44.7442 159.852 46.5658 162.788 48.4632C163.244 47.3855 163.601 46.5437 164.05 45.4705Z" fill="white"/>
-            <path fill-rule="evenodd" clip-rule="evenodd" d="M6.24737 112.212C13.2883 116.279 20.8345 119.48 28.3136 122.887C25.8017 123.903 23.1938 123.186 20.6408 123.752C28.867 128.673 37.1413 133.459 45.6125 137.962C61.3022 146.301 77.4237 153.748 94.9816 158.276C97.6312 158.96 100.204 159.493 103.034 158.795C113.668 156.174 123.817 152.399 133.737 148.098C147.956 141.932 161.292 134.337 174.545 126.619C176.031 125.754 177.455 124.8 179.182 123.716C176.323 123.357 173.767 123.669 170.827 122.807C180.87 118.67 190.403 114.585 198.905 108.921C198.833 108.669 198.834 108.606 198.801 108.568C198.62 108.359 198.429 108.158 198.244 107.952C194.775 104.075 191.85 100.022 191.137 94.8163C190.193 87.9356 188.329 81.2052 186.162 74.5668C185.065 71.2068 183.541 67.9669 185.01 64.3815C185.269 63.7496 185.306 63.0401 185.434 62.3645C186.348 57.5331 186.865 52.6647 187.277 47.7756C187.735 42.3246 187.713 36.8631 187.428 31.434C187.114 25.4473 186.233 19.4776 185.391 13.525C184.907 10.1037 184.466 6.65188 183.38 3.32465C182.643 1.06902 180.644 0.179592 178.375 1.10522C170.956 4.13175 163.777 7.5854 156.822 11.4258C147.306 16.6798 138.32 22.6189 129.724 29.0579C128.925 29.656 128.162 29.8609 127.155 29.541C120.969 27.576 114.54 26.6118 108.067 26.0138C102.614 25.5101 97.1066 25.725 91.6505 26.0533C85.607 26.417 79.6136 27.4439 73.8872 29.2499C71.6685 29.9496 70.3889 29.331 68.9132 28.22C62.2321 23.19 55.2187 18.5745 47.9005 14.361C39.3936 9.46305 30.6161 5.00745 21.416 1.2803C19.1656 0.368584 17.6847 0.875697 16.7527 2.86028C16.4567 3.49066 16.2261 4.16839 16.1117 4.84517C15.4633 8.68236 14.6479 12.4919 14.0409 16.3387C13.133 22.092 12.5245 27.8658 12.3049 33.6609C12.1149 38.6771 12.1899 43.7027 12.5829 48.7253C12.9976 54.0245 13.6522 59.2856 14.5499 64.5331C14.8933 66.5401 15.9697 68.5286 15.07 70.6441C14.3722 72.2851 13.7605 73.9481 13.2559 75.6555C11.4923 81.6238 10.0339 87.6454 9.07232 93.7684C8.48583 97.5029 7.46565 101.097 4.83634 104.148C3.54638 105.644 2.33282 107.196 0.993797 108.834C2.61889 110.077 4.30961 111.102 6.24737 112.212ZM167.933 83.4296C158.927 86.2137 149.816 88.7184 140.87 92.0356C140.043 92.3468 139.345 92.6182 138.64 92.874C130.074 95.9819 121.902 99.6815 115.147 105.61C113.151 107.361 111.355 109.235 109.87 111.36C108.889 112.764 109.217 113.338 110.952 113.619C112.928 113.939 114.813 113.449 116.608 112.946C117.967 112.566 118.617 112.948 119.447 113.743C126.56 120.553 135.055 123.51 145.364 121.627C153.457 120.149 159.543 116.103 163.915 109.811C169.367 101.966 170.04 93.2037 169.583 84.2464C169.528 83.1717 168.964 83.1108 167.933 83.4296ZM154.563 51.467C159.794 54.6137 164.589 58.2566 168.963 62.5262C171.4 64.9978 173.576 67.5221 175.604 70.2456C181.245 62.8513 181.849 19.1908 176.398 12.5132C163.23 22.3857 150.322 32.5034 137.529 43.2739C143.794 45.7492 149.348 48.3299 154.563 51.467ZM23.1217 12.3687C20.9222 20.8254 20.079 29.0866 19.6489 37.5499C19.5954 38.125 19.5258 38.551 19.5244 38.9772C19.4969 47.6707 20.3445 56.2853 22.475 64.7673C22.9348 66.5979 23.2485 68.5076 24.4413 70.3357C33.5099 57.2017 46.986 49.4347 62.3368 43.2671C49.3745 32.6505 36.76 22.253 23.1217 12.3687ZM86.6462 107.346C81.0744 101.91 74.1876 98.2614 66.7788 95.1073C55.1329 90.2753 43.1309 86.7197 31.1858 83.2326C30.5303 83.9809 30.643 84.6516 30.6037 85.2736C30.2547 90.7911 30.7058 96.2509 32.3575 101.577C35.0155 110.149 40.3842 116.695 49.5759 120.188C54.285 121.978 59.2072 122.683 64.2819 121.814C70.7482 120.707 76.1504 117.804 80.6313 113.438C81.3653 112.723 82.1002 112.548 83.1223 112.823C85.1393 113.364 87.198 113.695 89.324 113.582C90.9751 113.494 91.316 113.039 90.474 111.706C89.4469 110.08 88.0445 108.711 86.6462 107.346ZM101.81 131.775C103.493 130.46 105.183 129.153 106.961 127.766C107.77 126.991 108.53 126.324 109.197 125.586C110.686 123.938 110.336 122.868 108.031 122.46C102.904 121.555 97.7404 121.613 92.615 122.454C90.172 122.855 89.8082 123.915 91.4228 125.613C93.5677 127.87 95.9536 129.906 98.5192 131.769C99.6637 132.6 100.706 132.638 101.81 131.775Z" fill="white"/>
-            <path d="M172.492 134.049C163.523 139.777 154.672 145.653 146.059 151.845C146.602 151.785 147.106 151.671 147.582 151.494C153.466 149.297 159.317 147.031 164.852 144.147C173.436 139.675 181.705 134.806 188.759 128.379C192.033 125.395 194.788 122.073 197.06 118.375C188.724 123.29 180.67 128.55 172.492 134.049Z" fill="white"/>
-            <path d="M23.6385 131.288C16.8935 126.924 10.1333 122.58 3.07284 118.345C3.1478 119.283 3.59972 119.839 3.9842 120.419C6.58579 124.343 9.99777 127.628 13.7032 130.671C22.2979 137.73 32.1299 143.043 42.4707 147.608C46.0675 149.196 49.6925 150.765 53.6282 151.625C43.9727 144.538 33.7339 138.195 23.6385 131.288Z" fill="white"/>
-            <path d="M164.05 45.4705C166.059 40.8647 167.892 36.2104 168.856 31.2585C163.658 34.8515 158.709 38.5585 153.934 42.7409L162.788 48.4632C163.244 47.3855 163.601 46.5437 164.05 45.4705Z" fill="white"/>
-            <path d="M37.6265 36.0055C35.3643 34.3295 33.3882 32.3183 30.6753 31.0417C32.1862 36.9103 34.1052 42.5899 36.7458 48.3531L45.7643 42.4982C42.9813 40.2764 40.399 38.2147 37.6265 36.0055Z" fill="white"/>
-          </svg>
-        </div>
-        <div class="messly-loading-progress" aria-hidden="true">
-          <div class="messly-loading-progress-fill"></div>
-        </div>
-      </div>
-    </div>
     <div id="root"></div>
+    <script src="/console-filter.js"></script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

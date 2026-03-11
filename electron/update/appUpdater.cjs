@@ -418,8 +418,15 @@ function createAppUpdater(options) {
 
   async function installUpdate() {
     if (!downloadPath) {
-      throw new Error("Atualização ainda não foi baixada.");
+      throw new Error("Atualizacao ainda nao foi baixada.");
     }
+
+    setState({
+      status: "installing",
+      errorMessage: null,
+      progressPercent: 100,
+      downloadedBytes: state.totalBytes || state.downloadedBytes,
+    });
 
     const targetPath = downloadPath;
     if (platform === "win32") {

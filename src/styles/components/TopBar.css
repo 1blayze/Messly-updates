@@ -141,44 +141,32 @@
 
 .app-top-bar__icon-btn--updater {
   position: relative;
-  width: 42px;
-  height: 100%;
-  min-height: 38px;
+  width: 34px;
+  height: 34px;
+  min-height: 34px;
   border: 0;
-  border-radius: 0;
-  background: transparent;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
   box-shadow: none;
-  color: rgba(241, 245, 249, 0.76);
+  color: rgba(241, 245, 249, 0.82);
 }
 
 .app-top-bar__icon-btn--updater::after {
-  content: "";
-  position: absolute;
-  left: 9px;
-  right: 9px;
-  bottom: 0;
-  height: 2px;
-  border-radius: 999px;
-  background: transparent;
-  transition:
-    background-color 160ms ease,
-    opacity 160ms ease;
+  content: none;
 }
 
 .app-top-bar__icon-btn--updater:hover,
 .app-top-bar__icon-btn--updater.app-top-bar__icon-btn--active {
-  border: 0;
-  background: rgba(255, 255, 255, 0.045);
+  background: rgba(255, 255, 255, 0.1);
   color: rgba(248, 250, 252, 0.94);
 }
 
 .app-top-bar__icon-btn--updater:active {
-  border: 0;
-  background: rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.14);
 }
 
 .app-top-bar__icon-btn--updater:focus-visible {
-  box-shadow: inset 0 -2px 0 rgba(255, 255, 255, 0.2);
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.22);
 }
 
 .app-top-bar__icon-btn--updater-available,
@@ -187,32 +175,24 @@
 }
 
 .app-top-bar__icon-btn--updater-available {
-  color: #77e9a7;
-}
-
-.app-top-bar__icon-btn--updater-available::after {
-  background: rgba(78, 221, 130, 0.72);
+  color: #7be9ac;
 }
 
 .app-top-bar__icon-btn--updater-ready {
-  color: #69e7a3;
-  background: rgba(58, 211, 122, 0.08);
-}
-
-.app-top-bar__icon-btn--updater-ready::after {
-  background: #43d77f;
+  color: #67e89f;
+  background: rgba(67, 215, 127, 0.14);
 }
 
 .app-top-bar__icon-btn--updater-ready:hover,
 .app-top-bar__icon-btn--updater-ready:focus-visible {
   color: #8efdc1;
-  background: rgba(67, 227, 133, 0.14);
+  background: rgba(67, 227, 133, 0.22);
 }
 
 .app-top-bar__icon-btn--updater-available:hover,
 .app-top-bar__icon-btn--updater-available:focus-visible {
   color: #93f7bb;
-  background: rgba(58, 211, 122, 0.11);
+  background: rgba(58, 211, 122, 0.2);
 }
 
 .app-top-bar__badge-dot {
@@ -243,10 +223,8 @@
   padding: 12px;
   border-radius: 14px;
   border: 1px solid rgba(255, 255, 255, 0.10);
-  background: rgba(14, 15, 19, 0.94);
+  background: #252b35;
   box-shadow: 0 14px 40px rgba(0, 0, 0, 0.48);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
   color: var(--text-primary);
   z-index: 100;
 }

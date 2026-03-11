@@ -19,7 +19,7 @@ const TURNSTILE_COMPACT_BREAKPOINT_PX = 420;
 interface TurnstileRenderOptions {
   sitekey: string;
   theme?: "auto" | "light" | "dark";
-  appearance?: "always" | "interaction-only";
+  appearance?: "always" | "interaction-only" | "execute";
   size?: "normal" | "compact" | "flexible";
   callback?: (token: string) => void;
   "error-callback"?: () => void;
@@ -103,6 +103,10 @@ function classifyTurnstileError(error: unknown): { code: string; message: string
     message: "Falha inesperada ao iniciar a verificação de segurança.",
     rawError,
   };
+}
+
+function isDesktopRuntime(): boolean {
+  return typeof window !== "undefined" && typeof window.electronAPI !== "undefined";
 }
 
 function removeTurnstileScriptElement(): void {
@@ -388,11 +392,12 @@ function TurnstileWidgetInner(
           }
 
           targetContainer.innerHTML = "";
+          const isDesktop = isDesktopRuntime();
           const widgetId = turnstileApi.render(targetContainer, {
             sitekey: normalizedSiteKey,
             theme: "dark",
-            appearance: "always",
-            size: isCompactSize ? "compact" : "flexible",
+            appearance: isDesktop ? "interaction-only" : "always",
+            size: isCompactSize ? "compact" : isDesktop ? "normal" : "flexible",
             callback: (token: string) => {
               if (cancelled) {
                 return;

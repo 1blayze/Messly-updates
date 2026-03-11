@@ -16,6 +16,7 @@ import { getSupabaseFunctionHeaders } from "../supabase";
 import { EdgeFunctionError, invokeEdgeJson } from "../edge/edgeClient";
 import { uploadWithRetry } from "./uploadWithRetry";
 import { getRuntimeAppApiUrl } from "../../config/runtimeApiConfig";
+import { getSupabaseAccessToken } from "../../api/client";
 
 export type ProfileMediaKind = "avatar" | "banner";
 
@@ -446,12 +447,14 @@ async function uploadProfileMediaViaElectron(
 
   try {
     const bytes = await uploadFile.arrayBuffer();
+    const accessToken = await getSupabaseAccessToken().catch(() => null);
     const uploaded = await uploadProfileMedia({
       kind,
       userId,
       bytes,
       mimeType: uploadFile.type,
       fileName: uploadFile.name,
+      accessToken: accessToken || undefined,
     });
 
     return {
@@ -615,6 +618,14 @@ export async function uploadProfileMediaAsset(
   }
 
   const normalizedFile = await normalizeProfileMedia(kind, file, userId);
+  const shouldPreferEdgeBinaryUpload = typeof window !== "undefined" && typeof window.electronAPI !== "undefined";
+  if (shouldPreferEdgeBinaryUpload) {
+    const edgeFirstUpload = await uploadProfileMediaViaEdgeFunction(kind, userId, normalizedFile);
+    if (edgeFirstUpload) {
+      return edgeFirstUpload;
+    }
+  }
+
   const presignUpload = await uploadProfileMediaViaPresign(kind, userId, normalizedFile);
   if (presignUpload) {
     return presignUpload;

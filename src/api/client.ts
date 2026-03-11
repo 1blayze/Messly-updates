@@ -3,7 +3,7 @@ import { authService } from "../services/auth";
 import { getGatewaySocketUrl } from "../config/domains";
 
 export async function getSupabaseAccessToken(): Promise<string | null> {
-  return authService.getCurrentAccessToken();
+  return authService.getValidatedEdgeAccessToken();
 }
 
 export function getGatewayUrl(): string | null {

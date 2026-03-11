@@ -3,12 +3,25 @@ import { getRuntimeAppApiUrl, getRuntimeGatewayUrl } from "./runtimeApiConfig";
 export const DOMAIN = "messly.site";
 
 export const API_URL = "https://messly.site";
-export const CDN_URL = "https://cdn.messly.site";
+export const CDN_URL = "https://messly.site";
 export const GATEWAY_URL = "wss://messly.site";
 export const ASSETS_URL = "https://messly.site";
 const LOCAL_GATEWAY_HTTP_URL = "http://127.0.0.1:8788";
 const LOCAL_GATEWAY_MEDIA_URL = "http://127.0.0.1:8788/media/public";
 const LOCAL_GATEWAY_WS_URL = "ws://127.0.0.1:8788/gateway";
+const DEV_API_PROXY_PATH = "/__messly_api";
+
+function canonicalizeMesslyDomainHost(valueRaw: string): string {
+  try {
+    const parsed = new URL(valueRaw);
+    if (parsed.hostname.toLowerCase() === "www.messly.site") {
+      parsed.hostname = "messly.site";
+    }
+    return parsed.toString();
+  } catch {
+    return valueRaw;
+  }
+}
 
 function normalizeUrl(value: string | null | undefined): string | null {
   const normalized = String(value ?? "").trim();
@@ -16,7 +29,7 @@ function normalizeUrl(value: string | null | undefined): string | null {
     return null;
   }
 
-  return normalized.replace(/\/+$/, "");
+  return canonicalizeMesslyDomainHost(normalized).replace(/\/+$/, "");
 }
 
 function isLocalHostname(hostnameRaw: string | null | undefined): boolean {
@@ -24,26 +37,41 @@ function isLocalHostname(hostnameRaw: string | null | undefined): boolean {
   return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
 }
 
-function isDesktopRuntime(): boolean {
-  return typeof window !== "undefined" && Boolean(window.electronAPI);
+function shouldUseDevApiProxy(baseUrlRaw: string | null | undefined): boolean {
+  if (!import.meta.env.DEV) {
+    return false;
+  }
+
+  if (typeof window === "undefined" || !isLocalHostname(window.location.hostname)) {
+    return false;
+  }
+
+  const normalized = normalizeUrl(baseUrlRaw);
+  if (!normalized) {
+    return false;
+  }
+
+  try {
+    const parsed = new URL(normalized);
+    const hostname = parsed.hostname.toLowerCase();
+    return hostname === "messly.site" || hostname === "www.messly.site";
+  } catch {
+    return false;
+  }
 }
 
 export function getApiBaseUrl(): string {
   const explicit = normalizeUrl(import.meta.env.VITE_MESSLY_API_URL);
-  if (explicit) {
-    return explicit;
-  }
-
   const runtimeConfigured = getRuntimeAppApiUrl();
-  if (runtimeConfigured) {
-    return runtimeConfigured;
+  const fallbackLocal =
+    typeof window !== "undefined" && isLocalHostname(window.location.hostname) ? LOCAL_GATEWAY_HTTP_URL : null;
+  const resolvedBaseUrl = explicit ?? runtimeConfigured ?? fallbackLocal ?? API_URL;
+
+  if (shouldUseDevApiProxy(resolvedBaseUrl)) {
+    return DEV_API_PROXY_PATH;
   }
 
-  if (typeof window !== "undefined" && isLocalHostname(window.location.hostname)) {
-    return LOCAL_GATEWAY_HTTP_URL;
-  }
-
-  return API_URL;
+  return resolvedBaseUrl;
 }
 
 export function getCdnBaseUrl(): string {
@@ -85,10 +113,6 @@ export function getGatewaySocketUrl(): string | null {
 
   if (typeof window !== "undefined" && isLocalHostname(window.location.hostname)) {
     return LOCAL_GATEWAY_WS_URL;
-  }
-
-  if (isDesktopRuntime()) {
-    return null;
   }
 
   return `${GATEWAY_URL}/gateway`;

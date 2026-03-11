@@ -54,7 +54,7 @@ const PROFILE_MEDIA_PREFIX_BY_KIND = Object.freeze({
   avatar: "avatars",
   banner: "banners",
 });
-const ALLOWED_MEDIA_PREFIXES = Object.freeze(["avatars/", "banners/", "attachments/", "images/", "videos/"]);
+const ALLOWED_MEDIA_PREFIXES = Object.freeze(["avatars/", "banners/", "attachments/", "messages/", "images/", "videos/"]);
 const SAFE_MEDIA_KEY_REGEX = /^[a-z0-9/_\-.]+$/i;
 const MIN_SIGNED_URL_TTL_SECONDS = 60;
 const MAX_SIGNED_URL_TTL_SECONDS = 300;
@@ -108,6 +108,125 @@ const isPackagedDevToolsEnabled = PACKAGED_DEVTOOLS_ENV
   : true;
 const areDevToolsEnabled = !app.isPackaged || isPackagedDevToolsEnabled;
 const TURNSTILE_CSP_SOURCE = "https://challenges.cloudflare.com";
+const STATUS_PANEL_ENABLED = false;
+const STATUS_PANEL_PROGRESS_BYTES_VISIBILITY_THRESHOLD = 12 * 1024 * 1024;
+const STATUS_PANEL_PHASE = Object.freeze({
+  IDLE: "idle",
+  CHECKING: "checking",
+  UPDATE_AVAILABLE: "update-available",
+  DOWNLOADING: "downloading",
+  APPLYING: "applying",
+  INSTALLING: "installing",
+  RELAUNCHING: "relaunching",
+  LAUNCHING: "launching",
+  LOADING_SHELL: "loading-shell",
+  READY: "ready",
+  FAILED: "failed",
+  RETRYING: "retrying",
+});
+const STATUS_PANEL_COPY_PT_BR = Object.freeze({
+  [STATUS_PANEL_PHASE.CHECKING]: Object.freeze({
+    title: "Verificando atualizacoes",
+    subtitle: "Preparando aplicativo",
+    showProgressBar: true,
+    showProgress: false,
+    indeterminate: true,
+    progressPercent: 22,
+  }),
+  [STATUS_PANEL_PHASE.UPDATE_AVAILABLE]: Object.freeze({
+    title: "Atualizacao disponivel",
+    subtitle: "Preparando download",
+    showProgressBar: false,
+    showProgress: false,
+    indeterminate: false,
+    progressPercent: 100,
+  }),
+  [STATUS_PANEL_PHASE.DOWNLOADING]: Object.freeze({
+    title: "Baixando atualizacao",
+    subtitle: "Preparando arquivos",
+    showProgressBar: true,
+    showProgress: true,
+    indeterminate: false,
+    progressPercent: 4,
+  }),
+  [STATUS_PANEL_PHASE.APPLYING]: Object.freeze({
+    title: "Aplicando atualizacao",
+    subtitle: "Quase pronto",
+    showProgressBar: true,
+    showProgress: false,
+    indeterminate: true,
+    progressPercent: 94,
+  }),
+  [STATUS_PANEL_PHASE.INSTALLING]: Object.freeze({
+    title: "Instalando Messly",
+    subtitle: "Preparando arquivos",
+    showProgressBar: true,
+    showProgress: false,
+    indeterminate: true,
+    progressPercent: 96,
+  }),
+  [STATUS_PANEL_PHASE.RELAUNCHING]: Object.freeze({
+    title: "Iniciando Messly",
+    subtitle: "Quase pronto",
+    showProgressBar: true,
+    showProgress: false,
+    indeterminate: true,
+    progressPercent: 97,
+  }),
+  [STATUS_PANEL_PHASE.LAUNCHING]: Object.freeze({
+    title: "Iniciando Messly",
+    subtitle: "Preparando aplicativo",
+    showProgressBar: true,
+    showProgress: false,
+    indeterminate: true,
+    progressPercent: 18,
+  }),
+  [STATUS_PANEL_PHASE.LOADING_SHELL]: Object.freeze({
+    title: "Carregando Messly",
+    subtitle: "Carregando interface",
+    showProgressBar: true,
+    showProgress: false,
+    indeterminate: true,
+    progressPercent: 68,
+  }),
+  [STATUS_PANEL_PHASE.READY]: Object.freeze({
+    title: "Atualizado",
+    subtitle: "Quase pronto",
+    showProgressBar: false,
+    showProgress: false,
+    indeterminate: false,
+    progressPercent: 100,
+  }),
+  [STATUS_PANEL_PHASE.FAILED]: Object.freeze({
+    title: "Nao foi possivel concluir a atualizacao",
+    subtitle: "Tente novamente",
+    showProgressBar: false,
+    showProgress: false,
+    indeterminate: false,
+    progressPercent: 0,
+  }),
+  [STATUS_PANEL_PHASE.RETRYING]: Object.freeze({
+    title: "Tentando novamente",
+    subtitle: "Preparando aplicativo",
+    showProgressBar: true,
+    showProgress: false,
+    indeterminate: true,
+    progressPercent: 34,
+  }),
+});
+const STATUS_PANEL_MIN_VISIBLE_MS = Object.freeze({
+  [STATUS_PANEL_PHASE.CHECKING]: 460,
+  [STATUS_PANEL_PHASE.UPDATE_AVAILABLE]: 640,
+  [STATUS_PANEL_PHASE.DOWNLOADING]: 0,
+  [STATUS_PANEL_PHASE.APPLYING]: 720,
+  [STATUS_PANEL_PHASE.INSTALLING]: 760,
+  [STATUS_PANEL_PHASE.RELAUNCHING]: 640,
+  [STATUS_PANEL_PHASE.LAUNCHING]: 360,
+  [STATUS_PANEL_PHASE.LOADING_SHELL]: 320,
+  [STATUS_PANEL_PHASE.READY]: 220,
+  [STATUS_PANEL_PHASE.FAILED]: 880,
+  [STATUS_PANEL_PHASE.RETRYING]: 520,
+});
 const PRODUCTION_SCRIPT_SOURCE = areDevToolsEnabled
   ? `script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval' ${TURNSTILE_CSP_SOURCE}`
   : `script-src 'self' 'wasm-unsafe-eval' ${TURNSTILE_CSP_SOURCE}`;
@@ -149,6 +268,8 @@ const PACKAGED_RENDERER_MIME_BY_EXTENSION = Object.freeze({
 const ALLOWED_APP_PERMISSIONS = Object.freeze(["media", "display-capture"]);
 const WINDOWS_FIREWALL_RULE_NAME = String(process.env.MESSLY_FIREWALL_RULE_NAME ?? DEFAULT_FIREWALL_RULE_NAME).trim() || DEFAULT_FIREWALL_RULE_NAME;
 const WINDOWS_FIREWALL_PROFILE = String(process.env.MESSLY_FIREWALL_PROFILE ?? DEFAULT_FIREWALL_PROFILE).trim().toLowerCase() || DEFAULT_FIREWALL_PROFILE;
+const DEFAULT_PUBLIC_API_BASE_URL = "https://messly.site";
+const DEFAULT_PUBLIC_GATEWAY_URL = "wss://messly.site/gateway";
 
 function resolveAppIconPath(fileName) {
   const iconPath = path.join(APP_ICONS_DIR, fileName);
@@ -193,6 +314,12 @@ let statusPanelMode = null;
 let statusPanelMascotDataUrlCache = null;
 let statusPanelRenderKey = null;
 let statusPanelAutoHideTimer = null;
+let statusPanelPhase = STATUS_PANEL_PHASE.IDLE;
+let statusPanelPhaseSinceMs = 0;
+let statusPanelPhaseTransitionTimer = null;
+let statusPanelQueuedPhaseTransition = null;
+let statusPanelDisplayProgressPercent = 0;
+let statusPanelProgressInterpolationMode = "";
 let mainWindowWaitingForFirstFrame = false;
 let mainWindowFirstFrameReady = false;
 let pendingSpotifyOAuthCallback = null;
@@ -204,6 +331,9 @@ let startupAutoUpdatePromise = null;
 let updaterAutoInstallInFlight = false;
 let windowsHiddenForUpdateFlow = false;
 let windowsFirewallBootstrapPromise = null;
+let updaterBroadcastThrottleTimer = null;
+let updaterBroadcastQueuedState = null;
+let updaterBroadcastLastAtMs = 0;
 let packagedRendererServer = null;
 let packagedRendererServerOrigin = null;
 let packagedRendererServerStartPromise = null;
@@ -851,18 +981,19 @@ function escapeHtml(value) {
 }
 
 function buildStatusPanelHtmlV2(payload) {
-  const title = escapeHtml(payload?.title || "");
-  const subtitle = escapeHtml(payload?.subtitle || "");
+  const title = escapeHtml(payload?.title ?? "");
+  const subtitle = escapeHtml(payload?.subtitle ?? "");
+  const progressText = escapeHtml(payload?.progressText ?? "");
+  const detail = escapeHtml(payload?.detail ?? "");
   const showTitle = Boolean(title);
   const showSubtitle = Boolean(subtitle);
-  const detail = escapeHtml(payload?.detail || "");
-  const showDetail = Boolean(detail);
-  const progressText = escapeHtml(payload?.progressText || "");
-  const progressValue = Math.max(0, Math.min(100, Number(payload?.progressPercent ?? 0)));
   const showProgress = Boolean(payload?.showProgress || progressText);
   const showProgressBar = payload?.showProgressBar !== false;
+  const showDetail = Boolean(detail);
+  const progressValue = Math.max(0, Math.min(100, Number(payload?.progressPercent ?? 0)));
+  const indeterminate = Boolean(payload?.indeterminate);
+  const progressFillWidth = indeterminate ? 38 : progressValue;
   const mascotSrc = getStatusPanelMascotDataUrl();
-  const hasFooter = Boolean(showProgressBar || showProgress || showDetail);
 
   return `<!doctype html>
 <html lang="pt-BR">
@@ -873,115 +1004,128 @@ function buildStatusPanelHtmlV2(payload) {
   <style>
     :root {
       color-scheme: dark;
-      --bg: #171c24;
-      --card: #1d2430;
+      --card: #242b37;
       --text: #f4f7fb;
       --muted: #acb6c7;
-      --border: rgba(255,255,255,.08);
-      --radius: 12px;
-      --track: rgba(255,255,255,.20);
-      --fill: linear-gradient(90deg, #dbe5f6 0%, #f7fbff 100%);
+      --track: rgba(255,255,255,.16);
+      --fill: linear-gradient(90deg, #edf3ff 0%, #ffffff 100%);
     }
-    * { box-sizing: border-box; }
+    * {
+      box-sizing: border-box;
+    }
     html, body {
       margin: 0;
       width: 100%;
       height: 100%;
-      background: var(--bg);
-      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto;
       overflow: hidden;
+      background: var(--card);
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto;
       user-select: none;
+      -webkit-font-smoothing: antialiased;
     }
-    .shell {
+    .stage {
+      position: fixed;
+      inset: 0;
       width: 100%;
       height: 100%;
       display: grid;
       place-items: center;
-      padding: 14px;
-    }
-    .panel {
-      width: 100%;
-      height: 100%;
-      border-radius: var(--radius);
-      border: 1px solid var(--border);
+      padding: 0;
       background: var(--card);
-      box-shadow: 0 22px 48px rgba(0, 0, 0, 0.38);
-      padding: 42px 22px 28px;
+    }
+    .card {
+      width: 100%;
+      min-height: 100%;
+      background: var(--card);
+      border: 0;
+      border-radius: 0;
+      box-shadow: none;
+      padding: 34px 22px 24px;
       -webkit-app-region: drag;
       display: flex;
       flex-direction: column;
       align-items: center;
-      justify-content: flex-start;
+      justify-content: space-between;
+      opacity: 1;
+      transform: translateY(0);
+      animation: fade-in 220ms ease-out;
     }
     .brand {
-      display: grid;
-      justify-items: center;
-      gap: 10px;
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 14px;
       text-align: center;
-      margin-top: 8px;
+      padding-top: 8px;
     }
     .avatar {
-      width: 94px;
-      height: 94px;
-      border-radius: 0;
+      width: 96px;
+      height: 96px;
       object-fit: contain;
       display: block;
       background: transparent;
-      filter: drop-shadow(0 9px 18px rgba(0, 0, 0, .30));
+      image-rendering: -webkit-optimize-contrast;
+      filter: drop-shadow(0 12px 20px rgba(0,0,0,.34));
+      animation: logo-breathe 3.2s ease-in-out infinite;
     }
     .copy {
       display: grid;
-      gap: 6px;
-      min-height: 0;
+      gap: 5px;
       justify-items: center;
+      min-height: 58px;
+      align-content: start;
     }
     .title {
       margin: 0;
       color: var(--text);
-      font-size: 31px;
-      line-height: 1;
+      font-size: 29px;
+      line-height: 1.08;
       font-weight: 700;
-      letter-spacing: -.02em;
+      letter-spacing: -.018em;
+      text-wrap: balance;
     }
     .subtitle {
       margin: 0;
       color: var(--muted);
       font-size: 13px;
       line-height: 1.35;
-      min-height: 0;
+      min-height: 18px;
+      text-wrap: balance;
     }
     .footer {
-      margin-top: 26px;
       width: 100%;
       display: grid;
-      gap: 7px;
+      gap: 6px;
       justify-items: center;
-      opacity: ${hasFooter ? "1" : "0"};
-      transition: opacity 160ms ease;
+      margin-top: auto;
     }
     .progress-track {
-      width: min(220px, 72vw);
-      height: 6px;
+      width: min(212px, 62vw);
+      height: 5px;
       border-radius: 999px;
       background: var(--track);
       overflow: hidden;
-      box-shadow: inset 0 0 0 1px rgba(255,255,255,.05);
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,.06);
     }
     .progress-fill {
-      width: ${progressValue}%;
+      width: ${progressFillWidth}%;
       height: 100%;
       border-radius: 999px;
       background: var(--fill);
-      transition: width 180ms linear;
-      box-shadow: 0 0 9px rgba(255,255,255,.30);
+      transition: width 260ms cubic-bezier(.17,.84,.44,1);
+      box-shadow: 0 0 10px rgba(255,255,255,.32);
+      transform-origin: 0 50%;
+      ${indeterminate ? "animation: indeterminate 1300ms ease-in-out infinite;" : ""}
     }
     .progress-text {
       margin: 0;
-      color: #e8edf8;
-      font-size: 12px;
-      line-height: 1.35;
-      font-weight: 600;
+      color: rgba(234, 240, 252, .92);
+      font-size: 11px;
+      line-height: 1.25;
+      font-weight: 500;
       text-align: center;
+      letter-spacing: .012em;
     }
     .detail {
       margin: 0;
@@ -991,24 +1135,38 @@ function buildStatusPanelHtmlV2(payload) {
       text-align: center;
       max-width: 92%;
     }
+    @keyframes indeterminate {
+      0% { transform: translateX(-70%); opacity: .86; }
+      50% { transform: translateX(46%); opacity: 1; }
+      100% { transform: translateX(170%); opacity: .86; }
+    }
+    @keyframes fade-in {
+      from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes logo-breathe {
+      0% { transform: scale(1); }
+      50% { transform: scale(1.035); }
+      100% { transform: scale(1); }
+    }
   </style>
 </head>
 <body>
-  <main class="shell">
-    <section class="panel">
-      <section class="brand">
+  <main class="stage">
+    <section class="card">
+      <div class="brand">
         ${
           mascotSrc
             ? `<img class="avatar" src="${mascotSrc}" alt="">`
-            : `<div style="width:88px;height:88px;"></div>`
+            : `<div style="width:96px;height:96px;"></div>`
         }
         ${showTitle || showSubtitle ? `<div class="copy">${showTitle ? `<p class="title">${title}</p>` : ""}${showSubtitle ? `<p class="subtitle">${subtitle}</p>` : ""}</div>` : ""}
-      </section>
-      <section class="footer">
+      </div>
+      <div class="footer">
         ${showProgressBar ? `<div class="progress-track"><div class="progress-fill"></div></div>` : ""}
         ${showProgress ? `<p class="progress-text">${progressText || `${Math.round(progressValue)}%`}</p>` : ""}
         ${showDetail ? `<p class="detail">${detail}</p>` : ""}
-      </section>
+      </div>
     </section>
   </main>
 </body>
@@ -1036,7 +1194,7 @@ function getStatusPanelWindow() {
     skipTaskbar: true,
     alwaysOnTop: true,
     transparent: false,
-    backgroundColor: "#171c24",
+    backgroundColor: "#242b37",
     roundedCorners: true,
     movable: true,
     focusable: true,
@@ -1066,6 +1224,9 @@ function getStatusPanelWindow() {
       statusPanelWindowRef = null;
       statusPanelMode = null;
       statusPanelRenderKey = null;
+      statusPanelPhase = STATUS_PANEL_PHASE.IDLE;
+      statusPanelPhaseSinceMs = 0;
+      resetStatusPanelProgressInterpolation();
     }
   });
 
@@ -1080,8 +1241,19 @@ function clearStatusPanelAutoHide() {
   }
 }
 
+function clearStatusPanelPhaseTransition() {
+  if (statusPanelPhaseTransitionTimer != null) {
+    clearTimeout(statusPanelPhaseTransitionTimer);
+    statusPanelPhaseTransitionTimer = null;
+  }
+  statusPanelQueuedPhaseTransition = null;
+}
+
 function scheduleStatusPanelAutoHide(delayMs, mode) {
   clearStatusPanelAutoHide();
+  if (!STATUS_PANEL_ENABLED) {
+    return;
+  }
   const parsedDelay = Number(delayMs);
   const safeDelay = Number.isFinite(parsedDelay) ? Math.max(150, Math.trunc(parsedDelay)) : 900;
   statusPanelAutoHideTimer = setTimeout(() => {
@@ -1091,6 +1263,9 @@ function scheduleStatusPanelAutoHide(delayMs, mode) {
 }
 
 function showStatusPanel(payload, mode = "generic") {
+  if (!STATUS_PANEL_ENABLED) {
+    return;
+  }
   const panelWindow = getStatusPanelWindow();
   const normalizedMode = String(mode ?? "generic");
   const sourcePayload =
@@ -1105,62 +1280,9 @@ function showStatusPanel(payload, mode = "generic") {
     progressPercent: Number(sourcePayload.progressPercent ?? 0),
     showProgressBar: sourcePayload.showProgressBar !== false,
     showProgress: Boolean(sourcePayload.showProgress),
-    progressCounterLabel: String(sourcePayload.progressCounterLabel ?? "").trim(),
+    indeterminate: Boolean(sourcePayload.indeterminate),
   };
   clearStatusPanelAutoHide();
-
-  if (normalizedMode === "startup") {
-    safePayload.title = "";
-    safePayload.subtitle = "";
-    safePayload.detail = "";
-    safePayload.progressText = "";
-    if (!Number.isFinite(safePayload.progressPercent) || safePayload.progressPercent <= 0) {
-      safePayload.progressPercent = 18;
-    }
-    safePayload.progressCounterLabel = "";
-    safePayload.showProgressBar = true;
-    safePayload.showProgress = false;
-  } else if (normalizedMode === "update-check") {
-    if (!safePayload.title) {
-      safePayload.title = "Verificando atualizações";
-    }
-    safePayload.subtitle = "";
-    safePayload.detail = "";
-    safePayload.progressText = String(safePayload.progressText ?? "").trim();
-    if (!Number.isFinite(safePayload.progressPercent) || safePayload.progressPercent <= 0) {
-      safePayload.progressPercent = 40;
-    }
-    safePayload.progressCounterLabel = "";
-    safePayload.showProgressBar = true;
-    safePayload.showProgress = false;
-  } else if (normalizedMode === "update-download") {
-    if (!safePayload.title) {
-      safePayload.title = "Baixando atualização";
-    }
-    safePayload.subtitle = "";
-    safePayload.detail = "";
-    safePayload.progressText = String(safePayload.progressText ?? "").trim();
-    if (!Number.isFinite(safePayload.progressPercent)) {
-      safePayload.progressPercent = 0;
-    }
-    safePayload.progressCounterLabel = "";
-    safePayload.showProgressBar = true;
-    safePayload.showProgress = Boolean(safePayload.progressText);
-  } else if (normalizedMode === "update-install") {
-    if (!safePayload.title) {
-      safePayload.title = "Instalando Messly";
-    }
-    safePayload.subtitle = "";
-    safePayload.detail = "";
-    safePayload.progressText = String(safePayload.progressText ?? "").trim() || "Preparando Messly";
-    if (!Number.isFinite(safePayload.progressPercent) || safePayload.progressPercent <= 0) {
-      safePayload.progressPercent = 100;
-    }
-    safePayload.progressCounterLabel = "";
-    safePayload.showProgressBar = true;
-    safePayload.showProgress = true;
-  }
-
   safePayload.progressPercent = Math.max(0, Math.min(100, Number(safePayload.progressPercent ?? 0)));
 
   const nextRenderKey = JSON.stringify({
@@ -1207,12 +1329,17 @@ function showStatusPanel(payload, mode = "generic") {
 
 function hideStatusPanel(options = {}) {
   clearStatusPanelAutoHide();
+  clearStatusPanelPhaseTransition();
   const mode = typeof options === "string" ? options : options?.mode;
   const panelWindow = statusPanelWindowRef;
   if (!panelWindow || panelWindow.isDestroyed()) {
     statusPanelWindowRef = null;
     statusPanelMode = null;
     statusPanelRenderKey = null;
+    statusPanelPhase = STATUS_PANEL_PHASE.IDLE;
+    statusPanelPhaseSinceMs = 0;
+    statusPanelDisplayProgressPercent = 0;
+    statusPanelProgressInterpolationMode = "";
     return;
   }
   if (mode && statusPanelMode && statusPanelMode !== mode) {
@@ -1220,7 +1347,152 @@ function hideStatusPanel(options = {}) {
   }
   statusPanelMode = null;
   statusPanelRenderKey = null;
+  statusPanelPhase = STATUS_PANEL_PHASE.IDLE;
+  statusPanelPhaseSinceMs = 0;
+  statusPanelDisplayProgressPercent = 0;
+  statusPanelProgressInterpolationMode = "";
   panelWindow.destroy();
+}
+
+function normalizeStatusPanelPhaseName(rawPhase) {
+  const candidate = String(rawPhase ?? "").trim().toLowerCase();
+  for (const value of Object.values(STATUS_PANEL_PHASE)) {
+    if (candidate === value) {
+      return value;
+    }
+  }
+  return STATUS_PANEL_PHASE.IDLE;
+}
+
+function clampStatusPanelProgress(rawValue) {
+  const numericValue = Number(rawValue);
+  if (!Number.isFinite(numericValue)) {
+    return 0;
+  }
+  return Math.max(0, Math.min(100, numericValue));
+}
+
+function resetStatusPanelProgressInterpolation() {
+  statusPanelDisplayProgressPercent = 0;
+  statusPanelProgressInterpolationMode = "";
+}
+
+function interpolateDownloadProgress(rawProgress) {
+  const targetProgress = clampStatusPanelProgress(rawProgress);
+  if (statusPanelProgressInterpolationMode !== STATUS_PANEL_PHASE.DOWNLOADING) {
+    statusPanelProgressInterpolationMode = STATUS_PANEL_PHASE.DOWNLOADING;
+    statusPanelDisplayProgressPercent = targetProgress;
+    return statusPanelDisplayProgressPercent;
+  }
+
+  if (targetProgress <= statusPanelDisplayProgressPercent) {
+    return statusPanelDisplayProgressPercent;
+  }
+
+  const delta = targetProgress - statusPanelDisplayProgressPercent;
+  const easedStep = Math.max(0.7, delta * 0.56);
+  statusPanelDisplayProgressPercent = Math.min(targetProgress, statusPanelDisplayProgressPercent + easedStep);
+  if (targetProgress >= 99.5) {
+    statusPanelDisplayProgressPercent = 100;
+  }
+  return statusPanelDisplayProgressPercent;
+}
+
+function formatStatusPanelDownloadProgressText(progressPercent, downloadedBytes, totalBytes) {
+  const roundedPercent = Math.round(clampStatusPanelProgress(progressPercent));
+  const downloaded = Number(downloadedBytes);
+  const total = Number(totalBytes);
+  if (!Number.isFinite(downloaded) || !Number.isFinite(total) || total <= 0) {
+    return `${roundedPercent}%`;
+  }
+  if (total < STATUS_PANEL_PROGRESS_BYTES_VISIBILITY_THRESHOLD) {
+    return `${roundedPercent}%`;
+  }
+  return `${roundedPercent}%  ${formatTransferBytes(downloaded)} / ${formatTransferBytes(total)}`;
+}
+
+function buildStatusPanelPhasePayload(phase, data = {}) {
+  const copy = STATUS_PANEL_COPY_PT_BR[phase] ?? STATUS_PANEL_COPY_PT_BR[STATUS_PANEL_PHASE.LAUNCHING];
+  const payload = {
+    title: String(data.title ?? copy.title ?? "").trim(),
+    subtitle: String(data.subtitle ?? copy.subtitle ?? "").trim(),
+    detail: String(data.detail ?? "").trim(),
+    progressText: String(data.progressText ?? "").trim(),
+    progressPercent: clampStatusPanelProgress(data.progressPercent ?? copy.progressPercent ?? 0),
+    showProgressBar: data.showProgressBar !== undefined ? Boolean(data.showProgressBar) : copy.showProgressBar !== false,
+    showProgress: data.showProgress !== undefined ? Boolean(data.showProgress) : Boolean(copy.showProgress),
+    indeterminate: data.indeterminate !== undefined ? Boolean(data.indeterminate) : Boolean(copy.indeterminate),
+  };
+
+  if (phase === STATUS_PANEL_PHASE.DOWNLOADING) {
+    const smoothedProgress = interpolateDownloadProgress(payload.progressPercent);
+    payload.progressPercent = smoothedProgress;
+    if (!payload.progressText && payload.showProgress) {
+      payload.progressText = formatStatusPanelDownloadProgressText(
+        smoothedProgress,
+        data.downloadedBytes ?? 0,
+        data.totalBytes ?? 0,
+      );
+    }
+  } else if (statusPanelProgressInterpolationMode === STATUS_PANEL_PHASE.DOWNLOADING) {
+    resetStatusPanelProgressInterpolation();
+  }
+
+  if (payload.indeterminate && !payload.showProgress) {
+    payload.progressText = "";
+  }
+  return payload;
+}
+
+function applyStatusPanelPhase(phase, data = {}) {
+  const normalizedPhase = normalizeStatusPanelPhaseName(phase);
+  if (normalizedPhase === STATUS_PANEL_PHASE.IDLE) {
+    hideStatusPanel();
+    return;
+  }
+
+  const payload = buildStatusPanelPhasePayload(normalizedPhase, data);
+  showStatusPanel(payload, normalizedPhase);
+}
+
+function setStatusPanelPhase(phase, data = {}, options = {}) {
+  const normalizedPhase = normalizeStatusPanelPhaseName(phase);
+  if (normalizedPhase === STATUS_PANEL_PHASE.IDLE) {
+    hideStatusPanel();
+    return;
+  }
+
+  const forceTransition = Boolean(options.force);
+  const nowMs = Date.now();
+  const currentPhase = normalizeStatusPanelPhaseName(statusPanelPhase);
+
+  if (currentPhase && currentPhase !== STATUS_PANEL_PHASE.IDLE && currentPhase !== normalizedPhase && !forceTransition) {
+    const minVisibleMs = Number(STATUS_PANEL_MIN_VISIBLE_MS[currentPhase] ?? 0);
+    const elapsedMs = Math.max(0, nowMs - Number(statusPanelPhaseSinceMs ?? 0));
+    if (minVisibleMs > 0 && elapsedMs < minVisibleMs) {
+      clearStatusPanelPhaseTransition();
+      statusPanelQueuedPhaseTransition = {
+        phase: normalizedPhase,
+        data: data && typeof data === "object" ? { ...data } : {},
+      };
+      statusPanelPhaseTransitionTimer = setTimeout(() => {
+        const queuedTransition = statusPanelQueuedPhaseTransition;
+        clearStatusPanelPhaseTransition();
+        if (!queuedTransition) {
+          return;
+        }
+        setStatusPanelPhase(queuedTransition.phase, queuedTransition.data, {
+          force: true,
+        });
+      }, Math.max(40, minVisibleMs - elapsedMs));
+      return;
+    }
+  }
+
+  clearStatusPanelPhaseTransition();
+  statusPanelPhase = normalizedPhase;
+  statusPanelPhaseSinceMs = nowMs;
+  applyStatusPanelPhase(normalizedPhase, data);
 }
 
 function syncStatusPanelWithUpdaterStateV2(nextState) {
@@ -1230,94 +1502,33 @@ function syncStatusPanelWithUpdaterStateV2(nextState) {
 
   const status = String(nextState.status ?? "").trim().toLowerCase();
   if (status === "checking") {
-    showStatusPanel(
-      {
-        title: "Verificando atualizações",
-        subtitle: "",
-        detail: "",
-        progressText: "",
-        progressPercent: 36,
-        showProgressBar: true,
-        showProgress: false,
-      },
-      "update-check",
-    );
+    setStatusPanelPhase(STATUS_PANEL_PHASE.CHECKING);
     return;
   }
 
   if (status === "available") {
-    showStatusPanel(
-      {
-        title: "Atualização disponível",
-        subtitle: "",
-        detail: "",
-        progressText: "",
-        progressPercent: 100,
-        showProgressBar: false,
-        showProgress: false,
-      },
-      "update-check",
-    );
-    scheduleStatusPanelAutoHide(1400, "update-check");
-    return;
-  }
-
-  if (status === "unavailable") {
-    showStatusPanel(
-      {
-        title: "Atualizado",
-        subtitle: "",
-        detail: "",
-        progressText: "",
-        progressPercent: 100,
-        showProgressBar: false,
-        showProgress: false,
-      },
-      "update-check",
-    );
-    scheduleStatusPanelAutoHide(900, "update-check");
-    restoreWindowsAfterUpdateFlow();
+    setStatusPanelPhase(STATUS_PANEL_PHASE.UPDATE_AVAILABLE);
+    scheduleStatusPanelAutoHide(1100, STATUS_PANEL_PHASE.UPDATE_AVAILABLE);
     return;
   }
 
   if (status === "downloading") {
-    const downloadedBytes = Number(nextState.downloadedBytes ?? 0);
-    const totalBytes = Number(nextState.totalBytes ?? 0);
-    const progressPercent = Math.max(0, Math.min(100, Number(nextState.progressPercent ?? 0)));
-    const progressLine = `${Math.round(progressPercent)}% - ${formatTransferBytes(downloadedBytes)} / ${formatTransferBytes(totalBytes)}`;
-
-    showStatusPanel(
-      {
-        title: "Baixando atualização",
-        subtitle: "",
-        detail: "",
-        progressText: progressLine,
-        progressPercent,
-        showProgressBar: true,
-        showProgress: true,
-        progressCounterLabel: "",
-      },
-      "update-download",
-    );
+    setStatusPanelPhase(STATUS_PANEL_PHASE.DOWNLOADING, {
+      progressPercent: Number(nextState.progressPercent ?? 0),
+      downloadedBytes: Number(nextState.downloadedBytes ?? 0),
+      totalBytes: Number(nextState.totalBytes ?? 0),
+      showProgress: true,
+      indeterminate: false,
+    });
     updaterAutoInstallInFlight = false;
     hideWindowsForUpdateFlow();
     return;
   }
 
   if (status === "downloaded") {
-    showStatusPanel(
-      {
-        title: "Instalando Messly",
-        subtitle: "",
-        detail: "",
-        progressText: "Preparando Messly",
-        progressPercent: 100,
-        showProgressBar: true,
-        showProgress: true,
-        progressCounterLabel: "",
-      },
-      "update-install",
-    );
+    setStatusPanelPhase(STATUS_PANEL_PHASE.APPLYING, {
+      indeterminate: true,
+    });
     hideWindowsForUpdateFlow();
 
     if (updaterAutoInstallInFlight || !appUpdater?.installUpdate) {
@@ -1329,20 +1540,11 @@ function syncStatusPanelWithUpdaterStateV2(nextState) {
       .catch((error) => {
         const message = error instanceof Error ? error.message : String(error ?? "Falha desconhecida.");
         updaterAutoInstallInFlight = false;
-        showStatusPanel(
-          {
-            title: "Falha ao aplicar atualização",
-            subtitle: "",
-            detail: "",
-            progressText: "Não foi possível concluir a atualização.",
-            progressPercent: 0,
-            showProgressBar: false,
-            showProgress: true,
-            progressCounterLabel: "",
-          },
-          "update-install",
-        );
-        scheduleStatusPanelAutoHide(2400, "update-install");
+        setStatusPanelPhase(STATUS_PANEL_PHASE.FAILED, {
+          detail: "Nao foi possivel concluir a atualizacao.",
+          showProgressBar: false,
+        });
+        scheduleStatusPanelAutoHide(1800, STATUS_PANEL_PHASE.FAILED);
         if (message) {
           console.warn(`[updater] install failed: ${message}`);
         }
@@ -1354,30 +1556,52 @@ function syncStatusPanelWithUpdaterStateV2(nextState) {
     return;
   }
 
-  if (status === "error") {
-    showStatusPanel(
-      {
-        title: "Falha ao atualizar",
-        subtitle: "",
-        detail: "",
-        progressText: "Tente novamente em alguns instantes.",
-        progressPercent: 0,
-        showProgressBar: false,
-        showProgress: true,
-      },
-      "update-check",
-    );
-    scheduleStatusPanelAutoHide(2200, "update-check");
+  if (status === "installing" || status === "applying") {
+    setStatusPanelPhase(STATUS_PANEL_PHASE.INSTALLING);
+    hideWindowsForUpdateFlow();
+    return;
+  }
+
+  if (status === "unavailable") {
     updaterAutoInstallInFlight = false;
+    if (mainWindowWaitingForFirstFrame && !mainWindowFirstFrameReady) {
+      setStatusPanelPhase(STATUS_PANEL_PHASE.LOADING_SHELL);
+      return;
+    }
+    setStatusPanelPhase(STATUS_PANEL_PHASE.READY, {
+      title: "Atualizado",
+      subtitle: "Quase pronto",
+      showProgressBar: false,
+      showProgress: false,
+    });
+    scheduleStatusPanelAutoHide(760, STATUS_PANEL_PHASE.READY);
+    restoreWindowsAfterUpdateFlow();
+    return;
+  }
+
+  if (status === "error") {
+    updaterAutoInstallInFlight = false;
+    setStatusPanelPhase(STATUS_PANEL_PHASE.FAILED, {
+      detail: "Nao foi possivel concluir a atualizacao.",
+      showProgressBar: false,
+      showProgress: false,
+    });
+    if (mainWindowWaitingForFirstFrame && !mainWindowFirstFrameReady) {
+      setStatusPanelPhase(STATUS_PANEL_PHASE.RETRYING);
+      return;
+    }
+    scheduleStatusPanelAutoHide(1800, STATUS_PANEL_PHASE.FAILED);
     restoreWindowsAfterUpdateFlow();
     return;
   }
 
   if (status === "disabled" || status === "idle") {
     updaterAutoInstallInFlight = false;
-    hideStatusPanel({ mode: "update-check" });
-    hideStatusPanel({ mode: "update-download" });
-    hideStatusPanel({ mode: "update-install" });
+    if (mainWindowWaitingForFirstFrame && !mainWindowFirstFrameReady) {
+      setStatusPanelPhase(STATUS_PANEL_PHASE.LOADING_SHELL);
+      return;
+    }
+    hideStatusPanel();
     restoreWindowsAfterUpdateFlow();
   }
 }
@@ -1939,6 +2163,12 @@ function setHiddenDirectMessageConversationIds(scopes, conversationIds) {
   return [...normalizedConversationIds];
 }
 
+function getConfiguredAppApiBaseUrl() {
+  const configuredAppApiUrl = String(process.env.VITE_MESSLY_API_URL ?? "").trim();
+  const configuredAuthApiUrl = String(process.env.VITE_MESSLY_AUTH_API_URL ?? "").trim();
+  return configuredAppApiUrl || configuredAuthApiUrl || DEFAULT_PUBLIC_API_BASE_URL;
+}
+
 function buildStartupSnapshot() {
   const refreshToken = String(getSecureAuthStorageValue(REFRESH_TOKEN_STORAGE_KEY) ?? "").trim();
   const hiddenState = loadHiddenDirectMessagesState();
@@ -1952,8 +2182,6 @@ function buildStartupSnapshot() {
     hiddenConversationCount += normalizeHiddenDirectMessageConversationIds(conversationIds).length;
   }
 
-  const defaultPublicApiBaseUrl = "https://messly.site";
-  const defaultPublicGatewayUrl = "wss://messly.site/gateway";
   const configuredGatewayUrl = String(process.env.VITE_MESSLY_GATEWAY_URL ?? "").trim();
   const configuredAuthApiUrl = String(process.env.VITE_MESSLY_AUTH_API_URL ?? "").trim();
   const configuredAppApiUrl = String(process.env.VITE_MESSLY_API_URL ?? "").trim();
@@ -1966,9 +2194,9 @@ function buildStartupSnapshot() {
     windowsSettings: { ...loadWindowsBehaviorSettings() },
     apiConfig: {
       supabaseUrl: String(process.env.VITE_SUPABASE_URL ?? process.env.SUPABASE_URL ?? "").trim() || null,
-      gatewayUrl: configuredGatewayUrl || defaultPublicGatewayUrl,
-      authApiUrl: configuredAuthApiUrl || configuredAppApiUrl || defaultPublicApiBaseUrl,
-      appApiUrl: configuredAppApiUrl || defaultPublicApiBaseUrl,
+      gatewayUrl: configuredGatewayUrl || DEFAULT_PUBLIC_GATEWAY_URL,
+      authApiUrl: configuredAuthApiUrl || configuredAppApiUrl || DEFAULT_PUBLIC_API_BASE_URL,
+      appApiUrl: configuredAppApiUrl || DEFAULT_PUBLIC_API_BASE_URL,
     },
     cacheHints: {
       hiddenScopeCount: Object.keys(scopeMap).length,
@@ -2006,7 +2234,7 @@ function revealMainWindowAfterFirstFrame(options = {}) {
       mainWindow.show();
       mainWindow.minimize();
     }
-    hideStatusPanel({ mode: "startup" });
+    hideStatusPanel();
     return true;
   }
 
@@ -2023,7 +2251,15 @@ function revealMainWindowAfterFirstFrame(options = {}) {
   measureMainStartupPerf("main_when_ready_to_window_reveal", "main:when-ready", "main:window-revealed", {
     startMinimized,
   });
-  hideStatusPanel({ mode: "startup" });
+  setStatusPanelPhase(STATUS_PANEL_PHASE.READY, {
+    title: "Carregando Messly",
+    subtitle: "Quase pronto",
+    showProgressBar: false,
+    showProgress: false,
+  }, {
+    force: true,
+  });
+  scheduleStatusPanelAutoHide(180, STATUS_PANEL_PHASE.READY);
   return true;
 }
 
@@ -2479,7 +2715,7 @@ function createDisabledUpdater(reason) {
   };
 }
 
-function broadcastUpdaterState(nextState) {
+function pushUpdaterStateToRendererWindows(nextState) {
   syncStatusPanelWithUpdaterStateV2(nextState);
   const windows = BrowserWindow.getAllWindows();
   for (const window of windows) {
@@ -2492,6 +2728,45 @@ function broadcastUpdaterState(nextState) {
     }
     webContents.send("updater:state-changed", nextState);
   }
+}
+
+function flushQueuedUpdaterState() {
+  if (!updaterBroadcastQueuedState) {
+    updaterBroadcastThrottleTimer = null;
+    return;
+  }
+  const queuedState = updaterBroadcastQueuedState;
+  updaterBroadcastQueuedState = null;
+  updaterBroadcastThrottleTimer = null;
+  updaterBroadcastLastAtMs = Date.now();
+  pushUpdaterStateToRendererWindows(queuedState);
+}
+
+function broadcastUpdaterState(nextState) {
+  const status = String(nextState?.status ?? "").trim().toLowerCase();
+  if (status === "downloading") {
+    updaterBroadcastQueuedState = nextState;
+    const elapsedMs = Math.max(0, Date.now() - Number(updaterBroadcastLastAtMs || 0));
+    if (elapsedMs >= 130 && !updaterBroadcastThrottleTimer) {
+      flushQueuedUpdaterState();
+      return;
+    }
+    if (!updaterBroadcastThrottleTimer) {
+      const delayMs = Math.max(40, 130 - elapsedMs);
+      updaterBroadcastThrottleTimer = setTimeout(() => {
+        flushQueuedUpdaterState();
+      }, delayMs);
+    }
+    return;
+  }
+
+  if (updaterBroadcastThrottleTimer) {
+    clearTimeout(updaterBroadcastThrottleTimer);
+    updaterBroadcastThrottleTimer = null;
+  }
+  updaterBroadcastQueuedState = null;
+  updaterBroadcastLastAtMs = Date.now();
+  pushUpdaterStateToRendererWindows(nextState);
 }
 
 function readBooleanEnvFlag(rawValue, defaultValue = false) {
@@ -2675,27 +2950,23 @@ async function runStartupAutoUpdateIfEnabled() {
         return;
       }
 
-      showStatusPanel(
-        {
-          title: "Instalando Messly",
-          subtitle: "",
-          detail: "",
-          progressText: "Preparando Messly",
-          progressPercent: 100,
-          showProgressBar: true,
-          showProgress: true,
-          progressCounterLabel: "",
-        },
-        "update-install",
-      );
+      setStatusPanelPhase(STATUS_PANEL_PHASE.APPLYING, {
+        indeterminate: true,
+      }, {
+        force: true,
+      });
 
       await appUpdater.installUpdate();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error ?? "unknown");
       console.warn(`[updater] Startup auto-update failed: ${message}`);
-      hideStatusPanel({ mode: "update-check" });
-      hideStatusPanel({ mode: "update-download" });
-      hideStatusPanel({ mode: "update-install" });
+      setStatusPanelPhase(STATUS_PANEL_PHASE.FAILED, {
+        detail: "Ocorreu um problema ao iniciar o Messly.",
+      }, {
+        force: true,
+      });
+      scheduleStatusPanelAutoHide(1800, STATUS_PANEL_PHASE.FAILED);
+      restoreWindowsAfterUpdateFlow();
     }
   })().finally(() => {
     startupAutoUpdatePromise = null;
@@ -2840,6 +3111,34 @@ async function getSignedMediaUrlHandler(_event, payload) {
   };
 }
 
+function normalizeAccessToken(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+async function uploadProfileMediaViaApiProxy({ key, contentType, bytes, accessToken }) {
+  const apiBaseUrl = getConfiguredAppApiBaseUrl();
+  const response = await fetch(`${apiBaseUrl}/media/upload-proxy?fileKey=${encodeURIComponent(key)}`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      "content-type": contentType || "application/octet-stream",
+    },
+    body: bytes,
+  });
+
+  if (response.ok) {
+    return;
+  }
+
+  const responseText = await response.text().catch(() => "");
+  const detail = responseText.replace(/\s+/g, " ").trim().slice(0, 260);
+  throw new Error(
+    detail
+      ? `Managed media upload failed (${response.status}): ${detail}`
+      : `Managed media upload failed (${response.status}).`,
+  );
+}
+
 async function uploadProfileMediaHandler(_event, payload) {
   const kind = payload?.kind;
   if (kind !== "avatar" && kind !== "banner") {
@@ -2851,6 +3150,8 @@ async function uploadProfileMediaHandler(_event, payload) {
     throw new Error("Invalid user identifier.");
   }
 
+  const accessToken = normalizeAccessToken(payload?.accessToken);
+
   try {
     const binaryPayload = normalizeBinaryPayload(payload?.bytes);
     const { processAvatarUpload, processBannerUpload } = getProfileMediaProcessors();
@@ -2859,17 +3160,29 @@ async function uploadProfileMediaHandler(_event, payload) {
     const prefix = PROFILE_MEDIA_PREFIX_BY_KIND[kind];
     const key = `${prefix}/${userId}.${processedAsset.ext}`;
 
-    const { PutObjectCommand } = getS3SdkModule();
-    const command = new PutObjectCommand({
-      Bucket: getR2Bucket(),
-      Key: key,
-      Body: processedAsset.buffer,
-      ContentType: processedAsset.contentType,
-      ContentLength: processedAsset.size,
-      CacheControl: PROFILE_MEDIA_CACHE_CONTROL,
-    });
+    try {
+      const { PutObjectCommand } = getS3SdkModule();
+      const command = new PutObjectCommand({
+        Bucket: getR2Bucket(),
+        Key: key,
+        Body: processedAsset.buffer,
+        ContentType: processedAsset.contentType,
+        ContentLength: processedAsset.size,
+        CacheControl: PROFILE_MEDIA_CACHE_CONTROL,
+      });
 
-    await getR2Client().send(command);
+      await getR2Client().send(command);
+    } catch (uploadError) {
+      if (!accessToken) {
+        throw uploadError;
+      }
+      await uploadProfileMediaViaApiProxy({
+        key,
+        contentType: processedAsset.contentType,
+        bytes: processedAsset.buffer,
+        accessToken,
+      });
+    }
 
     return {
       key,
@@ -2891,7 +3204,7 @@ async function uploadProfileMediaHandler(_event, payload) {
 
 async function uploadAttachmentHandler(_event, payload) {
   const safeKey = sanitizeMediaKey(payload?.key);
-  if (!safeKey || !safeKey.startsWith("attachments/")) {
+  if (!safeKey || (!safeKey.startsWith("attachments/") && !safeKey.startsWith("messages/"))) {
     throw new Error("Invalid attachment key.");
   }
 
@@ -3102,62 +3415,42 @@ function registerIpcHandlers() {
     if (!appUpdater?.checkForUpdates) {
       throw new Error("Updater indisponível.");
     }
-    showStatusPanel(
-      {
-        title: "Verificando atualizações",
-        subtitle: "",
-        detail: "",
-        progressText: "",
-        progressPercent: 36,
-        showProgressBar: true,
-        showProgress: false,
-      },
-      "update-check",
-    );
+    setStatusPanelPhase(STATUS_PANEL_PHASE.CHECKING, {}, { force: true });
     return appUpdater.checkForUpdates();
   });
   ipcMain.handle("updater:download", async () => {
     if (!appUpdater?.downloadUpdate) {
       throw new Error("Updater indisponível.");
     }
-    showStatusPanel(
-      {
-        title: "Baixando atualização",
-        subtitle: "",
-        detail: "",
-        progressText: "",
-        progressPercent: 4,
-        showProgressBar: true,
-        showProgress: false,
-        progressCounterLabel: "",
-      },
-      "update-download",
-    );
+    setStatusPanelPhase(STATUS_PANEL_PHASE.DOWNLOADING, {
+      progressPercent: 4,
+      showProgress: true,
+    }, {
+      force: true,
+    });
     return appUpdater.downloadUpdate();
   });
   ipcMain.handle("updater:install", async () => {
     if (!appUpdater?.installUpdate) {
       throw new Error("Updater indisponível.");
     }
-    showStatusPanel(
-      {
-        title: "Instalando Messly",
-        subtitle: "",
-        detail: "",
-        progressText: "Preparando Messly",
-        progressPercent: 100,
-        showProgressBar: true,
-        showProgress: true,
-        progressCounterLabel: "",
-      },
-      "update-install",
-    );
+    setStatusPanelPhase(STATUS_PANEL_PHASE.INSTALLING, {
+      indeterminate: true,
+    }, {
+      force: true,
+    });
     hideWindowsForUpdateFlow();
     updaterAutoInstallInFlight = true;
     try {
       return await appUpdater.installUpdate();
     } catch (error) {
       updaterAutoInstallInFlight = false;
+      setStatusPanelPhase(STATUS_PANEL_PHASE.FAILED, {
+        detail: "Nao foi possivel concluir a atualizacao.",
+      }, {
+        force: true,
+      });
+      scheduleStatusPanelAutoHide(1800, STATUS_PANEL_PHASE.FAILED);
       restoreWindowsAfterUpdateFlow();
       throw error;
     }
@@ -3275,18 +3568,12 @@ function createMainWindow() {
   });
 
   if (!startMinimized) {
-    showStatusPanel(
-      {
-        title: "",
-        subtitle: "",
-        detail: "",
-        progressText: "",
-        progressPercent: 12,
-        showProgressBar: true,
-        showProgress: false,
-      },
-      "startup",
-    );
+    setStatusPanelPhase(STATUS_PANEL_PHASE.LAUNCHING, {
+      progressPercent: 12,
+      indeterminate: true,
+    }, {
+      force: true,
+    });
   }
 
   const mainWindow = new BrowserWindow({
@@ -3340,6 +3627,12 @@ function createMainWindow() {
     });
     if (mainWindow.isDestroyed()) {
       return;
+    }
+    if (!mainWindowFirstFrameReady && !startMinimized) {
+      setStatusPanelPhase(STATUS_PANEL_PHASE.LOADING_SHELL, {
+        progressPercent: 72,
+        indeterminate: true,
+      });
     }
     if (mainWindowFirstFrameReady) {
       revealMainWindowAfterFirstFrame({ startMinimized });
@@ -3608,7 +3901,11 @@ app.whenReady().then(async () => {
   }
   if (process.platform === "win32" && typeof app.setAppUserModelId === "function") {
     try {
-      app.setAppUserModelId(getWindowsNotificationAppId());
+      // In development, forcing a production AUMID can make the taskbar icon
+      // fall back to a generic placeholder. Keep the custom AUMID for packaged app only.
+      if (app.isPackaged) {
+        app.setAppUserModelId(getWindowsNotificationAppId());
+      }
     } catch {}
   }
   if (session.defaultSession) {
@@ -3697,6 +3994,11 @@ app.whenReady().then(async () => {
 
 app.on("before-quit", () => {
   isAppQuitting = true;
+  if (updaterBroadcastThrottleTimer) {
+    clearTimeout(updaterBroadcastThrottleTimer);
+    updaterBroadcastThrottleTimer = null;
+  }
+  updaterBroadcastQueuedState = null;
   void stopPackagedRendererServer();
   notificationManager?.dispose?.();
   notificationManager = null;

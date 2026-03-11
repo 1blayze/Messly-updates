@@ -96,8 +96,21 @@ function isElectronOrigin(origin: string): boolean {
   );
 }
 
+function isLoopbackHttpOrigin(origin: string): boolean {
+  try {
+    const parsed = new URL(origin.trim());
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return false;
+    }
+    const hostname = parsed.hostname.trim().toLowerCase();
+    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+  } catch {
+    return false;
+  }
+}
+
 function isOriginAllowed(origin: string, env: ParsedCorsEnv): boolean {
-  if (env.allowElectronOrigin && isElectronOrigin(origin)) {
+  if (env.allowElectronOrigin && (isElectronOrigin(origin) || isLoopbackHttpOrigin(origin))) {
     return true;
   }
 

@@ -29,6 +29,19 @@ function isElectronOrigin(originRaw: string): boolean {
   return origin === "null" || origin.startsWith("file://") || origin.startsWith("app://") || origin.startsWith("messly://");
 }
 
+function isLoopbackHttpOrigin(originRaw: string): boolean {
+  try {
+    const parsed = new URL(String(originRaw ?? "").trim());
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return false;
+    }
+    const hostname = parsed.hostname.trim().toLowerCase();
+    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+  } catch {
+    return false;
+  }
+}
+
 export function resolveCorsHeaders(origin: string | null, env: GatewayEnv): Record<string, string> {
   const headers: Record<string, string> = {
     "access-control-allow-methods": "POST, OPTIONS",
@@ -43,6 +56,11 @@ export function resolveCorsHeaders(origin: string | null, env: GatewayEnv): Reco
   }
 
   if (env.allowedOrigins.includes(normalizedOrigin)) {
+    headers["access-control-allow-origin"] = normalizedOrigin;
+    return headers;
+  }
+
+  if (env.allowElectronOrigin && isLoopbackHttpOrigin(normalizedOrigin)) {
     headers["access-control-allow-origin"] = normalizedOrigin;
     return headers;
   }

@@ -87,7 +87,15 @@ function normalizeBaseUrl(valueRaw: string): string | null {
   if (!value) {
     return null;
   }
-  return value.replace(/\/+$/, "");
+  try {
+    const parsed = new URL(value);
+    if (parsed.hostname.toLowerCase() === "www.messly.site") {
+      parsed.hostname = "messly.site";
+    }
+    return parsed.toString().replace(/\/+$/, "");
+  } catch {
+    return value.replace(/\/+$/, "");
+  }
 }
 
 function isLocalHostname(hostnameRaw: string): boolean {
