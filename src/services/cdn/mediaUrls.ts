@@ -36,6 +36,8 @@ const DEFAULT_BANNER_PLACEHOLDER = `data:image/svg+xml,${encodeURIComponent(
 )}`;
 const signedMediaCache = new Map<string, { url: string; expiresAt: number }>();
 const signedMediaInFlight = new Map<string, Promise<{ url: string; expiresAt: number } | null>>();
+const signedMediaCacheKeyByUrl = new Map<string, string>();
+const signedMediaKeyByCacheKey = new Map<string, string>();
 const warmedImageUrls = new Map<string, number>();
 
 function normalizeAvatarSeed(seedRaw: string | null | undefined): string {
@@ -163,6 +165,25 @@ function shouldUsePublicCdn(): boolean {
   return true;
 }
 
+function clearSignedMediaCacheEntry(cacheKey: string): void {
+  const previous = signedMediaCache.get(cacheKey);
+  if (previous?.url) {
+    signedMediaCacheKeyByUrl.delete(previous.url);
+  }
+  signedMediaCache.delete(cacheKey);
+  signedMediaKeyByCacheKey.delete(cacheKey);
+}
+
+function trackSignedMediaCacheEntry(cacheKey: string, mediaKey: string, entry: { url: string; expiresAt: number }): void {
+  const previous = signedMediaCache.get(cacheKey);
+  if (previous?.url && previous.url !== entry.url) {
+    signedMediaCacheKeyByUrl.delete(previous.url);
+  }
+  signedMediaCache.set(cacheKey, entry);
+  signedMediaKeyByCacheKey.set(cacheKey, mediaKey);
+  signedMediaCacheKeyByUrl.set(entry.url, cacheKey);
+}
+
 function getCachedSignedUrl(cacheKey: string): string | null {
   const cached = signedMediaCache.get(cacheKey);
   if (!cached) {
@@ -170,7 +191,7 @@ function getCachedSignedUrl(cacheKey: string): string | null {
   }
 
   if (cached.expiresAt - SIGNED_URL_REFRESH_BUFFER_MS <= Date.now()) {
-    signedMediaCache.delete(cacheKey);
+    clearSignedMediaCacheEntry(cacheKey);
     return null;
   }
 
@@ -203,57 +224,86 @@ function warmImageUrl(rawUrl: string | null | undefined): void {
   }
 }
 
-async function fetchSignedMediaUrl(mediaKey: string): Promise<{ url: string; expiresAt: number } | null> {
+async function fetchSignedMediaUrlFromElectron(mediaKey: string): Promise<{ url: string; expiresAt: number } | null> {
+  const getSignedMediaUrl = window.electronAPI?.getSignedMediaUrl;
+  if (!getSignedMediaUrl) {
+    return null;
+  }
+
+  try {
+    const signed = await getSignedMediaUrl({
+      key: mediaKey,
+      expiresSeconds: SIGNED_URL_EXPIRES_SECONDS,
+    });
+
+    if (signed?.url) {
+      return {
+        url: signed.url,
+        expiresAt: signed.expiresAt || Date.now() + SIGNED_URL_EXPIRES_SECONDS * 1000,
+      };
+    }
+  } catch {
+    // noop
+  }
+
+  return null;
+}
+
+async function fetchSignedMediaUrlFromEdge(mediaKey: string): Promise<{ url: string; expiresAt: number } | null> {
+  try {
+    const data = await invokeEdgeJson<{ key: string; action: "get" }, { url?: string; expiresIn?: number }>(
+      "r2-presign",
+      {
+        key: mediaKey,
+        action: "get",
+      },
+      {
+        retries: 1,
+        timeoutMs: 15_000,
+      },
+    );
+
+    if (data?.url) {
+      const expiresIn = Number(data.expiresIn ?? SIGNED_URL_EXPIRES_SECONDS);
+      return {
+        url: String(data.url),
+        expiresAt: Date.now() + (Number.isFinite(expiresIn) ? expiresIn : SIGNED_URL_EXPIRES_SECONDS) * 1000,
+      };
+    }
+  } catch {
+    // noop
+  }
+
+  return null;
+}
+
+async function fetchSignedMediaUrl(
+  mediaKey: string,
+  options?: {
+    preferEdge?: boolean;
+  },
+): Promise<{ url: string; expiresAt: number } | null> {
   const inFlight = signedMediaInFlight.get(mediaKey);
   if (inFlight) {
     return inFlight;
   }
 
+  const preferEdge = options?.preferEdge === true;
   const request = (async () => {
-    const getSignedMediaUrl = window.electronAPI?.getSignedMediaUrl;
-    if (getSignedMediaUrl) {
-      try {
-        const signed = await getSignedMediaUrl({
-          key: mediaKey,
-          expiresSeconds: SIGNED_URL_EXPIRES_SECONDS,
-        });
-
-        if (signed?.url) {
-          return {
-            url: signed.url,
-            expiresAt: signed.expiresAt || Date.now() + SIGNED_URL_EXPIRES_SECONDS * 1000,
-          };
-        }
-      } catch {
-        // noop
+    if (preferEdge) {
+      const edgeSigned = await fetchSignedMediaUrlFromEdge(mediaKey);
+      if (edgeSigned) {
+        return edgeSigned;
       }
+      return fetchSignedMediaUrlFromElectron(mediaKey);
     }
 
-    try {
-      const data = await invokeEdgeJson<{ key: string; action: "get" }, { url?: string; expiresIn?: number }>(
-        "r2-presign",
-        {
-          key: mediaKey,
-          action: "get",
-        },
-        {
-          retries: 1,
-          timeoutMs: 15_000,
-        },
-      );
-
-      if (data?.url) {
-        const expiresIn = Number(data.expiresIn ?? SIGNED_URL_EXPIRES_SECONDS);
-        return {
-          url: String(data.url),
-          expiresAt: Date.now() + (Number.isFinite(expiresIn) ? expiresIn : SIGNED_URL_EXPIRES_SECONDS) * 1000,
-        };
-      }
-    } catch {
-      // noop
+    const electronSigned = await fetchSignedMediaUrlFromElectron(mediaKey);
+    if (electronSigned) {
+      return electronSigned;
     }
 
-    return null;
+    return fetchSignedMediaUrlFromEdge(mediaKey);
   })();
 
   signedMediaInFlight.set(mediaKey, request);
@@ -294,9 +344,39 @@ async function resolveMediaUrl(mediaKeyRaw: string | null | undefined, mediaHash
     return appendHashToUrl(`${getCdnBaseUrl()}/${safeKey}`, safeHash);
   }
 
-  signedMediaCache.set(cacheKey, signed);
+  trackSignedMediaCacheEntry(cacheKey, safeKey, signed);
   warmImageUrl(signed.url);
   return signed.url;
+}
+
+export async function refreshFailedSignedMediaUrl(rawUrl: string | null | undefined): Promise<string | null> {
+  const normalizedUrl = sanitizeAbsoluteMediaUrl(rawUrl);
+  if (!normalizedUrl || shouldUsePublicCdn()) {
+    return null;
+  }
+
+  const cacheKey = signedMediaCacheKeyByUrl.get(normalizedUrl);
+  if (!cacheKey) {
+    return null;
+  }
+
+  const mediaKey = sanitizeMediaKey(signedMediaKeyByCacheKey.get(cacheKey) ?? cacheKey.split(":")[0] ?? null);
+  if (!mediaKey) {
+    clearSignedMediaCacheEntry(cacheKey);
+    return null;
+  }
+
+  clearSignedMediaCacheEntry(cacheKey);
+  signedMediaInFlight.delete(mediaKey);
+
+  const refreshed = await fetchSignedMediaUrl(mediaKey, { preferEdge: true });
+  if (!refreshed) {
+    return null;
+  }
+
+  trackSignedMediaCacheEntry(cacheKey, mediaKey, refreshed);
+  warmImageUrl(refreshed.url);
+  return refreshed.url;
 }
 
 export function getDefaultAvatarUrl(seed?: string | null): string {

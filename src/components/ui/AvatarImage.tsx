@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type ImgHTMLAttributes } from "react";
 import { toCdnUrl } from "../../config/domains";
-import { getDefaultAvatarUrl, getNameAvatarUrl, isDefaultAvatarUrl } from "../../services/cdn/mediaUrls";
+import {
+  getDefaultAvatarUrl,
+  getNameAvatarUrl,
+  isDefaultAvatarUrl,
+  refreshFailedSignedMediaUrl,
+} from "../../services/cdn/mediaUrls";
 
 type AvatarImageProps = Omit<ImgHTMLAttributes<HTMLImageElement>, "src"> & {
   src?: string | null;
@@ -69,6 +74,7 @@ export default function AvatarImage({
   );
   const [resolvedSrc, setResolvedSrc] = useState<string>(() => preferredSrc || fallbackSrc);
   const fallbackTimerRef = useRef<number | null>(null);
+  const refreshAttemptedSrcRef = useRef<string>("");
   const preferredSrcRef = useRef<string>(preferredSrc);
   const identityKeyRef = useRef<string>(identityKey);
 
@@ -88,12 +94,14 @@ export default function AvatarImage({
       return;
     }
     identityKeyRef.current = identityKey;
+    refreshAttemptedSrcRef.current = "";
     clearFallbackTimer();
     setResolvedSrc(preferredSrc || fallbackSrc);
   }, [fallbackSrc, identityKey, preferredSrc]);
 
   useEffect(() => {
     clearFallbackTimer();
+    refreshAttemptedSrcRef.current = "";
 
     if (preferredSrc) {
       setResolvedSrc((current) => (current === preferredSrc ? current : preferredSrc));
@@ -132,10 +140,35 @@ export default function AvatarImage({
       src={resolvedSrc}
       alt={alt ?? `Avatar de ${String(name ?? "").trim() || "usuario"}`}
       onError={(event) => {
-        if (resolvedSrc !== fallbackSrc) {
+        const failedSrc = String(resolvedSrc ?? "").trim();
+        if (!failedSrc || failedSrc === fallbackSrc) {
+          onError?.(event);
+          return;
+        }
+
+        if (refreshAttemptedSrcRef.current !== failedSrc) {
+          refreshAttemptedSrcRef.current = failedSrc;
+          void refreshFailedSignedMediaUrl(failedSrc)
+            .then((refreshedSrc) => {
+              setResolvedSrc((current) => {
+                if (String(current ?? "").trim() !== failedSrc) {
+                  return current;
+                }
+                const normalizedRefreshed = String(refreshedSrc ?? "").trim();
+                if (normalizedRefreshed && normalizedRefreshed !== failedSrc) {
+                  return normalizedRefreshed;
+                }
+                return fallbackSrc;
+              });
+            })
+            .catch(() => {
+              setResolvedSrc((current) => (String(current ?? "").trim() === failedSrc ? fallbackSrc : current));
+            });
+        } else {
           clearFallbackTimer();
           setResolvedSrc(fallbackSrc);
         }
+
         onError?.(event);
       }}
     />
