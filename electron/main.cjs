@@ -1,4 +1,5 @@
 ﻿const fs = require("node:fs");
+const http = require("node:http");
 const path = require("node:path");
 const dotenv = require("dotenv");
 
@@ -123,6 +124,27 @@ const PRODUCTION_CONTENT_SECURITY_POLICY = [
   "object-src 'none'",
   "base-uri 'self'",
 ].join("; ");
+const PACKAGED_RENDERER_DIST_DIR = path.resolve(__dirname, "..", "dist");
+const PACKAGED_RENDERER_ENTRY_FILE = path.join(PACKAGED_RENDERER_DIST_DIR, "index.html");
+const PACKAGED_RENDERER_HOST = "127.0.0.1";
+const PACKAGED_RENDERER_MIME_BY_EXTENSION = Object.freeze({
+  ".css": "text/css; charset=utf-8",
+  ".gif": "image/gif",
+  ".html": "text/html; charset=utf-8",
+  ".ico": "image/x-icon",
+  ".jpeg": "image/jpeg",
+  ".jpg": "image/jpeg",
+  ".js": "text/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".map": "application/json; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".png": "image/png",
+  ".svg": "image/svg+xml",
+  ".txt": "text/plain; charset=utf-8",
+  ".webp": "image/webp",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+});
 const ALLOWED_APP_PERMISSIONS = Object.freeze(["media", "display-capture"]);
 const WINDOWS_FIREWALL_RULE_NAME = String(process.env.MESSLY_FIREWALL_RULE_NAME ?? DEFAULT_FIREWALL_RULE_NAME).trim() || DEFAULT_FIREWALL_RULE_NAME;
 const WINDOWS_FIREWALL_PROFILE = String(process.env.MESSLY_FIREWALL_PROFILE ?? DEFAULT_FIREWALL_PROFILE).trim().toLowerCase() || DEFAULT_FIREWALL_PROFILE;
@@ -180,6 +202,9 @@ let startupAutoUpdatePromise = null;
 let updaterAutoInstallInFlight = false;
 let windowsHiddenForUpdateFlow = false;
 let windowsFirewallBootstrapPromise = null;
+let packagedRendererServer = null;
+let packagedRendererServerOrigin = null;
+let packagedRendererServerStartPromise = null;
 const ephemeralSecureAuthStorage = new Map();
 const hardenedWebContents = new WeakSet();
 const hardenedSessions = new WeakSet();
@@ -282,6 +307,169 @@ function normalizeOriginValue(rawValue) {
   }
 }
 
+function getPackagedRendererOrigin() {
+  return packagedRendererServerOrigin;
+}
+
+function getPackagedRendererContentType(filePath) {
+  const extension = path.extname(filePath).toLowerCase();
+  return PACKAGED_RENDERER_MIME_BY_EXTENSION[extension] || "application/octet-stream";
+}
+
+function resolvePackagedRendererAssetPath(requestPathname) {
+  const rawPath = String(requestPathname ?? "/");
+  let decodedPath;
+  try {
+    decodedPath = decodeURIComponent(rawPath);
+  } catch {
+    return null;
+  }
+  if (decodedPath.includes("\0")) {
+    return null;
+  }
+
+  const relativePath = decodedPath === "/" ? "" : decodedPath.replace(/^\/+/, "");
+  const resolvedPath = relativePath
+    ? path.resolve(PACKAGED_RENDERER_DIST_DIR, relativePath)
+    : PACKAGED_RENDERER_ENTRY_FILE;
+  const distRootPrefix = `${PACKAGED_RENDERER_DIST_DIR}${path.sep}`;
+  if (resolvedPath !== PACKAGED_RENDERER_DIST_DIR && !resolvedPath.startsWith(distRootPrefix)) {
+    return null;
+  }
+
+  try {
+    if (fs.existsSync(resolvedPath)) {
+      const stat = fs.statSync(resolvedPath);
+      if (stat.isFile()) {
+        return resolvedPath;
+      }
+      if (stat.isDirectory()) {
+        const nestedIndex = path.join(resolvedPath, "index.html");
+        if (fs.existsSync(nestedIndex) && fs.statSync(nestedIndex).isFile()) {
+          return nestedIndex;
+        }
+      }
+    }
+  } catch {
+    return null;
+  }
+
+  if (!relativePath || !path.extname(relativePath)) {
+    return PACKAGED_RENDERER_ENTRY_FILE;
+  }
+  return null;
+}
+
+function handlePackagedRendererRequest(request, response) {
+  const method = String(request?.method ?? "GET").toUpperCase();
+  if (method !== "GET" && method !== "HEAD") {
+    response.writeHead(405, {
+      "Allow": "GET, HEAD",
+      "Content-Type": "text/plain; charset=utf-8",
+    });
+    response.end("Method Not Allowed");
+    return;
+  }
+
+  let requestUrl;
+  try {
+    requestUrl = new URL(request?.url ?? "/", `http://${PACKAGED_RENDERER_HOST}`);
+  } catch {
+    response.writeHead(400, {
+      "Content-Type": "text/plain; charset=utf-8",
+    });
+    response.end("Bad Request");
+    return;
+  }
+
+  const assetPath = resolvePackagedRendererAssetPath(requestUrl.pathname);
+  if (!assetPath) {
+    response.writeHead(404, {
+      "Content-Type": "text/plain; charset=utf-8",
+    });
+    response.end("Not Found");
+    return;
+  }
+
+  fs.promises.readFile(assetPath)
+    .then((content) => {
+      const isEntryFile = assetPath === PACKAGED_RENDERER_ENTRY_FILE;
+      response.writeHead(200, {
+        "Cache-Control": isEntryFile ? "no-cache" : "public, max-age=31536000, immutable",
+        "Content-Type": getPackagedRendererContentType(assetPath),
+      });
+      if (method === "HEAD") {
+        response.end();
+        return;
+      }
+      response.end(content);
+    })
+    .catch((error) => {
+      const statusCode = error && error.code === "ENOENT" ? 404 : 500;
+      response.writeHead(statusCode, {
+        "Content-Type": "text/plain; charset=utf-8",
+      });
+      response.end(statusCode === 404 ? "Not Found" : "Internal Server Error");
+    });
+}
+
+function startPackagedRendererServer() {
+  if (!app.isPackaged) {
+    return Promise.resolve(null);
+  }
+  if (packagedRendererServerOrigin) {
+    return Promise.resolve(packagedRendererServerOrigin);
+  }
+  if (packagedRendererServerStartPromise) {
+    return packagedRendererServerStartPromise;
+  }
+  packagedRendererServerStartPromise = new Promise((resolve, reject) => {
+    if (!fs.existsSync(PACKAGED_RENDERER_ENTRY_FILE)) {
+      packagedRendererServerStartPromise = null;
+      reject(new Error(`Packaged renderer entry not found: ${PACKAGED_RENDERER_ENTRY_FILE}`));
+      return;
+    }
+
+    const server = http.createServer(handlePackagedRendererRequest);
+    server.once("error", (error) => {
+      if (packagedRendererServer === server) {
+        packagedRendererServer = null;
+      }
+      packagedRendererServerOrigin = null;
+      packagedRendererServerStartPromise = null;
+      reject(error);
+    });
+    server.listen(0, PACKAGED_RENDERER_HOST, () => {
+      const addressInfo = server.address();
+      if (!addressInfo || typeof addressInfo === "string") {
+        server.close();
+        packagedRendererServerStartPromise = null;
+        reject(new Error("Could not resolve packaged renderer local server address."));
+        return;
+      }
+
+      packagedRendererServer = server;
+      packagedRendererServerOrigin = `http://${PACKAGED_RENDERER_HOST}:${addressInfo.port}`;
+      packagedRendererServerStartPromise = null;
+      resolve(packagedRendererServerOrigin);
+    });
+  });
+  return packagedRendererServerStartPromise;
+}
+
+function stopPackagedRendererServer() {
+  const server = packagedRendererServer;
+  packagedRendererServer = null;
+  packagedRendererServerOrigin = null;
+  packagedRendererServerStartPromise = null;
+  if (!server) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    server.close(() => resolve());
+  });
+}
+
 function getSecureAllowedNavigationOrigins() {
   const origins = new Set();
   for (const originValue of EXTRA_ALLOWED_HTTPS_ORIGINS) {
@@ -289,6 +477,10 @@ function getSecureAllowedNavigationOrigins() {
     if (origin) {
       origins.add(origin);
     }
+  }
+  const packagedOrigin = getPackagedRendererOrigin();
+  if (packagedOrigin) {
+    origins.add(packagedOrigin);
   }
   if (!app.isPackaged) {
     const rendererUrl = process.env.ELECTRON_RENDERER_URL || DEV_SERVER_URL;
@@ -328,10 +520,7 @@ function isAllowedNavigationUrl(rawUrl) {
     return true;
   }
   const allowedOrigins = getSecureAllowedNavigationOrigins();
-  if (!app.isPackaged && (parsedUrl.protocol === "http:" || parsedUrl.protocol === "https:")) {
-    return allowedOrigins.has(parsedUrl.origin);
-  }
-  if (parsedUrl.protocol === "https:") {
+  if (parsedUrl.protocol === "http:" || parsedUrl.protocol === "https:") {
     return allowedOrigins.has(parsedUrl.origin);
   }
   return false;
@@ -352,10 +541,7 @@ function isTrustedPermissionRequestUrl(rawUrl) {
     return true;
   }
   const allowedOrigins = getSecureAllowedNavigationOrigins();
-  if (!app.isPackaged && (parsedUrl.protocol === "http:" || parsedUrl.protocol === "https:")) {
-    return allowedOrigins.has(parsedUrl.origin);
-  }
-  if (parsedUrl.protocol === "https:") {
+  if (parsedUrl.protocol === "http:" || parsedUrl.protocol === "https:") {
     return allowedOrigins.has(parsedUrl.origin);
   }
   return false;
@@ -394,6 +580,11 @@ function shouldApplyRendererCspHeader(details) {
   }
 
   if (!app.isPackaged && (parsedUrl.origin === "http://localhost:5173" || parsedUrl.origin === "http://127.0.0.1:5173")) {
+    return true;
+  }
+
+  const packagedOrigin = getPackagedRendererOrigin();
+  if (packagedOrigin && parsedUrl.origin === packagedOrigin) {
     return true;
   }
 
@@ -3357,7 +3548,21 @@ function createMainWindow() {
     return mainWindow;
   }
 
-  mainWindow.loadFile(path.join(__dirname, "..", "dist", "index.html"));
+  void startPackagedRendererServer()
+    .then((rendererOrigin) => {
+      if (mainWindow.isDestroyed() || !rendererOrigin) {
+        return;
+      }
+      return mainWindow.loadURL(`${rendererOrigin}/`);
+    })
+    .catch((error) => {
+      const message = error instanceof Error ? error.message : String(error ?? "unknown");
+      console.error(`[electron] packaged renderer local server failed: ${message}`);
+      if (mainWindow.isDestroyed()) {
+        return;
+      }
+      return mainWindow.loadFile(PACKAGED_RENDERER_ENTRY_FILE);
+    });
   return mainWindow;
 }
 
@@ -3478,6 +3683,7 @@ app.whenReady().then(async () => {
 
 app.on("before-quit", () => {
   isAppQuitting = true;
+  void stopPackagedRendererServer();
   notificationManager?.dispose?.();
   notificationManager = null;
   notificationNavigationCoordinator.dispose();
