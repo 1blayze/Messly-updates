@@ -32,6 +32,17 @@ interface TurnstileApi {
   remove: (widgetId?: string) => void;
 }
 
+export interface TurnstileDiagnosticEvent {
+  code: string;
+  message: string;
+  attempt: number;
+  timestamp: string;
+  online: boolean;
+  visibilityState: string;
+  runtime: "desktop" | "web";
+  rawError: string | null;
+}
+
 declare global {
   interface Window {
     turnstile?: TurnstileApi;
@@ -44,6 +55,53 @@ function resolveRetryDelayMs(retryCount: number): number {
   const normalizedRetryCount = Math.max(0, Math.trunc(retryCount));
   const exponentialFactor = Math.min(normalizedRetryCount, 4);
   return Math.min(TURNSTILE_RETRY_MAX_DELAY_MS, TURNSTILE_RETRY_BASE_DELAY_MS * 2 ** exponentialFactor);
+}
+
+function normalizeErrorMessage(error: unknown): string {
+  if (error instanceof Error && String(error.message ?? "").trim()) {
+    return String(error.message).trim();
+  }
+  return String(error ?? "unknown").trim() || "unknown";
+}
+
+function classifyTurnstileError(error: unknown): { code: string; message: string; rawError: string } {
+  const rawError = normalizeErrorMessage(error);
+  const normalized = rawError.toLowerCase();
+
+  if (normalized.includes("timed out")) {
+    return {
+      code: "TURNSTILE_SCRIPT_TIMEOUT",
+      message: "Tempo limite ao carregar a verificacao de seguranca.",
+      rawError,
+    };
+  }
+  if (normalized.includes("did not initialize")) {
+    return {
+      code: "TURNSTILE_API_NOT_INITIALIZED",
+      message: "Script do Turnstile carregou, mas a API nao inicializou.",
+      rawError,
+    };
+  }
+  if (normalized.includes("failed to load")) {
+    return {
+      code: "TURNSTILE_SCRIPT_LOAD_FAILED",
+      message: "Falha ao carregar o script do Turnstile.",
+      rawError,
+    };
+  }
+  if (normalized.includes("render unavailable")) {
+    return {
+      code: "TURNSTILE_RENDER_UNAVAILABLE",
+      message: "API do Turnstile indisponivel para renderizacao.",
+      rawError,
+    };
+  }
+
+  return {
+    code: "TURNSTILE_UNKNOWN_ERROR",
+    message: "Falha inesperada ao iniciar a verificacao de seguranca.",
+    rawError,
+  };
 }
 
 function removeTurnstileScriptElement(): void {
@@ -166,12 +224,13 @@ interface TurnstileWidgetProps {
   onError?: () => void;
   onExpire?: () => void;
   onTimeout?: () => void;
+  onDiagnostic?: (event: TurnstileDiagnosticEvent) => void;
   showErrors?: boolean;
   className?: string;
 }
 
 function TurnstileWidgetInner(
-  { siteKey, onVerify, onError, onExpire, onTimeout, showErrors = true, className }: TurnstileWidgetProps,
+  { siteKey, onVerify, onError, onExpire, onTimeout, onDiagnostic, showErrors = true, className }: TurnstileWidgetProps,
   forwardedRef: ForwardedRef<TurnstileWidgetHandle>,
 ) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -184,6 +243,7 @@ function TurnstileWidgetInner(
     onError,
     onExpire,
     onTimeout,
+    onDiagnostic,
   });
   const [isLoading, setIsLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -193,6 +253,7 @@ function TurnstileWidgetInner(
     onError,
     onExpire,
     onTimeout,
+    onDiagnostic,
   };
 
   useImperativeHandle(
@@ -225,6 +286,53 @@ function TurnstileWidgetInner(
     setIsLoading(true);
     setLoadError(null);
     retryCountRef.current = 0;
+
+    const reportDiagnostic = (
+      code: string,
+      message: string,
+      attempt: number,
+      rawError: string | null = null,
+      level: "info" | "warn" | "error" = "warn",
+      extraDetails: Record<string, unknown> = {},
+    ) => {
+      const runtime = window.electronAPI ? "desktop" : "web";
+      const payload: TurnstileDiagnosticEvent = {
+        code,
+        message,
+        attempt,
+        timestamp: new Date().toISOString(),
+        online: Boolean(navigator.onLine),
+        visibilityState: String(document.visibilityState ?? "unknown"),
+        runtime,
+        rawError,
+      };
+
+      callbacksRef.current.onDiagnostic?.(payload);
+
+      if (import.meta.env.DEV) {
+        const details = { ...payload, ...extraDetails };
+        if (level === "error") {
+          console.error("[turnstile:diagnostic]", details);
+        } else if (level === "warn") {
+          console.warn("[turnstile:diagnostic]", details);
+        } else {
+          console.info("[turnstile:diagnostic]", details);
+        }
+      }
+
+      const logDiagnostic = window.electronAPI?.logDiagnostic;
+      if (typeof logDiagnostic === "function") {
+        void logDiagnostic({
+          source: "turnstile",
+          event: code,
+          level,
+          details: {
+            ...payload,
+            ...extraDetails,
+          },
+        }).catch(() => undefined);
+      }
+    };
 
     const renderWidget = () => {
       if (cancelled || renderInFlightRef.current) {
@@ -268,18 +376,35 @@ function TurnstileWidgetInner(
               if (cancelled) {
                 return;
               }
+              reportDiagnostic(
+                "TURNSTILE_WIDGET_ERROR_CALLBACK",
+                "Turnstile retornou callback de erro.",
+                retryCountRef.current + 1,
+              );
               callbacksRef.current.onError?.();
             },
             "expired-callback": () => {
               if (cancelled) {
                 return;
               }
+              reportDiagnostic(
+                "TURNSTILE_WIDGET_EXPIRED",
+                "Token do Turnstile expirou.",
+                retryCountRef.current + 1,
+                null,
+                "info",
+              );
               callbacksRef.current.onExpire?.();
             },
             "timeout-callback": () => {
               if (cancelled) {
                 return;
               }
+              reportDiagnostic(
+                "TURNSTILE_WIDGET_TIMEOUT",
+                "Turnstile atingiu timeout de interacao.",
+                retryCountRef.current + 1,
+              );
               callbacksRef.current.onTimeout?.();
             },
           });
@@ -288,19 +413,32 @@ function TurnstileWidgetInner(
           setLoadError(null);
           setIsLoading(false);
         })
-        .catch(() => {
+        .catch((error) => {
           if (cancelled) {
             return;
           }
 
+          const classified = classifyTurnstileError(error);
           retryCountRef.current += 1;
           if (retryTimerRef.current !== null) {
             clearTimeout(retryTimerRef.current);
             retryTimerRef.current = null;
           }
 
+          reportDiagnostic(
+            classified.code,
+            classified.message,
+            retryCountRef.current,
+            classified.rawError,
+            "warn",
+            {
+              retryDelayMs: resolveRetryDelayMs(retryCountRef.current),
+              siteKeyConfigured: Boolean(normalizedSiteKey),
+            },
+          );
+
           if (showErrors && retryCountRef.current >= TURNSTILE_ERROR_VISIBLE_AFTER_RETRIES) {
-            setLoadError("Nao foi possivel iniciar a verificacao. Tentando novamente...");
+            setLoadError(`${classified.message} Tentando novamente...`);
           } else {
             setLoadError(null);
           }
@@ -339,14 +477,42 @@ function TurnstileWidgetInner(
       }
     };
 
+    const handleSecurityPolicyViolation = (event: Event) => {
+      if (typeof SecurityPolicyViolationEvent === "undefined" || !(event instanceof SecurityPolicyViolationEvent)) {
+        return;
+      }
+      const blockedUri = String(event.blockedURI ?? "").toLowerCase();
+      const violatedDirective = String(event.violatedDirective ?? "");
+      const effectiveDirective = String(event.effectiveDirective ?? "");
+
+      if (!blockedUri.includes("challenges.cloudflare.com")) {
+        return;
+      }
+
+      reportDiagnostic(
+        "TURNSTILE_CSP_BLOCKED",
+        "Turnstile bloqueado pela Content Security Policy.",
+        retryCountRef.current + 1,
+        null,
+        "error",
+        {
+          blockedUri,
+          violatedDirective,
+          effectiveDirective,
+        },
+      );
+    };
+
     window.addEventListener("online", handleOnline);
     document.addEventListener("visibilitychange", handleVisibilityChange);
+    document.addEventListener("securitypolicyviolation", handleSecurityPolicyViolation as EventListener);
     renderWidget();
 
     return () => {
       cancelled = true;
       window.removeEventListener("online", handleOnline);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
+      document.removeEventListener("securitypolicyviolation", handleSecurityPolicyViolation as EventListener);
       if (retryTimerRef.current !== null) {
         clearTimeout(retryTimerRef.current);
         retryTimerRef.current = null;

@@ -2853,6 +2853,33 @@ async function getPendingSpotifyOAuthCallbackHandler(_event, payload) {
   return consumePendingSpotifyOAuthCallback(consume);
 }
 
+async function logRendererDiagnosticsHandler(_event, payload) {
+  const source = String(payload?.source ?? "renderer").trim() || "renderer";
+  const event = String(payload?.event ?? "unknown").trim() || "unknown";
+  const levelRaw = String(payload?.level ?? "info").trim().toLowerCase();
+  const level = ["debug", "info", "warn", "error"].includes(levelRaw) ? levelRaw : "info";
+  const details =
+    payload?.details && typeof payload.details === "object" && !Array.isArray(payload.details)
+      ? payload.details
+      : {};
+
+  const line = `[diagnostics:${source}] ${event}`;
+  if (level === "debug") {
+    console.debug(line, details);
+  } else if (level === "warn") {
+    console.warn(line, details);
+  } else if (level === "error") {
+    console.error(line, details);
+  } else {
+    console.info(line, details);
+  }
+
+  return {
+    ok: true,
+    recordedAt: new Date().toISOString(),
+  };
+}
+
 function getSpotifyPresenceServiceOrThrow() {
   if (!spotifyPresenceService) {
     throw new Error("Spotify presence service unavailable.");
@@ -2886,6 +2913,7 @@ function registerIpcHandlers() {
   ipcMain.removeHandler("auth:refresh-token:get");
   ipcMain.removeHandler("auth:refresh-token:set");
   ipcMain.removeHandler("auth:refresh-token:remove");
+  ipcMain.removeHandler("diagnostics:log");
   ipcMain.removeHandler("app:get-startup-snapshot");
   ipcMain.removeHandler("spotify:get-pending-callback");
   ipcMain.removeHandler("spotify:presence:get-state");
@@ -3009,6 +3037,7 @@ function registerIpcHandlers() {
   ipcMain.handle("auth:refresh-token:remove", async () => {
     return removeSecureAuthStorageValue(REFRESH_TOKEN_STORAGE_KEY);
   });
+  ipcMain.handle("diagnostics:log", logRendererDiagnosticsHandler);
   ipcMain.handle("app:get-startup-snapshot", async () => {
     return buildStartupSnapshot();
   });

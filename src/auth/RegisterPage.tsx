@@ -220,6 +220,7 @@ export default function RegisterPage() {
   const [captchaError, setCaptchaError] = useState<string | null>(null);
   const [verificationState, setVerificationState] = useState<CaptchaVerificationState>("idle");
   const [registrationFingerprint, setRegistrationFingerprint] = useState<string>("");
+  const [captchaDiagnostic, setCaptchaDiagnostic] = useState<string | null>(null);
 
   useEffect(() => {
     if (resendCooldown <= 0) {
@@ -716,6 +717,7 @@ export default function RegisterPage() {
                   onVerify={(token) => {
                     setTurnstileToken(token);
                     setVerificationState("verified");
+                    setCaptchaDiagnostic(null);
                     if (requiresSignupSecurityVerification) {
                       setCaptchaError(null);
                     }
@@ -743,12 +745,24 @@ export default function RegisterPage() {
                       turnstileRef.current?.reset();
                     }
                   }}
+                  onDiagnostic={(event) => {
+                    const parts = [
+                      event.code,
+                      `tentativa=${event.attempt}`,
+                      `online=${event.online ? "1" : "0"}`,
+                      event.rawError ? `erro=${event.rawError}` : "",
+                    ].filter(Boolean);
+                    setCaptchaDiagnostic(parts.join(" | "));
+                  }}
                 />
                 {!registrationFingerprint && requiresSignupSecurityVerification ? (
                   <p className="auth-note">Preparando verificacao do dispositivo...</p>
                 ) : null}
                 {!requiresSignupSecurityVerification ? (
                   <p className="auth-note">Verificacao de seguranca opcional no aplicativo instalado.</p>
+                ) : null}
+                {captchaDiagnostic ? (
+                  <p className="auth-note auth-note--diagnostic">Diagnostico captcha: {captchaDiagnostic}</p>
                 ) : null}
                 {captchaError ? <p className="auth-feedback auth-feedback--error">{captchaError}</p> : null}
               </div>

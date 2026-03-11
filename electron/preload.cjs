@@ -64,6 +64,7 @@ const electronAPI = Object.freeze({
   getSecureStoreItem: (payload) => ipcRenderer.invoke("auth:storage:get", payload),
   setSecureStoreItem: (payload) => ipcRenderer.invoke("auth:storage:set", payload),
   removeSecureStoreItem: (payload) => ipcRenderer.invoke("auth:storage:remove", payload),
+  logDiagnostic: (payload) => ipcRenderer.invoke("diagnostics:log", payload),
   onUpdaterStateChanged: (listener) => {
     if (typeof listener !== "function") {
       return () => {};

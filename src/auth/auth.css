@@ -449,6 +449,13 @@
   line-height: 1.4;
 }
 
+.auth-note--diagnostic {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
 .auth-feedback {
   font-family: var(--font-sans);
   font-size: 13px;

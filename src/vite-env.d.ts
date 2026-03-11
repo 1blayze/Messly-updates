@@ -350,6 +350,18 @@ interface RemoveSecureStoreItemResult {
   persistent: boolean;
 }
 
+interface RendererDiagnosticPayload {
+  source: string;
+  event: string;
+  level?: "debug" | "info" | "warn" | "error";
+  details?: Record<string, unknown>;
+}
+
+interface RendererDiagnosticResult {
+  ok: boolean;
+  recordedAt: string;
+}
+
 interface MesslyAuthApi {
   saveRefreshToken?: (token: string) => Promise<void>;
   loadRefreshToken?: () => Promise<string | null>;
@@ -396,6 +408,7 @@ interface ElectronApi {
   getSecureStoreItem?: (payload: SecureStoreItemPayload) => Promise<SecureStoreItemResult>;
   setSecureStoreItem?: (payload: SetSecureStoreItemPayload) => Promise<SetSecureStoreItemResult>;
   removeSecureStoreItem?: (payload: RemoveSecureStoreItemPayload) => Promise<RemoveSecureStoreItemResult>;
+  logDiagnostic?: (payload: RendererDiagnosticPayload) => Promise<RendererDiagnosticResult>;
   onUpdaterStateChanged?: (listener: (state: AppUpdaterState) => void) => () => void;
   onSpotifyOAuthCallback?: (listener: (payload: SpotifyOAuthCallbackPayload) => void) => () => void;
   onSpotifyPresenceUpdate?: (listener: (payload: SpotifyPresenceUpdatePayload) => void) => () => void;
