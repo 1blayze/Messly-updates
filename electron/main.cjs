@@ -269,7 +269,7 @@ const ALLOWED_APP_PERMISSIONS = Object.freeze(["media", "display-capture"]);
 const WINDOWS_FIREWALL_RULE_NAME = String(process.env.MESSLY_FIREWALL_RULE_NAME ?? DEFAULT_FIREWALL_RULE_NAME).trim() || DEFAULT_FIREWALL_RULE_NAME;
 const WINDOWS_FIREWALL_PROFILE = String(process.env.MESSLY_FIREWALL_PROFILE ?? DEFAULT_FIREWALL_PROFILE).trim().toLowerCase() || DEFAULT_FIREWALL_PROFILE;
 const DEFAULT_PUBLIC_API_BASE_URL = "https://messly.site";
-const DEFAULT_PUBLIC_GATEWAY_URL = "wss://messly.site/gateway";
+const DEFAULT_PUBLIC_GATEWAY_URL = "wss://gateway.messly.site/gateway";
 
 function resolveAppIconPath(fileName) {
   const iconPath = path.join(APP_ICONS_DIR, fileName);

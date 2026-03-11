@@ -62,6 +62,7 @@ function parseGatewayFrame(raw: string): GatewayFrame | null {
 export class GatewayClient {
   private readonly options: GatewayClientOptions;
   private ws: WebSocket | null = null;
+  private activeSocketUrl: string | null = null;
   private heartbeat: GatewayHeartbeat | null = null;
   private reconnectTimerId: number | null = null;
   private intentionalClose = false;
@@ -115,32 +116,73 @@ export class GatewayClient {
   }
 
   async connect(): Promise<void> {
-    if (!this.options.url) {
+    const resolvedSocketUrl = this.normalizeSocketUrl(this.options.url);
+    if (!resolvedSocketUrl) {
       this.updateState({
         status: "disabled",
-        lastError: "VITE_MESSLY_GATEWAY_URL nao configurada.",
+        lastError: "VITE_MESSLY_GATEWAY_URL nao configurada ou invalida.",
+      });
+      this.log("warn", "gateway websocket url ausente/invalida", {
+        configuredUrl: this.options.url ?? null,
+        environment: this.getEnvironmentLabel(),
       });
       return;
     }
 
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+      this.log("info", "conexao websocket ja ativa/pendente", {
+        url: this.activeSocketUrl,
+        readyState: this.ws.readyState,
+      });
       return;
     }
 
     this.intentionalClose = false;
     this.clearReconnectTimer();
+    this.activeSocketUrl = resolvedSocketUrl;
+
+    const frontendOrigin = typeof window !== "undefined" ? window.location.origin : null;
+    const frontendHostname = typeof window !== "undefined" ? window.location.hostname : null;
+    try {
+      const parsedGatewayUrl = new URL(resolvedSocketUrl);
+      if (frontendHostname && parsedGatewayUrl.hostname === frontendHostname && parsedGatewayUrl.pathname === "/gateway") {
+        this.log("warn", "gateway aponta para o mesmo host do frontend; verifique fallback SPA/proxy do Pages", {
+          gatewayUrl: resolvedSocketUrl,
+          frontendOrigin,
+        });
+      }
+    } catch {
+      // URL ja validada em normalizeSocketUrl; sem acao adicional.
+    }
+
     this.updateState({
       status: this.state.reconnectAttempt > 0 ? "reconnecting" : "connecting",
       lastError: null,
     });
 
-    this.ws = new WebSocket(this.options.url);
+    this.log("info", "abrindo websocket do gateway", {
+      url: resolvedSocketUrl,
+      environment: this.getEnvironmentLabel(),
+      platform: this.getPlatformLabel(),
+      reconnectAttempt: this.state.reconnectAttempt,
+    });
+
+    this.ws = new WebSocket(resolvedSocketUrl);
+    this.ws.onopen = () => {
+      this.log("info", "websocket conectado", {
+        url: resolvedSocketUrl,
+      });
+    };
     this.ws.onmessage = (event) => this.handleMessage(String(event.data ?? ""));
-    this.ws.onclose = () => this.handleClose();
-    this.ws.onerror = () => {
+    this.ws.onclose = (event) => this.handleClose(event);
+    this.ws.onerror = (event) => {
       this.updateState({
         status: "error",
         lastError: "Falha na conexao WebSocket do gateway.",
+      });
+      this.log("error", "erro de websocket do gateway", {
+        url: resolvedSocketUrl,
+        eventType: event.type,
       });
     };
   }
@@ -153,6 +195,7 @@ export class GatewayClient {
       this.ws.close();
     }
     this.ws = null;
+    this.activeSocketUrl = null;
     this.updateState({
       status: "closed",
     });
@@ -301,9 +344,24 @@ export class GatewayClient {
     }
   }
 
-  private handleClose(): void {
+  private handleClose(event?: CloseEvent): void {
     this.stopHeartbeat();
+    const closeCode = typeof event?.code === "number" ? event.code : null;
+    const closeReason = String(event?.reason ?? "").trim() || null;
+    const closeWasClean = typeof event?.wasClean === "boolean" ? event.wasClean : null;
+    const socketUrl = this.activeSocketUrl;
     this.ws = null;
+    this.activeSocketUrl = null;
+
+    this.log("warn", "websocket do gateway fechado", {
+      url: socketUrl,
+      code: closeCode,
+      reason: closeReason,
+      wasClean: closeWasClean,
+      intentionalClose: this.intentionalClose,
+      reconnectAttempt: this.state.reconnectAttempt,
+    });
+
     if (this.intentionalClose) {
       this.updateState({
         status: "closed",
@@ -311,7 +369,9 @@ export class GatewayClient {
       return;
     }
 
-    this.scheduleReconnect(this.state.lastError ?? "Gateway desconectado.");
+    const fallbackCloseReason = closeCode ? `Gateway desconectado (close code ${closeCode}).` : "Gateway desconectado.";
+    const reconnectReason = this.state.lastError ?? closeReason ?? fallbackCloseReason;
+    this.scheduleReconnect(reconnectReason);
   }
 
   private sendFrame(frame: GatewayFrame): void {
@@ -342,6 +402,57 @@ export class GatewayClient {
     this.scheduleReconnect(reason);
   }
 
+  private normalizeSocketUrl(valueRaw: string | null | undefined): string | null {
+    const value = String(valueRaw ?? "").trim();
+    if (!value) {
+      return null;
+    }
+
+    const withProtocol = /^[a-z][a-z0-9+\-.]*:\/\//i.test(value) ? value : `wss://${value}`;
+
+    try {
+      const parsed = new URL(withProtocol);
+      if (parsed.protocol === "http:") {
+        parsed.protocol = "ws:";
+      } else if (parsed.protocol === "https:") {
+        parsed.protocol = "wss:";
+      }
+
+      if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
+        return null;
+      }
+
+      const trimmedPath = parsed.pathname.replace(/\/+$/, "");
+      if (!trimmedPath || trimmedPath === "/") {
+        parsed.pathname = "/gateway";
+      } else {
+        parsed.pathname = trimmedPath.startsWith("/") ? trimmedPath : `/${trimmedPath}`;
+      }
+      parsed.hash = "";
+      parsed.search = "";
+
+      return parsed.toString().replace(/\/+$/, "");
+    } catch {
+      return null;
+    }
+  }
+
+  private getEnvironmentLabel(): "production" | "development" {
+    return import.meta.env.PROD ? "production" : "development";
+  }
+
+  private getPlatformLabel(): string {
+    if (typeof window === "undefined") {
+      return "unknown";
+    }
+    return String(window.electronAPI?.platform ?? "web");
+  }
+
+  private log(level: "info" | "warn" | "error", message: string, context: Record<string, unknown>): void {
+    const logger = level === "error" ? console.error : level === "warn" ? console.warn : console.info;
+    logger(`[gateway:client] ${message}`, context);
+  }
+
   private scheduleReconnect(reason: string): void {
     this.stopHeartbeat();
     this.clearReconnectTimer();
@@ -364,6 +475,13 @@ export class GatewayClient {
       status: "reconnecting",
       reconnectAttempt: nextAttempt,
       lastError,
+    });
+    this.log("warn", "agendando reconexao websocket", {
+      reason: lastError,
+      reconnectAttempt: nextAttempt,
+      delayMs,
+      useSlowBackoff,
+      url: this.activeSocketUrl ?? this.options.url ?? null,
     });
 
     this.reconnectTimerId = window.setTimeout(() => {

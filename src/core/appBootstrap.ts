@@ -85,6 +85,7 @@ async function warmSupabaseRealtime(): Promise<void> {
 }
 
 let appShellWarmupPromise: Promise<unknown> | null = null;
+let directMessagesSidebarWarmupPromise: Promise<unknown> | null = null;
 let directMessageChatWarmupPromise: Promise<unknown> | null = null;
 
 function warmAppShellChunk(): Promise<unknown> {
@@ -92,6 +93,13 @@ function warmAppShellChunk(): Promise<unknown> {
     appShellWarmupPromise = import("../app/AppShell");
   }
   return appShellWarmupPromise;
+}
+
+function warmDirectMessagesSidebarChunk(): Promise<unknown> {
+  if (!directMessagesSidebarWarmupPromise) {
+    directMessagesSidebarWarmupPromise = import("../components/layout/DirectMessagesSidebar");
+  }
+  return directMessagesSidebarWarmupPromise;
 }
 
 function warmDirectMessageChatChunk(): Promise<unknown> {
@@ -307,12 +315,22 @@ class AppBootstrapController {
       ]);
       hydrateStoreFromRuntimeCache(cacheSnapshot);
 
-      if (!updateRunning("Preparando interface", 0.72, "Aquecendo shell inicial")) {
+      if (!updateRunning("Preparando interface", 0.72, "Aquecendo componentes principais")) {
         return;
       }
       await runOptionalTask("app-shell", async () => {
         await warmAppShellChunk();
       });
+      await runOptionalTask("dm-sidebar", async () => {
+        await warmDirectMessagesSidebarChunk();
+      });
+      await runOptionalTask("chat-view", async () => {
+        await warmDirectMessageChatChunk();
+      });
+
+      if (!updateRunning("Finalizando inicializacao", 0.94, "Consolidando dados essenciais")) {
+        return;
+      }
 
       if (!this.isRunCurrent(currentRunId)) {
         return;
@@ -369,9 +387,6 @@ class AppBootstrapController {
       runDeferred("profile", async () => {
         await fetchProfileById(userId).catch(() => null);
       });
-      runDeferred("chat-view-chunk", async () => {
-        await warmDirectMessageChatChunk();
-      }, 140);
     };
 
     this.runningPromise = execute()

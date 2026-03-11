@@ -23,7 +23,7 @@ Cadastre no projeto do Cloudflare Pages:
 - `VITE_SUPABASE_PUBLISHABLE_KEY` (ou `VITE_SUPABASE_ANON_KEY`, legado)
 - `VITE_MESSLY_API_URL` = `https://messly.site`
 - `VITE_MESSLY_AUTH_API_URL` = `https://messly.site`
-- `VITE_MESSLY_GATEWAY_URL` = `wss://messly.site`
+- `VITE_MESSLY_GATEWAY_URL` = `wss://gateway.messly.site/gateway`
 - `VITE_MESSLY_CDN_URL` = `https://cdn.messly.site`
 - `VITE_MESSLY_ASSETS_URL` = `https://messly.site`
 - `VITE_TURNSTILE_SITE_KEY`
@@ -33,6 +33,18 @@ Cadastre no projeto do Cloudflare Pages:
 Opcional para acelerar install de dependencias no CI:
 
 - `ELECTRON_SKIP_BINARY_DOWNLOAD` = `1`
+
+## 3.1) Gateway WebSocket em subdominio dedicado (obrigatorio)
+
+Nao publique o gateway em `wss://messly.site/gateway` quando o frontend estiver no Cloudflare Pages.
+Com SPA fallback (`/* /index.html 200`), a rota `/gateway` pode ser capturada pelo app estatico e responder `200`, quebrando o handshake WebSocket.
+
+Padrao recomendado:
+
+- Frontend: `https://messly.site` (Cloudflare Pages)
+- Gateway: `wss://gateway.messly.site/gateway` (servico Node/WS ou Worker dedicado)
+
+Garanta no Cloudflare DNS/proxy que `gateway.messly.site` aponta para o servico que aceita upgrade WebSocket.
 
 ## 4) SPA fallback e headers
 
@@ -46,11 +58,12 @@ Ja incluido no projeto:
 1. Faca push para `main` no GitHub.
 2. No Cloudflare Pages, habilite deploy automatico da branch `main`.
 3. Adicione dominio customizado `messly.site`.
-4. Aguarde o deploy e valide:
+4. Configure (ou atualize) o subdominio `gateway.messly.site` apontando para o backend de gateway.
+5. Aguarde o deploy e valide:
    - login
    - cadastro
    - captcha
-   - realtime
+   - realtime (via `wss://gateway.messly.site/gateway`)
    - upload de midia
 
 ## 6) Observacoes

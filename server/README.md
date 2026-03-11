@@ -43,3 +43,4 @@ npx tsc --pretty false --noEmit -p server/tsconfig.server.json
 ## Runtime
 
 - O cliente renderer deve apontar `VITE_MESSLY_GATEWAY_URL` para o endpoint WebSocket do gateway, ex: `ws://localhost:8788/gateway`.
+- Em producao com Cloudflare Pages, use subdominio dedicado para evitar fallback SPA no mesmo host do frontend: `wss://gateway.messly.site/gateway`.

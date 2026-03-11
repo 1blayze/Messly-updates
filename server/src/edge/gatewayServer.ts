@@ -171,6 +171,27 @@ export class GatewayServer {
   }
 
   private async handleHttpRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const requestPath = String(request.url ?? "").split("?")[0] ?? "";
+    if (requestPath === "/gateway" || requestPath === "/gateway/") {
+      this.options.logger?.warn("HTTP sem upgrade recebido na rota WebSocket /gateway", {
+        method: request.method ?? "GET",
+        path: requestPath,
+      });
+      response.writeHead(426, {
+        "content-type": "application/json",
+        "cache-control": "no-store",
+        connection: "Upgrade",
+        upgrade: "websocket",
+      });
+      response.end(
+        JSON.stringify({
+          error: "upgrade_required",
+          message: "Use WebSocket upgrade para /gateway.",
+        }),
+      );
+      return;
+    }
+
     const handledByAuthRouter = await this.options.authRouter?.handle(request, response);
     if (handledByAuthRouter) {
       return;

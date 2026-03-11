@@ -4,7 +4,7 @@ export const DOMAIN = "messly.site";
 
 export const API_URL = "https://messly.site";
 export const CDN_URL = "https://messly.site";
-export const GATEWAY_URL = "wss://messly.site";
+export const GATEWAY_URL = "wss://gateway.messly.site/gateway";
 export const ASSETS_URL = "https://messly.site";
 const LOCAL_GATEWAY_HTTP_URL = "http://127.0.0.1:8788";
 const LOCAL_GATEWAY_MEDIA_URL = "http://127.0.0.1:8788/media/public";
@@ -32,9 +32,76 @@ function normalizeUrl(value: string | null | undefined): string | null {
   return canonicalizeMesslyDomainHost(normalized).replace(/\/+$/, "");
 }
 
+function hasExplicitProtocol(value: string): boolean {
+  return /^[a-z][a-z0-9+\-.]*:\/\//i.test(value);
+}
+
+function normalizeGatewaySocketUrl(valueRaw: string | null | undefined): string | null {
+  const value = String(valueRaw ?? "").trim();
+  if (!value) {
+    return null;
+  }
+
+  const candidate = hasExplicitProtocol(value) ? value : `wss://${value}`;
+
+  try {
+    const parsed = new URL(canonicalizeMesslyDomainHost(candidate));
+    if (parsed.protocol === "http:") {
+      parsed.protocol = "ws:";
+    } else if (parsed.protocol === "https:") {
+      parsed.protocol = "wss:";
+    }
+
+    if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
+      return null;
+    }
+
+    parsed.search = "";
+    parsed.hash = "";
+
+    const trimmedPath = parsed.pathname.replace(/\/+$/, "");
+    if (!trimmedPath || trimmedPath === "/") {
+      parsed.pathname = "/gateway";
+    } else {
+      parsed.pathname = trimmedPath.startsWith("/") ? trimmedPath : `/${trimmedPath}`;
+    }
+
+    return parsed.toString().replace(/\/+$/, "");
+  } catch {
+    return null;
+  }
+}
+
 function isLocalHostname(hostnameRaw: string | null | undefined): boolean {
   const hostname = String(hostnameRaw ?? "").trim().toLowerCase();
   return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+}
+
+function isPublicMesslyGatewayHost(hostnameRaw: string | null | undefined): boolean {
+  const hostname = String(hostnameRaw ?? "").trim().toLowerCase();
+  return hostname === "gateway.messly.site" || hostname === "messly.site" || hostname === "www.messly.site";
+}
+
+function shouldPreferLocalGatewayDuringDev(candidateUrlRaw: string | null | undefined): boolean {
+  if (!import.meta.env.DEV || typeof window === "undefined") {
+    return false;
+  }
+
+  if (!isLocalHostname(window.location.hostname)) {
+    return false;
+  }
+
+  const normalizedCandidate = normalizeGatewaySocketUrl(candidateUrlRaw);
+  if (!normalizedCandidate) {
+    return false;
+  }
+
+  try {
+    const parsed = new URL(normalizedCandidate);
+    return !isLocalHostname(parsed.hostname) && isPublicMesslyGatewayHost(parsed.hostname);
+  } catch {
+    return false;
+  }
 }
 
 function shouldUseDevApiProxy(baseUrlRaw: string | null | undefined): boolean {
@@ -101,21 +168,27 @@ export function getAssetsBaseUrl(): string {
 }
 
 export function getGatewaySocketUrl(): string | null {
-  const explicit = normalizeUrl(import.meta.env.VITE_MESSLY_GATEWAY_URL);
+  const explicit = normalizeGatewaySocketUrl(import.meta.env.VITE_MESSLY_GATEWAY_URL);
   if (explicit) {
-    return explicit.endsWith("/gateway") ? explicit : `${explicit}/gateway`;
+    if (shouldPreferLocalGatewayDuringDev(explicit)) {
+      return LOCAL_GATEWAY_WS_URL;
+    }
+    return explicit;
   }
 
-  const runtimeConfigured = getRuntimeGatewayUrl();
+  const runtimeConfigured = normalizeGatewaySocketUrl(getRuntimeGatewayUrl());
   if (runtimeConfigured) {
-    return runtimeConfigured.endsWith("/gateway") ? runtimeConfigured : `${runtimeConfigured}/gateway`;
+    if (shouldPreferLocalGatewayDuringDev(runtimeConfigured)) {
+      return LOCAL_GATEWAY_WS_URL;
+    }
+    return runtimeConfigured;
   }
 
   if (typeof window !== "undefined" && isLocalHostname(window.location.hostname)) {
     return LOCAL_GATEWAY_WS_URL;
   }
 
-  return `${GATEWAY_URL}/gateway`;
+  return normalizeGatewaySocketUrl(GATEWAY_URL);
 }
 
 export function toCdnUrl(fileKey: string): string {

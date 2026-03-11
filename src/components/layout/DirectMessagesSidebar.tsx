@@ -7,7 +7,6 @@ import { useAuthSession } from "../../auth/AuthProvider";
 import {
   getAvatarUrl,
   getBannerUrl,
-  getDefaultAvatarUrl,
   getDefaultBannerUrl,
   getNameAvatarUrl,
   isDefaultAvatarUrl,
@@ -224,7 +223,7 @@ interface CachedSidebarIdentity {
 const SIDEBAR_IDENTITY_CACHE_PREFIX = "messly:sidebar-identity:";
 const DIRECT_MESSAGES_CACHE_PREFIX = "messly:direct-messages:";
 const SIDEBAR_RESOLVED_MEDIA_CACHE_PREFIX = "messly:sidebar-media:";
-const DIRECT_MESSAGES_CACHE_VERSION = 6;
+const DIRECT_MESSAGES_CACHE_VERSION = 8;
 const DM_PRELOAD_LIMIT = 30;             
 const DM_PRELOAD_HOVER_DEBOUNCE_MS = 150; 
 const DM_PRELOAD_MAX_AGE_MS = 90_000;
@@ -407,7 +406,10 @@ function readDirectMessagesCache(userId: string | null | undefined): DirectMessa
         }
         const username = normalizeIdentityUsername(casted.username);
         const displayName = normalizeIdentityDisplayName(casted.displayName, username, username);
-        const avatarSrc = String(casted.avatarSrc ?? "").trim() || getDmDisplayAvatar(displayName, username, userIdValue);
+        const cachedAvatarSrc = String(casted.avatarSrc ?? "").trim();
+        const avatarSrc = !cachedAvatarSrc || isDmFallbackAvatar(cachedAvatarSrc)
+          ? getDmDisplayAvatar(displayName, username, userIdValue)
+          : cachedAvatarSrc;
         const firebaseUid = String((casted as { firebaseUid?: string | null }).firebaseUid ?? "").trim();
         const aboutText = String((casted as { aboutText?: string | null }).aboutText ?? "").trim();
         const bannerColor = normalizeBannerColor((casted as { bannerColor?: string | null }).bannerColor) ?? null;
@@ -583,8 +585,7 @@ function writeSidebarResolvedMediaCache(
 }
 
 function getDmDisplayAvatar(displayName: string, username: string, userId?: string | null): string {
-  const stableSeed = String(userId ?? "").trim();
-  return getNameAvatarUrl(stableSeed || displayName || username || "U");
+  return getNameAvatarUrl(displayName || username || "U");
 }
 
 function isGeneratedInlineAvatarUrl(url: string | null | undefined): boolean {
@@ -593,12 +594,6 @@ function isGeneratedInlineAvatarUrl(url: string | null | undefined): boolean {
 
 function isDmFallbackAvatar(url: string | null | undefined): boolean {
   return isDefaultAvatarUrl(url) || isGeneratedInlineAvatarUrl(url);
-}
-
-function hasDmAvatarSource(targetUser: DmUserRow | undefined, legacyBackupUrl: string): boolean {
-  const avatarKey = String(targetUser?.avatar_key ?? "").trim();
-  const legacyAvatarUrl = String(targetUser?.avatar_url ?? "").trim();
-  return avatarKey.length > 0 || legacyAvatarUrl.length > 0 || legacyBackupUrl.trim().length > 0;
 }
 
 function buildDmAvatarSignature(targetUser: DmUserRow | undefined, legacyBackupUrl: string): string {
@@ -1140,7 +1135,7 @@ export default function DirectMessagesSidebar({
   });
   const [avatarSrc, setAvatarSrc] = useState<string>(() => {
     const cached = readSidebarResolvedMediaCache(sessionUid);
-    return cached?.avatarSrc || getDefaultAvatarUrl(sessionUid);
+    return cached?.avatarSrc || getDmDisplayAvatar(identity.displayName, identity.username, identity.userId);
   });
   const [bannerSrc, setBannerSrc] = useState<string>(() => {
     const cached = readSidebarResolvedMediaCache(sessionUid);
@@ -1484,9 +1479,9 @@ export default function DirectMessagesSidebar({
       setBannerSrc(cached.bannerSrc);
       return;
     }
-    setAvatarSrc(getDefaultAvatarUrl(identity.userId || sessionUid));
+    setAvatarSrc(getDmDisplayAvatar(identity.displayName, identity.username, identity.userId || sessionUid));
     setBannerSrc(getDefaultBannerUrl());
-  }, [identity.userId, sessionUid]);
+  }, [identity.displayName, identity.userId, identity.username, sessionUid]);
 
   useEffect(() => {
     const firebaseUid = sessionUid;
@@ -1797,7 +1792,8 @@ export default function DirectMessagesSidebar({
     const hasAvatarSource = Boolean(String(avatarSource ?? "").trim());
     void getAvatarUrl(identity.userId, avatarSource, identity.avatarHash).then((url) => {
       if (isMounted) {
-        const resolvedUrl = String(url ?? "").trim() || getDefaultAvatarUrl(identity.userId || sessionUid);
+        const resolvedUrl =
+          String(url ?? "").trim() || getDmDisplayAvatar(identity.displayName, identity.username, identity.userId || sessionUid);
         setAvatarSrc((current) => {
           if (current === resolvedUrl) {
             return current;
@@ -1814,7 +1810,7 @@ export default function DirectMessagesSidebar({
     return () => {
       isMounted = false;
     };
-  }, [identity.avatarHash, identity.avatarKey, identity.avatarUrl, identity.userId]);
+  }, [identity.avatarHash, identity.avatarKey, identity.avatarUrl, identity.displayName, identity.userId, identity.username, sessionUid]);
 
   useEffect(() => {
     let isMounted = true;
@@ -1922,10 +1918,7 @@ export default function DirectMessagesSidebar({
         const bannerKey = String(targetUser?.banner_key ?? "").trim() || null;
         const bannerHash = String(targetUser?.banner_hash ?? "").trim() || null;
         const memberSinceAt = String(targetUser?.created_at ?? "").trim() || null;
-        const hasAvatarSource = hasDmAvatarSource(targetUser, "");
-        const placeholderAvatar = hasAvatarSource
-          ? getDefaultAvatarUrl(otherUserId)
-          : getDmDisplayAvatar(displayName, username, otherUserId);
+        const placeholderAvatar = getDmDisplayAvatar(displayName, username, otherUserId);
         const cachedAvatar = getCachedDmAvatar(otherUserId, buildDmAvatarSignature(targetUser, ""));
         const presenceSnapshot = presenceStore.getPresenceSnapshot(otherUserId);
         const basePresence = presenceSnapshot.presenceState;
@@ -2023,7 +2016,6 @@ export default function DirectMessagesSidebar({
           const displayName = normalizeIdentityDisplayName(targetUser?.display_name, username, username);
           const legacyAvatarUrl = String(targetUser?.avatar_url ?? "").trim();
           const backupAvatarUrl = legacyAvatarMap.get(otherUserId) ?? "";
-          const hasAvatarSource = hasDmAvatarSource(targetUser, backupAvatarUrl);
           const signature = buildDmAvatarSignature(targetUser, backupAvatarUrl);
 
           const cachedAvatar = getCachedDmAvatar(otherUserId, signature);
@@ -2049,9 +2041,7 @@ export default function DirectMessagesSidebar({
             setCachedDmAvatar(otherUserId, signature, resolvedAvatar);
             return [otherUserId, resolvedAvatar] as const;
           } catch {
-            const fallbackAvatar = hasAvatarSource
-              ? getDefaultAvatarUrl(otherUserId)
-              : getDmDisplayAvatar(displayName, username, otherUserId);
+            const fallbackAvatar = getDmDisplayAvatar(displayName, username, otherUserId);
             setCachedDmAvatar(otherUserId, signature, fallbackAvatar);
             return [otherUserId, fallbackAvatar] as const;
           }
@@ -2452,7 +2442,7 @@ export default function DirectMessagesSidebar({
   }, [canPreloadMessages, visibleDirectMessages]);
 
   const userCardAvatarSrc = isDefaultAvatarUrl(avatarSrc)
-    ? getDefaultAvatarUrl(identity.userId || identity.username || identity.displayName)
+    ? getDmDisplayAvatar(identity.displayName, identity.username, identity.userId)
     : avatarSrc;
 
   const handleOpenAddFriendModal = (): void => {
@@ -2710,7 +2700,7 @@ export default function DirectMessagesSidebar({
             <div className="friends-sidebar__dm-list" role="list" aria-label="Mensagens diretas">
               {visibleDirectMessages.map((dm) => {
                 const resolvedDisplayName = normalizeIdentityDisplayName(dm.displayName, dm.username, dm.username);
-                const fallbackNameAvatar = getDefaultAvatarUrl(dm.userId || dm.username || resolvedDisplayName);
+                const fallbackNameAvatar = getDmDisplayAvatar(resolvedDisplayName, dm.username, dm.userId);
                 const safeDmAvatarSrc = (() => {
                   const raw = String(dm.avatarSrc ?? "").trim();
                   if (!raw || isDefaultAvatarUrl(raw)) {

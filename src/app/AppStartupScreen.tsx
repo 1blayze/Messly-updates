@@ -1,4 +1,4 @@
-import messlyIcon from "../assets/icons/app/messly-icon.svg";
+import messlyIcon from "../assets/icons/ui/messly.svg";
 import type { AppBootstrapPhase } from "../core/appBootstrap";
 
 interface AppStartupScreenProps {
@@ -35,12 +35,12 @@ export default function AppStartupScreen({
     <section className={`app-bootstrap-screen app-bootstrap-screen--${phase}`} role="status" aria-live="polite">
       <div className="app-bootstrap-screen__backdrop" aria-hidden="true" />
       <div className="app-bootstrap-screen__content">
+        <span className="app-bootstrap-screen__sr-only">
+          {effectiveStatus} - {effectiveDetail}
+        </span>
         <div className="app-bootstrap-screen__logo-wrap" aria-hidden="true">
           <img src={messlyIcon} alt="" className="app-bootstrap-screen__logo" draggable={false} />
         </div>
-        <h1 className="app-bootstrap-screen__title">Messly</h1>
-        <p className="app-bootstrap-screen__status">{effectiveStatus}</p>
-        <p className="app-bootstrap-screen__detail">{effectiveDetail}</p>
         <div className="app-bootstrap-screen__progress-track" aria-hidden="true">
           <span
             className="app-bootstrap-screen__progress-fill"

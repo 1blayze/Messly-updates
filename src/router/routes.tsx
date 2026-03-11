@@ -2,9 +2,9 @@ import { Suspense, lazy, type ReactNode, useEffect, useRef } from "react";
 import { HashRouter, Navigate, Route, Routes } from "react-router-dom";
 import { useAuthSession } from "../auth/AuthProvider";
 import LoginPage from "../auth/LoginPage";
-import AppShellFallback from "../app/AppShellFallback";
 import { useAppBootstrapSnapshot } from "../core/appBootstrap";
 import { markStartupUiReady } from "../app/startupUi";
+import AppStartupScreen from "../app/AppStartupScreen";
 
 type AppShellModule = typeof import("../app/AppShell");
 
@@ -93,10 +93,9 @@ function AuthSurface({ children }: { children: ReactNode }) {
 
 function AuthBootstrapSplash() {
   return (
-    <AppShellFallback
-      statusText="Carregando Messly"
-      detailText="Preparando aplicativo"
-    />
+    <div className="startup-auth-surface" data-messly-startup-surface="shell">
+      <AppStartupScreen statusText="Carregando Messly" detailText="Preparando aplicativo" progress={0.1} phase="running" />
+    </div>
   );
 }
 
@@ -129,7 +128,9 @@ function shouldRenderLoginImmediately(params: {
 
 function AppShellRoute() {
   const { user } = useAuthSession();
+  const bootstrap = useAppBootstrapSnapshot();
   const currentUserId = String(user?.uid ?? "").trim();
+  const isBootstrapReady = bootstrap.phase === "ready" && bootstrap.userId === currentUserId;
 
   if (!currentUserId) {
     return (
@@ -141,13 +142,24 @@ function AppShellRoute() {
     );
   }
 
+  if (!isBootstrapReady) {
+    return (
+      <div className="startup-auth-surface" data-messly-startup-surface="shell">
+        <AppStartupScreen
+          statusText={bootstrap.statusText}
+          detailText={bootstrap.detailText}
+          progress={bootstrap.progress}
+          phase={bootstrap.phase === "idle" ? "running" : bootstrap.phase}
+          errorText={bootstrap.error}
+        />
+      </div>
+    );
+  }
+
   return (
     <Suspense
       fallback={(
-        <AppShellFallback
-          statusText="Carregando Messly"
-          detailText="Carregando interface"
-        />
+        <AppStartupScreen statusText="Carregando Messly" detailText="Abrindo interface" progress={0.98} phase="ready" />
       )}
     >
       <AppShell />

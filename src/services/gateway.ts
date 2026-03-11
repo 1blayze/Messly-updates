@@ -27,6 +27,7 @@ class MesslyGatewayService {
   private unsubscribeState: (() => void) | null = null;
   private unsubscribeFrames: (() => void) | null = null;
   private currentUserId: string | null = null;
+  private lastLoggedStateSignature: string | null = null;
   private readonly subscriptions = new Map<string, GatewaySubscription>();
   private readonly eventListeners = new Map<MesslyGatewayEventType, Set<(payload: unknown) => void>>();
 
@@ -38,9 +39,17 @@ class MesslyGatewayService {
     }
 
     this.currentUserId = normalizedUserId;
+    const resolvedGatewayUrl = getGatewayUrl();
+    console.info("[gateway:service] start", {
+      userId: normalizedUserId,
+      gatewayUrl: resolvedGatewayUrl,
+      environment: import.meta.env.PROD ? "production" : "development",
+      platform: typeof window !== "undefined" ? String(window.electronAPI?.platform ?? "web") : "web",
+    });
+
     if (!this.client) {
       this.client = new GatewayClient({
-        url: getGatewayUrl(),
+        url: resolvedGatewayUrl,
         tokenProvider: getSupabaseAccessToken,
         clientInfo: {
           name: "messly-desktop",
@@ -71,6 +80,7 @@ class MesslyGatewayService {
 
   stop(): void {
     this.currentUserId = null;
+    this.lastLoggedStateSignature = null;
     this.client?.disconnect();
     this.unsubscribeFrames?.();
     this.unsubscribeState?.();
@@ -155,6 +165,18 @@ class MesslyGatewayService {
   }
 
   private handleClientState(state: GatewayClientState): void {
+    const stateSignature = `${state.status}|${state.reconnectAttempt}|${state.lastError ?? ""}|${state.sessionId ?? ""}`;
+    if (stateSignature !== this.lastLoggedStateSignature) {
+      this.lastLoggedStateSignature = stateSignature;
+      console.info("[gateway:service] state", {
+        status: state.status,
+        reconnectAttempt: state.reconnectAttempt,
+        sessionId: state.sessionId,
+        lastError: state.lastError,
+        latencyMs: state.latencyMs,
+      });
+    }
+
     messlyStore.dispatch(
       gatewayActions.gatewayStateChanged({
         status: state.status,

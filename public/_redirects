@@ -1,1 +1,3 @@
+/gateway https://gateway.messly.site/gateway 307
+/gateway/* https://gateway.messly.site/gateway/:splat 307
 /* /index.html 200

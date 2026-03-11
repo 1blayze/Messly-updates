@@ -159,6 +159,7 @@ const INITIAL_MESSAGES_UNAUTHORIZED_COOLDOWN_MS = 15_000;
 const EDGE_LIST_MESSAGES_UNAUTHORIZED_BYPASS_MS = 5 * 60_000;
 const EDGE_SEND_MESSAGES_UNAUTHORIZED_BYPASS_MS = 5 * 60_000;
 const EDGE_DELETE_MESSAGES_UNAUTHORIZED_BYPASS_MS = 5 * 60_000;
+const EDGE_CHAT_MESSAGES_UNAUTHORIZED_BYPASS_STORAGE_KEY = "messly:chat-edge-bypass-until";
 const EDIT_WINDOW_MINUTES = 15;
 const EDIT_WINDOW_MS = EDIT_WINDOW_MINUTES * 60 * 1000;
 const DELETE_WINDOW_HOURS = 24;
@@ -175,6 +176,8 @@ let edgeDeleteMessagesUnauthorizedBypassUntil = 0;
 let initialMessagesCacheAccountId = "guest";
 let initialMessagesPersistentWarmupAccountId: string | null = null;
 let initialMessagesPersistentWarmupPromise: Promise<void> | null = null;
+let edgeChatMessagesUnauthorizedBypassUntil = 0;
+let edgeChatMessagesUnauthorizedBypassHydrated = false;
 
 export interface SendChatMessageInput {
   conversationId: string;
@@ -264,6 +267,10 @@ function isUnauthorizedChatMessagesError(error: unknown): boolean {
 }
 
 function shouldPreferDirectChatAccess(): boolean {
+  if (isEdgeChatMessagesUnauthorizedBypassActive()) {
+    return true;
+  }
+
   if (typeof window === "undefined" || !window.electronAPI) {
     return false;
   }
@@ -280,6 +287,73 @@ function shouldPreferDirectChatAccess(): boolean {
     !getRuntimeAuthApiUrl() &&
     !getRuntimeGatewayUrl()
   );
+}
+
+function hydrateEdgeChatMessagesUnauthorizedBypass(): void {
+  if (edgeChatMessagesUnauthorizedBypassHydrated || typeof window === "undefined") {
+    return;
+  }
+
+  edgeChatMessagesUnauthorizedBypassHydrated = true;
+  try {
+    const raw = Number(window.localStorage.getItem(EDGE_CHAT_MESSAGES_UNAUTHORIZED_BYPASS_STORAGE_KEY) ?? NaN);
+    if (Number.isFinite(raw) && raw > Date.now()) {
+      edgeChatMessagesUnauthorizedBypassUntil = raw;
+    } else {
+      window.localStorage.removeItem(EDGE_CHAT_MESSAGES_UNAUTHORIZED_BYPASS_STORAGE_KEY);
+    }
+  } catch {
+    edgeChatMessagesUnauthorizedBypassUntil = 0;
+  }
+}
+
+function persistEdgeChatMessagesUnauthorizedBypass(until: number): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    if (until > Date.now()) {
+      window.localStorage.setItem(EDGE_CHAT_MESSAGES_UNAUTHORIZED_BYPASS_STORAGE_KEY, String(until));
+      return;
+    }
+    window.localStorage.removeItem(EDGE_CHAT_MESSAGES_UNAUTHORIZED_BYPASS_STORAGE_KEY);
+  } catch {
+    // ignore persistence failures
+  }
+}
+
+function isEdgeChatMessagesUnauthorizedBypassActive(): boolean {
+  if (import.meta.env.DEV) {
+    return true;
+  }
+
+  hydrateEdgeChatMessagesUnauthorizedBypass();
+  if (edgeChatMessagesUnauthorizedBypassUntil <= 0) {
+    return false;
+  }
+
+  if (edgeChatMessagesUnauthorizedBypassUntil <= Date.now()) {
+    edgeChatMessagesUnauthorizedBypassUntil = 0;
+    persistEdgeChatMessagesUnauthorizedBypass(0);
+    return false;
+  }
+
+  return true;
+}
+
+function activateEdgeChatMessagesUnauthorizedBypass(durationMs: number): void {
+  const duration = Number.isFinite(durationMs) ? Math.max(10_000, Math.trunc(durationMs)) : EDGE_LIST_MESSAGES_UNAUTHORIZED_BYPASS_MS;
+  const nextUntil = Date.now() + duration;
+  if (nextUntil > edgeChatMessagesUnauthorizedBypassUntil) {
+    edgeChatMessagesUnauthorizedBypassUntil = nextUntil;
+  }
+  persistEdgeChatMessagesUnauthorizedBypass(edgeChatMessagesUnauthorizedBypassUntil);
+}
+
+function clearEdgeChatMessagesUnauthorizedBypass(): void {
+  edgeChatMessagesUnauthorizedBypassUntil = 0;
+  persistEdgeChatMessagesUnauthorizedBypass(0);
 }
 
 function getInitialMessagesCooldownUntil(conversationId: string): number {
@@ -319,78 +393,51 @@ function clearInitialMessagesUnauthorizedCooldown(conversationId: string): void 
 }
 
 function isEdgeListMessagesUnauthorizedBypassActive(): boolean {
-  if (import.meta.env.DEV) {
-    return true;
-  }
-
-  if (edgeListMessagesUnauthorizedBypassUntil <= 0) {
-    return false;
-  }
-
-  if (edgeListMessagesUnauthorizedBypassUntil <= Date.now()) {
-    edgeListMessagesUnauthorizedBypassUntil = 0;
-    return false;
-  }
-
-  return true;
+  return isEdgeChatMessagesUnauthorizedBypassActive();
 }
 
 function activateEdgeListMessagesUnauthorizedBypass(): void {
   edgeListMessagesUnauthorizedBypassUntil = Date.now() + EDGE_LIST_MESSAGES_UNAUTHORIZED_BYPASS_MS;
+  activateEdgeChatMessagesUnauthorizedBypass(EDGE_LIST_MESSAGES_UNAUTHORIZED_BYPASS_MS);
 }
 
 function clearEdgeListMessagesUnauthorizedBypass(): void {
   edgeListMessagesUnauthorizedBypassUntil = 0;
+  if (edgeSendMessagesUnauthorizedBypassUntil <= Date.now() && edgeDeleteMessagesUnauthorizedBypassUntil <= Date.now()) {
+    clearEdgeChatMessagesUnauthorizedBypass();
+  }
 }
 
 function isEdgeSendMessagesUnauthorizedBypassActive(): boolean {
-  if (import.meta.env.DEV) {
-    return true;
-  }
-
-  if (edgeSendMessagesUnauthorizedBypassUntil <= 0) {
-    return false;
-  }
-
-  if (edgeSendMessagesUnauthorizedBypassUntil <= Date.now()) {
-    edgeSendMessagesUnauthorizedBypassUntil = 0;
-    return false;
-  }
-
-  return true;
+  return isEdgeChatMessagesUnauthorizedBypassActive();
 }
 
 function activateEdgeSendMessagesUnauthorizedBypass(): void {
   edgeSendMessagesUnauthorizedBypassUntil = Date.now() + EDGE_SEND_MESSAGES_UNAUTHORIZED_BYPASS_MS;
+  activateEdgeChatMessagesUnauthorizedBypass(EDGE_SEND_MESSAGES_UNAUTHORIZED_BYPASS_MS);
 }
 
 function clearEdgeSendMessagesUnauthorizedBypass(): void {
   edgeSendMessagesUnauthorizedBypassUntil = 0;
+  if (edgeListMessagesUnauthorizedBypassUntil <= Date.now() && edgeDeleteMessagesUnauthorizedBypassUntil <= Date.now()) {
+    clearEdgeChatMessagesUnauthorizedBypass();
+  }
 }
 
 function isEdgeDeleteMessagesUnauthorizedBypassActive(): boolean {
-  if (import.meta.env.DEV) {
-    return true;
-  }
-
-  if (edgeDeleteMessagesUnauthorizedBypassUntil <= 0) {
-    return false;
-  }
-
-  if (edgeDeleteMessagesUnauthorizedBypassUntil <= Date.now()) {
-    edgeDeleteMessagesUnauthorizedBypassUntil = 0;
-    return false;
-  }
-
-  return true;
+  return isEdgeChatMessagesUnauthorizedBypassActive();
 }
 
 function activateEdgeDeleteMessagesUnauthorizedBypass(): void {
   edgeDeleteMessagesUnauthorizedBypassUntil = Date.now() + EDGE_DELETE_MESSAGES_UNAUTHORIZED_BYPASS_MS;
+  activateEdgeChatMessagesUnauthorizedBypass(EDGE_DELETE_MESSAGES_UNAUTHORIZED_BYPASS_MS);
 }
 
 function clearEdgeDeleteMessagesUnauthorizedBypass(): void {
   edgeDeleteMessagesUnauthorizedBypassUntil = 0;
+  if (edgeListMessagesUnauthorizedBypassUntil <= Date.now() && edgeSendMessagesUnauthorizedBypassUntil <= Date.now()) {
+    clearEdgeChatMessagesUnauthorizedBypass();
+  }
 }
 
 function isFallbackEligibleChatMessagesError(error: unknown): boolean {
@@ -1272,8 +1319,20 @@ export async function listChatMessages(params: {
 
   const accessToken = await authService.getValidatedEdgeAccessToken();
   if (!accessToken) {
-    markInitialMessagesUnauthorizedCooldown(params.conversationId);
-    throw createUnauthenticatedChatMessagesError();
+    activateEdgeListMessagesUnauthorizedBypass();
+    try {
+      const fallbackResponse = await listChatMessagesDirect(params);
+      clearInitialMessagesUnauthorizedCooldown(params.conversationId);
+      if (!params.cursor) {
+        writeInitialMessagesCache(params.conversationId, fallbackResponse);
+      }
+      return fallbackResponse;
+    } catch (directError) {
+      if (isUnauthorizedChatMessagesError(directError)) {
+        markInitialMessagesUnauthorizedCooldown(params.conversationId);
+      }
+      throw directError;
+    }
   }
 
   const payload: ListMessagesRequest = {
@@ -1644,6 +1703,14 @@ export async function sendChatMessage(payload: SendChatMessageInput): Promise<Ch
     return sendChatMessageDirect(payload);
   }
 
+  if (isDirectSendFallbackCandidate(payload)) {
+    const accessToken = await authService.getValidatedEdgeAccessToken();
+    if (!accessToken) {
+      activateEdgeSendMessagesUnauthorizedBypass();
+      return sendChatMessageDirect(payload);
+    }
+  }
+
   const buildRequest = (includePayload: boolean): SendMessageRequest => ({
     action: "send",
     conversationId: payload.conversationId,
@@ -1705,7 +1772,13 @@ export async function sendChatMessage(payload: SendChatMessageInput): Promise<Ch
 }
 
 export async function editChatMessage(messageId: string, content: string): Promise<ChatMessageServer> {
-  if (shouldPreferDirectChatAccess()) {
+  if (shouldPreferDirectChatAccess() || isEdgeChatMessagesUnauthorizedBypassActive()) {
+    return editChatMessageDirect(messageId, content);
+  }
+
+  const accessToken = await authService.getValidatedEdgeAccessToken();
+  if (!accessToken) {
+    activateEdgeDeleteMessagesUnauthorizedBypass();
     return editChatMessageDirect(messageId, content);
   }
 
@@ -1715,13 +1788,21 @@ export async function editChatMessage(messageId: string, content: string): Promi
     content,
   };
 
-  const response = await invokeEdgeJson<EditMessageRequest, MessageMutationResponse>(FUNCTION_NAME, request, {
-    requireAuth: true,
-    retries: 0,
-    timeoutMs: 18_000,
-  });
-
-  return response.message;
+  try {
+    const response = await invokeEdgeJson<EditMessageRequest, MessageMutationResponse>(FUNCTION_NAME, request, {
+      requireAuth: true,
+      retries: 0,
+      timeoutMs: 18_000,
+    });
+    clearEdgeDeleteMessagesUnauthorizedBypass();
+    return response.message;
+  } catch (error) {
+    if (!isUnauthorizedChatMessagesError(error) && !isFallbackEligibleChatMessagesError(error)) {
+      throw error;
+    }
+    activateEdgeDeleteMessagesUnauthorizedBypass();
+    return editChatMessageDirect(messageId, content);
+  }
 }
 
 export async function deleteChatMessage(messageId: string): Promise<ChatMessageServer> {

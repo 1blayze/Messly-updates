@@ -2,6 +2,7 @@ import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } fro
 import { useQueryClient } from "@tanstack/react-query";
 import TopBar from "../components/layout/TopBar";
 import ServerRail from "../components/layout/ServerRail";
+import AppStartupScreen from "./AppStartupScreen";
 import type { SidebarDirectMessageSelection } from "../components/layout/DirectMessagesSidebar";
 import MaterialSymbolIcon from "../components/ui/MaterialSymbolIcon";
 import AvatarImage from "../components/ui/AvatarImage";
@@ -209,7 +210,7 @@ const pendingAvatarCache = new Map<string, CachedPendingAvatarEntry>();
 const friendAvatarCache = new Map<string, CachedFriendAvatarEntry>();
 const friendPresenceCache = new Map<string, PresenceState>();
 const FRIENDS_CACHE_PREFIX = "messly:friends:";
-const FRIENDS_CACHE_VERSION = 1;
+const FRIENDS_CACHE_VERSION = 3;
 const CURRENT_USER_ID_CACHE_PREFIX = "messly:current-user-id:";
 
 const PROFILE_SAFE_COLUMNS =
@@ -241,27 +242,6 @@ function SettingsModalFallback(): JSX.Element {
   );
 }
 
-function SidebarFallback(): JSX.Element {
-  return (
-    <aside className="startup-shell-panel startup-shell-panel--sidebar" aria-hidden="true">
-      <span className="startup-shell-panel__search" />
-      <div className="startup-shell-panel__stack">
-        <span className="startup-shell-panel__line startup-shell-panel__line--title" />
-        <span className="startup-shell-panel__line" />
-        <span className="startup-shell-panel__line" />
-        <span className="startup-shell-panel__line startup-shell-panel__line--short" />
-      </div>
-      <div className="startup-shell-panel__footer">
-        <span className="startup-shell-panel__avatar" />
-        <div className="startup-shell-panel__meta">
-          <span className="startup-shell-panel__line startup-shell-panel__line--short" />
-          <span className="startup-shell-panel__line startup-shell-panel__line--tiny" />
-        </div>
-      </div>
-    </aside>
-  );
-}
-
 function PendingProfileFallback(): JSX.Element {
   return (
     <div className="main-panel__pending-profile-skeleton" role="status" aria-live="polite" aria-busy="true">
@@ -276,26 +256,8 @@ function PendingProfileFallback(): JSX.Element {
   );
 }
 
-function ChatViewFallback(): JSX.Element {
-  return (
-    <section className="startup-shell-panel startup-shell-panel--chat" role="status" aria-live="polite" aria-busy="true">
-      <div className="startup-shell-panel__stack">
-        <span className="startup-shell-panel__line startup-shell-panel__line--title" />
-        <span className="startup-shell-panel__line" />
-        <span className="startup-shell-panel__line startup-shell-panel__line--short" />
-      </div>
-      <div className="startup-shell-panel__stack">
-        <span className="startup-shell-panel__line startup-shell-panel__line--wide" />
-        <span className="startup-shell-panel__line" />
-        <span className="startup-shell-panel__line startup-shell-panel__line--wide" />
-      </div>
-    </section>
-  );
-}
-
 function getPendingDisplayAvatar(displayName: string, username: string, userId?: string | null): string {
-  const stableSeed = String(userId ?? "").trim();
-  return getNameAvatarUrl(stableSeed || displayName || username || "U");
+  return getNameAvatarUrl(displayName || username || "U");
 }
 
 function buildPendingAvatarSignature(userRow: UserIdentityRow | undefined, legacyBackupUrl: string): string {
@@ -348,8 +310,7 @@ function arePendingCardsEqual(current: PendingFriendCard[], next: PendingFriendC
 }
 
 function getFriendDisplayAvatar(displayName: string, username: string, userId?: string | null): string {
-  const stableSeed = String(userId ?? "").trim();
-  return getNameAvatarUrl(stableSeed || displayName || username || "U");
+  return getNameAvatarUrl(displayName || username || "U");
 }
 
 function normalizeProfileDisplayName(
@@ -890,7 +851,10 @@ function readFriendsCache(userId: string | null | undefined): FriendListItem[] |
 
         const username = String(casted.username ?? "").trim() || "username";
         const displayName = normalizeProfileDisplayName(casted.displayName, username, username);
-        const avatarSrc = String(casted.avatarSrc ?? "").trim() || getFriendDisplayAvatar(displayName, username, userIdValue);
+        const cachedAvatarSrc = String(casted.avatarSrc ?? "").trim();
+        const avatarSrc = !cachedAvatarSrc || isFriendFallbackAvatar(cachedAvatarSrc)
+          ? getFriendDisplayAvatar(displayName, username, userIdValue)
+          : cachedAvatarSrc;
         const firebaseUid = String((casted as { firebaseUid?: string | null }).firebaseUid ?? "").trim();
         const spotifyActivity = normalizePresenceSpotifyActivity(
           (casted as { spotifyActivity?: unknown }).spotifyActivity ?? null,
@@ -1133,6 +1097,8 @@ export default function AppShell() {
   const [friendSearchTerm, setFriendSearchTerm] = useState("");
   const [activeDirectMessage, setActiveDirectMessage] = useState<SidebarDirectMessageSelection | null>(null);
   const [sidebarDirectMessages, setSidebarDirectMessages] = useState<SidebarDirectMessageSelection[]>([]);
+  const [isSidebarHydrated, setIsSidebarHydrated] = useState(false);
+  const [isInitialShellReady, setIsInitialShellReady] = useState(false);
   const [pendingNotificationConversationId, setPendingNotificationConversationId] = useState<string | null>(() => {
     if (typeof window === "undefined") {
       return null;
@@ -1167,6 +1133,9 @@ export default function AppShell() {
     });
     return map;
   }, [sidebarDirectMessages]);
+  const isFriendsAndPendingReady =
+    !isFriendRequestsAvailable || (hasInitializedFriends && !isFriendsLoading && !isPendingLoading);
+  const canRevealShell = isSidebarHydrated && isFriendsAndPendingReady;
   const friendPresenceUserIdsKey = useMemo(
     () =>
       Array.from(
@@ -1395,8 +1364,21 @@ export default function AppShell() {
   }, [isSidebarCallActive]);
 
   const handleSidebarDirectMessagesChange = useCallback((items: SidebarDirectMessageSelection[]): void => {
+    setIsSidebarHydrated(true);
     setSidebarDirectMessages((current) => (areSidebarSelectionsEqual(current, items) ? current : items));
   }, []);
+
+  useEffect(() => {
+    setIsSidebarHydrated(false);
+    setIsInitialShellReady(false);
+  }, [currentUserId]);
+
+  useEffect(() => {
+    if (isInitialShellReady || !canRevealShell) {
+      return;
+    }
+    setIsInitialShellReady(true);
+  }, [canRevealShell, isInitialShellReady]);
 
   useEffect(() => {
     const updateFocusState = (): void => {
@@ -3156,16 +3138,30 @@ export default function AppShell() {
     }
     console.error("[app:pending]", pendingError);
   }, [pendingError]);
+  const shellStartupDetailText = !isSidebarHydrated
+    ? "Carregando conversas"
+    : !isFriendsAndPendingReady
+      ? "Carregando amigos e pendencias"
+      : "Abrindo interface";
+  const shellStartupProgress = canRevealShell ? 0.99 : isSidebarHydrated ? 0.9 : 0.82;
 
   return (
     <div className="app-shell" data-messly-startup-surface="shell">
+      {!isInitialShellReady ? (
+        <AppStartupScreen
+          statusText="Carregando Messly"
+          detailText={shellStartupDetailText}
+          progress={shellStartupProgress}
+          phase="running"
+        />
+      ) : null}
       <TopBar
         section={activeDirectMessage ? "directMessages" : "friends"}
         isCallActive={isSidebarCallActive}
         onPrepareForUpdateInstall={handlePrepareForUpdateInstall}
       />
       <ServerRail />
-      <Suspense fallback={<SidebarFallback />}>
+      <Suspense fallback={null}>
         <DirectMessagesSidebar
           currentUserId={currentUserId}
           isWindowFocused={isWindowFocused}
@@ -3262,7 +3258,7 @@ export default function AppShell() {
           <div className="main-panel__workspace">
             {chatViewDirectMessage && chatCurrentUser ? (
               <div className={`main-panel__chat-view${activeDirectMessage ? "" : " main-panel__chat-view--hidden"}`}>
-                <Suspense fallback={<ChatViewFallback />}>
+                <Suspense fallback={null}>
                   <DirectMessageChatView
                     conversationId={chatViewDirectMessage.conversationId}
                     currentUserId={chatCurrentUser.userId}

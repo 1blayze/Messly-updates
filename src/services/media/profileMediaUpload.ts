@@ -16,7 +16,7 @@ import { getSupabaseFunctionHeaders } from "../supabase";
 import { EdgeFunctionError, invokeEdgeJson } from "../edge/edgeClient";
 import { uploadWithRetry } from "./uploadWithRetry";
 import { getRuntimeAppApiUrl } from "../../config/runtimeApiConfig";
-import { getSupabaseAccessToken } from "../../api/client";
+import { authService } from "../auth";
 
 export type ProfileMediaKind = "avatar" | "banner";
 
@@ -168,6 +168,12 @@ function parseElectronProfileMediaUploadError(error: unknown): ProfileMediaUploa
 }
 
 function shouldFallbackFromElectronUploadError(error: unknown): boolean {
+  // Installed desktop should stay on the Electron/native upload path.
+  // Falling back to browser-based edge upload causes CORS issues.
+  if (typeof window !== "undefined" && Boolean(window.electronAPI?.isPackaged)) {
+    return false;
+  }
+
   const message = String(error instanceof Error ? error.message : error ?? "").trim().toLowerCase();
   if (!message) {
     return false;
@@ -447,7 +453,7 @@ async function uploadProfileMediaViaElectron(
 
   try {
     const bytes = await uploadFile.arrayBuffer();
-    const accessToken = await getSupabaseAccessToken().catch(() => null);
+    const accessToken = await authService.getCurrentAccessToken().catch(() => null);
     const uploaded = await uploadProfileMedia({
       kind,
       userId,
@@ -610,15 +616,19 @@ export async function uploadProfileMediaAsset(
   file: File,
 ): Promise<UploadProfileMediaResponse> {
   ensureLocalConstraints(kind, file);
-  if (typeof window !== "undefined" && window.electronAPI?.uploadProfileMedia) {
-    const electronUpload = await uploadProfileMediaViaElectron(kind, userId, file);
-    if (electronUpload) {
-      return electronUpload;
+  if (typeof window !== "undefined" && window.electronAPI) {
+    const electronUploadApi = window.electronAPI.uploadProfileMedia;
+    if (electronUploadApi) {
+      const electronUpload = await uploadProfileMediaViaElectron(kind, userId, file);
+      if (electronUpload) {
+        return electronUpload;
+      }
     }
+    throw new Error("Upload de imagem indisponivel no desktop. Reinicie o aplicativo e tente novamente.");
   }
 
   const normalizedFile = await normalizeProfileMedia(kind, file, userId);
-  const shouldPreferEdgeBinaryUpload = typeof window !== "undefined" && typeof window.electronAPI !== "undefined";
+  const shouldPreferEdgeBinaryUpload = false;
   if (shouldPreferEdgeBinaryUpload) {
     const edgeFirstUpload = await uploadProfileMediaViaEdgeFunction(kind, userId, normalizedFile);
     if (edgeFirstUpload) {
