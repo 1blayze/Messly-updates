@@ -1,5 +1,6 @@
+/// <reference path="../_shared/edge-runtime.d.ts" />
 import { z } from "npm:zod@3.25.76";
-import { validateFirebaseToken } from "../_shared/auth.ts";
+import { validateSupabaseToken } from "../_shared/auth.ts";
 import {
   ensureFirebaseUidInConversation,
   isTerminalCallStatus,
@@ -43,8 +44,8 @@ function parsePayload(raw: unknown): {
 } {
   const parsed = payloadSchema.safeParse(raw);
   if (!parsed.success) {
-    throw new HttpError(400, "INVALID_PAYLOAD", "Payload invalido.", {
-      issues: parsed.error.issues.map((issue) => ({
+    throw new HttpError(400, "INVALID_PAYLOAD", "Payload inválido.", {
+      issues: parsed.error.issues.map((issue: { path: PropertyKey[]; message: string }) => ({
         path: issue.path.join("."),
         message: issue.message,
       })),
@@ -58,7 +59,7 @@ function parsePayload(raw: unknown): {
   };
 }
 
-Deno.serve(async (request) => {
+Deno.serve(async (request: Request) => {
   const context = createRequestContext(ROUTE);
 
   try {
@@ -67,7 +68,7 @@ Deno.serve(async (request) => {
     }
 
     assertMethod(request, "POST");
-    const auth = await validateFirebaseToken(request);
+    const auth = await validateSupabaseToken(request);
     context.uid = auth.uid;
     context.action = "signal-send";
 
@@ -76,14 +77,14 @@ Deno.serve(async (request) => {
     const { call, members } = await resolveCallAuthorizationContext(auth.uid, auth.email, payload.callId);
 
     if (isTerminalCallStatus(call.status)) {
-      throw new HttpError(409, "CALL_ALREADY_FINISHED", "Esta chamada ja foi encerrada.");
+      throw new HttpError(409, "CALL_ALREADY_FINISHED", "Esta chamada já foi encerrada.");
     }
 
     ensureFirebaseUidInConversation(members, auth.uid);
     ensureFirebaseUidInConversation(members, payload.toUid);
 
     if (payload.toUid === auth.uid) {
-      throw new HttpError(400, "INVALID_SIGNAL_TARGET", "toUid nao pode ser o proprio usuario.");
+      throw new HttpError(400, "INVALID_SIGNAL_TARGET", "toUid não pode ser o próprio usuário.");
     }
 
     const supabase = getSupabaseAdminClient();

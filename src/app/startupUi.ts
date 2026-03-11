@@ -1,0 +1,59 @@
+export const INITIAL_UI_READY_EVENT = "messly:initial-ui-ready";
+
+export interface StartupUiReadyPayload {
+  surface: "shell" | "auth";
+  route: string;
+  bootstrapPhase?: string | null;
+}
+
+let hasMarkedStartupUiReady = false;
+
+export function dismissStartupLoader(): void {
+  if (typeof document === "undefined") {
+    return;
+  }
+
+  const loadingScreen = document.getElementById("messly-loading");
+  if (!loadingScreen) {
+    return;
+  }
+
+  loadingScreen.remove();
+}
+
+export function attachStartupLoaderCleanup(): () => void {
+  if (typeof window === "undefined") {
+    return () => {};
+  }
+
+  const handleInitialUiReady = (): void => {
+    dismissStartupLoader();
+    window.removeEventListener(INITIAL_UI_READY_EVENT, handleInitialUiReady);
+  };
+
+  window.addEventListener(INITIAL_UI_READY_EVENT, handleInitialUiReady);
+
+  if (hasMarkedStartupUiReady) {
+    dismissStartupLoader();
+    window.removeEventListener(INITIAL_UI_READY_EVENT, handleInitialUiReady);
+  }
+
+  return () => {
+    window.removeEventListener(INITIAL_UI_READY_EVENT, handleInitialUiReady);
+  };
+}
+
+export function markStartupUiReady(payload: StartupUiReadyPayload): void {
+  if (typeof window === "undefined" || hasMarkedStartupUiReady) {
+    return;
+  }
+
+  hasMarkedStartupUiReady = true;
+  dismissStartupLoader();
+  window.dispatchEvent(new CustomEvent<StartupUiReadyPayload>(INITIAL_UI_READY_EVENT, { detail: payload }));
+
+  const signalRendererFirstFrameReady = window.electronAPI?.signalRendererFirstFrameReady;
+  if (typeof signalRendererFirstFrameReady === "function") {
+    signalRendererFirstFrameReady(payload);
+  }
+}

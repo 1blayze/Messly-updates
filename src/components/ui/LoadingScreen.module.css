@@ -42,7 +42,8 @@
 
 .loadingText {
   color: #b5bac1;
-  font-size: 14px;
-  font-weight: 500;
-  font-family: "gg sans", "Noto Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  font-size: var(--font-size-base);
+  font-weight: var(--font-weight-medium);
+  line-height: var(--line-height-body);
+  font-family: var(--font-sans);
 }

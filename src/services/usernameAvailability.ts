@@ -1,7 +1,15 @@
 import { supabase } from "./supabase";
+import { isDirectUsersRestBlocked } from "./supabase";
+import { authService } from "./auth";
 import { getCachedValue, setCachedValue } from "./indexedCache";
-
-export const USERNAME_REGEX = /^[a-z0-9_]{3,20}$/;
+import {
+  isUsernameAvailable as checkUsernameAvailability,
+  normalizeUsername,
+  USERNAME_MAX_LENGTH,
+  USERNAME_MIN_LENGTH,
+  USERNAME_REGEX,
+  validateUsername,
+} from "../shared/username";
 
 export const RESERVED_USERNAMES = new Set([
   "admin",
@@ -32,54 +40,51 @@ export function sanitizeDisplayName(displayName: string): string {
   return displayName.trim().replace(/\s+/g, " ");
 }
 
+async function hasSupabaseSession(): Promise<boolean> {
+  try {
+    return Boolean(await authService.getCurrentAccessToken());
+  } catch {
+    return false;
+  }
+}
+
 export function validateUsernameInput(rawUsername: string): UsernameValidationResult {
-  const username = rawUsername.trim();
-  const hasUppercase = /[A-Z]/.test(username);
+  const normalized = normalizeUsername(rawUsername);
+  const hasUppercase = /[A-Z]/.test(rawUsername);
 
-  if (!username) {
-    return {
-      isValid: false,
-      hasUppercase,
-      message: "Informe um username.",
-    };
+  if (!normalized) {
+    return { isValid: false, hasUppercase, message: "Informe um nome de usuario." };
   }
 
-  if (hasUppercase) {
-    return {
-      isValid: false,
-      hasUppercase,
-      message: "Use apenas letras minusculas, numeros e underscore.",
-    };
+  if (RESERVED_USERNAMES.has(normalized)) {
+    return { isValid: false, hasUppercase, message: "Esse nome de usuario esta reservado." };
   }
 
-  if (!USERNAME_REGEX.test(username)) {
-    return {
-      isValid: false,
-      hasUppercase,
-      message: "Use de 3 a 20 caracteres com letras minusculas, numeros e underscore.",
-    };
-  }
-
-  if (RESERVED_USERNAMES.has(username)) {
-    return {
-      isValid: false,
-      hasUppercase,
-      message: "Esse username esta reservado.",
-    };
-  }
-
+  const result = validateUsername(normalized);
   return {
-    isValid: true,
+    isValid: result.isValid,
     hasUppercase,
-    message: null,
+    message: result.message ?? null,
   };
 }
 
-export async function isUsernameAvailable(username: string): Promise<boolean> {
-  const normalized = username.trim();
+function isTableMissing(error: unknown): boolean {
+  const code = String((error as { code?: unknown } | null)?.code ?? "");
+  const status = Number((error as { status?: unknown } | null)?.status ?? 0);
+  const message = String((error as { message?: unknown } | null)?.message ?? "").toLowerCase();
+  return code === "42P01" || code === "PGRST114" || status === 404 || message.includes("not found");
+}
+
+export async function isUsernameAvailable(username: string, options: { requireRemote?: boolean } = {}): Promise<boolean> {
+  const normalized = normalizeUsername(username);
   const validation = validateUsernameInput(normalized);
   if (!validation.isValid) {
     return false;
+  }
+
+  const sessionAvailable = await hasSupabaseSession();
+  if (isDirectUsersRestBlocked() && !options.requireRemote) {
+    return true;
   }
 
   const cacheKey = `username:${normalized}`;
@@ -93,23 +98,25 @@ export async function isUsernameAvailable(username: string): Promise<boolean> {
   }
 
   try {
-    const escaped = escapeLikePattern(normalized);
-    const { data, error } = await supabase.from("users").select("id").ilike("username", escaped).limit(1);
+    const { count, error } = await supabase
+      .from("profiles")
+      .select("id", { count: "exact", head: true })
+      .eq("username", normalized);
+
     if (error) {
       throw error;
     }
 
-    const available = (data?.length ?? 0) === 0;
+    const available = !count || count === 0;
     try {
       await setCachedValue(cacheKey, available, 30_000);
     } catch {
-      // cache is optional
+      // cache é opcional
     }
-
     return available;
   } catch {
-    // Fallback otimista para não bloquear UX quando a checagem remota falha.
-    return true;
+    // Fallback otimista; se for obrigatório, retorna false
+    return options.requireRemote ? false : true;
   }
 }
 
@@ -117,6 +124,11 @@ export async function isEmailAvailable(email: string): Promise<boolean> {
   const normalized = normalizeEmail(email);
   if (!normalized) {
     return false;
+  }
+
+  const sessionAvailable = await hasSupabaseSession();
+  if (isDirectUsersRestBlocked() || !sessionAvailable) {
+    return true;
   }
 
   const cacheKey = `email:${normalized}`;
@@ -130,8 +142,7 @@ export async function isEmailAvailable(email: string): Promise<boolean> {
   }
 
   try {
-    const escaped = escapeLikePattern(normalized);
-    const { data, error } = await supabase.from("users").select("id").ilike("email", escaped).limit(1);
+    const { data, error } = await supabase.from("profiles").select("id").eq("email", normalized).limit(1);
     if (error) {
       throw error;
     }
@@ -149,3 +160,5 @@ export async function isEmailAvailable(email: string): Promise<boolean> {
     return true;
   }
 }
+
+export { USERNAME_REGEX, USERNAME_MAX_LENGTH, USERNAME_MIN_LENGTH };

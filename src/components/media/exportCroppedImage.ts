@@ -119,7 +119,7 @@ function toBlob(canvas: HTMLCanvasElement, mimeType: string, quality: number): P
     canvas.toBlob(
       (blob) => {
         if (!blob) {
-          reject(new Error("Nao foi possivel gerar a imagem editada."));
+          reject(new Error("Não foi possível gerar a imagem editada."));
           return;
         }
         resolve(blob);
@@ -161,7 +161,7 @@ export async function exportCroppedImage({
 
   const context = canvas.getContext("2d");
   if (!context) {
-    throw new Error("Nao foi possivel preparar o editor de imagem.");
+    throw new Error("Não foi possível preparar o editor de imagem.");
   }
 
   context.setTransform(scale, 0, 0, scale, 0, 0);

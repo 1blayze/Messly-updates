@@ -1,4 +1,5 @@
-import { getAuthenticatedEdgeHeaders, type EdgeAuthMode } from "../auth/firebaseToken";
+import { getSupabaseFunctionHeaders, supabase } from "../supabase";
+import { authService } from "../auth";
 
 export class EdgeFunctionError extends Error {
   status: number;
@@ -21,15 +22,23 @@ interface InvokeEdgeOptions {
   retries?: number;
   signal?: AbortSignal;
   headers?: Record<string, string>;
+  signOutOnUnauthorized?: boolean;
+  requireAuth?: boolean;
+}
+
+interface InvokeEdgeGetOptions extends InvokeEdgeOptions {
+  query?: Record<string, string | number | boolean | null | undefined>;
 }
 
 interface ErrorResponseBody {
-  error?: {
-    code?: string;
-    message?: string;
-    details?: unknown;
-    requestId?: string;
-  };
+  error?:
+    | {
+        code?: string;
+        message?: string;
+        details?: unknown;
+        requestId?: string;
+      }
+    | string;
   code?: string | number;
   message?: string;
   details?: unknown;
@@ -38,11 +47,25 @@ interface ErrorResponseBody {
 
 const DEFAULT_TIMEOUT_MS = 18_000;
 const DEFAULT_RETRIES = 1;
+const DEV_SUPABASE_PROXY_PREFIX = "/__supabase";
+
+function shouldUseDevSupabaseProxy(): boolean {
+  if (!import.meta.env.DEV || typeof window === "undefined") {
+    return false;
+  }
+
+  const host = String(window.location.hostname ?? "").trim().toLowerCase();
+  return host === "localhost" || host === "127.0.0.1";
+}
 
 function getFunctionBaseUrl(): string {
   const supabaseUrl = String(import.meta.env.VITE_SUPABASE_URL ?? "").trim();
   if (!supabaseUrl) {
     throw new Error("VITE_SUPABASE_URL nao configurada.");
+  }
+
+  if (shouldUseDevSupabaseProxy()) {
+    return `${DEV_SUPABASE_PROXY_PREFIX}/functions/v1`;
   }
 
   return `${supabaseUrl.replace(/\/+$/, "")}/functions/v1`;
@@ -52,6 +75,23 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => {
     window.setTimeout(resolve, ms);
   });
+}
+
+function buildEdgeUrl(
+  functionName: string,
+  query?: Record<string, string | number | boolean | null | undefined>,
+): string {
+  const baseUrl = `${getFunctionBaseUrl()}/${functionName}`;
+  const url = /^https?:\/\//i.test(baseUrl)
+    ? new URL(baseUrl)
+    : new URL(baseUrl, window.location.origin);
+  Object.entries(query ?? {}).forEach(([key, value]) => {
+    if (value == null) {
+      return;
+    }
+    url.searchParams.set(key, String(value));
+  });
+  return url.toString();
 }
 
 async function parseJsonSafe(response: Response): Promise<unknown> {
@@ -77,32 +117,59 @@ function shouldRetry(error: unknown, attempt: number, maxRetries: number): boole
 function toEdgeFunctionError(response: Response, payload: unknown): EdgeFunctionError {
   const parsed = (payload ?? {}) as ErrorResponseBody;
   const status = response.status;
-  const code = String(parsed.error?.code ?? parsed.code ?? `HTTP_${status}`);
+
+  const nestedError = typeof parsed.error === "object" && parsed.error !== null ? parsed.error : null;
+  const flatError = typeof parsed.error === "string" ? parsed.error : null;
+  const code = String(nestedError?.code ?? flatError ?? parsed.code ?? `HTTP_${status}`);
   const message =
-    String(parsed.error?.message ?? parsed.message ?? "Falha na chamada da Edge Function.").trim() ||
+    String(nestedError?.message ?? parsed.message ?? "Falha na chamada da Edge Function.").trim() ||
     "Falha na chamada da Edge Function.";
-  const details = parsed.error?.details ?? parsed.details;
-  const requestId = parsed.error?.requestId ?? parsed.requestId;
+  const details = nestedError?.details ?? parsed.details;
+  const requestId = nestedError?.requestId ?? parsed.requestId;
 
   return new EdgeFunctionError(message, status, code, details, requestId);
 }
 
-function shouldRetryWithSupabaseAuth(error: unknown, alreadyRetried: boolean): boolean {
-  if (alreadyRetried || !(error instanceof EdgeFunctionError)) {
+function getHeaderValueCaseInsensitive(headers: Record<string, string>, name: string): string | null {
+  const target = name.trim().toLowerCase();
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === target) {
+      const normalized = String(value ?? "").trim();
+      return normalized || null;
+    }
+  }
+  return null;
+}
+
+function extractBearerToken(authorizationHeader: string | null): string | null {
+  const normalized = String(authorizationHeader ?? "").trim();
+  if (!normalized) {
+    return null;
+  }
+
+  return normalized.replace(/^bearer\s+/i, "").trim() || null;
+}
+
+function isUnauthorizedEdgeError(error: unknown): boolean {
+  if (!(error instanceof EdgeFunctionError) || error.status !== 401) {
     return false;
   }
 
-  if (error.status !== 401) {
-    return false;
-  }
-
-  const normalized = `${error.code} ${error.message}`.toLowerCase();
+  const code = String(error.code ?? "").trim().toUpperCase();
+  const message = String(error.message ?? "").trim().toLowerCase();
   return (
-    normalized.includes("invalid jwt") ||
-    normalized.includes("jwt") ||
-    normalized.includes("http_401") ||
-    normalized.includes("unauthorized")
+    code === "INVALID_TOKEN" ||
+    code === "UNAUTHENTICATED" ||
+    code === "UNAUTHORIZED" ||
+    message.includes("invalid jwt") ||
+    message.includes("sessao invalida") ||
+    message.includes("sessão inválida") ||
+    (message.includes("token") && message.includes("expirad"))
   );
+}
+
+function buildMissingEdgeAuthError(): EdgeFunctionError {
+  return new EdgeFunctionError("Sessao invalida ou expirada.", 401, "UNAUTHENTICATED");
 }
 
 export async function invokeEdgeJson<TRequest, TResponse>(
@@ -110,24 +177,61 @@ export async function invokeEdgeJson<TRequest, TResponse>(
   payload: TRequest,
   options: InvokeEdgeOptions = {},
 ): Promise<TResponse> {
+  return invokeEdgeRequest<TResponse>(
+    functionName,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+      },
+    },
+    options,
+  );
+}
+
+export async function invokeEdgeGet<TResponse>(
+  functionName: string,
+  options: InvokeEdgeGetOptions = {},
+): Promise<TResponse> {
+  const { query, ...requestOptions } = options;
+  return invokeEdgeRequest<TResponse>(
+    functionName,
+    {
+      method: "GET",
+      query,
+    },
+    requestOptions,
+  );
+}
+
+async function invokeEdgeRequest<TResponse>(
+  functionName: string,
+  request: {
+    method: "GET" | "POST";
+    body?: string;
+    headers?: Record<string, string>;
+    query?: Record<string, string | number | boolean | null | undefined>;
+  },
+  options: InvokeEdgeOptions = {},
+): Promise<TResponse> {
   const timeoutMs = Number.isFinite(options.timeoutMs) ? Math.max(1_000, Number(options.timeoutMs)) : DEFAULT_TIMEOUT_MS;
   const retries = Number.isFinite(options.retries) ? Math.max(0, Number(options.retries)) : DEFAULT_RETRIES;
   const baseRequestHeaders: Record<string, string> = {
-    "content-type": "application/json; charset=utf-8",
+    ...(request.headers ?? {}),
     ...(options.headers ?? {}),
   };
 
-  const url = `${getFunctionBaseUrl()}/${functionName}`;
+  const url = buildEdgeUrl(functionName, request.query);
   let attempt = 0;
-  let authMode: EdgeAuthMode = "firebase";
-  let retriedWithRefreshedFirebaseToken = false;
-  let retriedWithSupabaseAuth = false;
+  let didRefreshSupabaseSession = false;
 
   for (;;) {
     const controller = new AbortController();
     const timeoutId = window.setTimeout(() => {
       controller.abort(new DOMException("Request timeout", "TimeoutError"));
     }, timeoutMs);
+    let currentAccessToken: string | null = null;
 
     const abortListener = () => {
       controller.abort(options.signal?.reason);
@@ -135,15 +239,34 @@ export async function invokeEdgeJson<TRequest, TResponse>(
 
     try {
       options.signal?.addEventListener("abort", abortListener, { once: true });
-      const baseHeaders = await getAuthenticatedEdgeHeaders(baseRequestHeaders, {
-        mode: authMode,
-        forceRefresh: authMode === "firebase" && retriedWithRefreshedFirebaseToken,
+      const functionHeaders = await getSupabaseFunctionHeaders({
+        requireAuth: Boolean(options.requireAuth),
       });
+      const baseHeaders = {
+        ...(baseRequestHeaders ?? {}),
+        ...(functionHeaders ?? {}),
+      };
+      const requestHeaders: Record<string, string> = {
+        ...baseHeaders,
+      };
+      currentAccessToken = extractBearerToken(getHeaderValueCaseInsensitive(requestHeaders, "authorization"));
+      if (options.requireAuth && !currentAccessToken) {
+        try {
+          const refreshedSession = await authService.refreshSession();
+          const refreshedToken = String(refreshedSession?.access_token ?? "").trim();
+          if (refreshedToken) {
+            continue;
+          }
+        } catch {
+          // Fall through to standard missing auth error handling below.
+        }
+        throw buildMissingEdgeAuthError();
+      }
 
       const response = await fetch(url, {
-        method: "POST",
-        headers: baseHeaders,
-        body: JSON.stringify(payload),
+        method: request.method,
+        headers: requestHeaders,
+        ...(request.body ? { body: request.body } : {}),
         signal: controller.signal,
       });
 
@@ -155,15 +278,21 @@ export async function invokeEdgeJson<TRequest, TResponse>(
 
       return parsedPayload as TResponse;
     } catch (error) {
-      if (shouldRetryWithSupabaseAuth(error, false) && !retriedWithRefreshedFirebaseToken && authMode === "firebase") {
-        retriedWithRefreshedFirebaseToken = true;
-        continue;
+      if (isUnauthorizedEdgeError(error) && !didRefreshSupabaseSession) {
+        didRefreshSupabaseSession = true;
+        try {
+          const refreshedSession = await authService.refreshSession();
+          const refreshedAccessToken = String(refreshedSession?.access_token ?? "").trim() || null;
+          if (refreshedAccessToken) {
+            continue;
+          }
+        } catch {
+          // Fall through to the standard error handling below.
+        }
       }
 
-      if (shouldRetryWithSupabaseAuth(error, retriedWithSupabaseAuth)) {
-        retriedWithSupabaseAuth = true;
-        authMode = "supabase";
-        continue;
+      if (isUnauthorizedEdgeError(error) && options.signOutOnUnauthorized) {
+        void supabase.auth.signOut().catch(() => undefined);
       }
 
       if (!shouldRetry(error, attempt, retries)) {

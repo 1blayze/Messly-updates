@@ -1,0 +1,118 @@
+import Dexie from "dexie";
+import { messlyCacheDb } from "./messlyCacheDb";
+import type {
+  CachedConversationRecord,
+  CachedMessageRecord,
+  CachedPresenceRecord,
+  CachedProfileRecord,
+} from "./messlyCacheDb";
+import type {
+  ConversationEntity,
+  MessageEntity,
+  UserPresenceEntity,
+  UserProfileEntity,
+} from "../stores/entities";
+
+function withAccount<T extends { accountId: string }>(accountId: string, value: Omit<T, "accountId">): T {
+  return {
+    ...value,
+    accountId,
+  } as T;
+}
+
+export async function readConversationCache(accountId: string): Promise<Record<string, ConversationEntity>> {
+  const rows = await messlyCacheDb.conversations.where("accountId").equals(accountId).toArray();
+  return Object.fromEntries(rows.map(({ accountId: _accountId, ...conversation }) => [conversation.id, conversation]));
+}
+
+export async function writeConversationCache(
+  accountId: string,
+  conversations: Record<string, ConversationEntity>,
+): Promise<void> {
+  const rows = Object.values(conversations).map((conversation) =>
+    withAccount<CachedConversationRecord>(accountId, conversation),
+  );
+
+  await messlyCacheDb.transaction("rw", messlyCacheDb.conversations, async () => {
+    await messlyCacheDb.conversations.where("accountId").equals(accountId).delete();
+    if (rows.length) {
+      await messlyCacheDb.conversations.bulkPut(rows);
+    }
+  });
+}
+
+export async function readMessageCache(
+  accountId: string,
+  conversationId: string,
+  limit = 100,
+): Promise<MessageEntity[]> {
+  const rows = await messlyCacheDb.messages
+    .where("[accountId+conversationId+createdAt]")
+    .between([accountId, conversationId, Dexie.minKey], [accountId, conversationId, Dexie.maxKey])
+    .reverse()
+    .limit(limit)
+    .toArray();
+
+  return rows
+    .reverse()
+    .map(({ accountId: _accountId, ...message }) => message);
+}
+
+export async function writeMessageCache(
+  accountId: string,
+  conversationId: string,
+  messages: MessageEntity[],
+): Promise<void> {
+  const trimmedMessages = messages.slice(-100);
+  const rows = trimmedMessages.map((message) => withAccount<CachedMessageRecord>(accountId, message));
+
+  await messlyCacheDb.transaction("rw", messlyCacheDb.messages, async () => {
+    const existing = await messlyCacheDb.messages
+      .where("[accountId+conversationId+createdAt]")
+      .between([accountId, conversationId, Dexie.minKey], [accountId, conversationId, Dexie.maxKey])
+      .primaryKeys();
+
+    if (existing.length) {
+      await messlyCacheDb.messages.bulkDelete(existing);
+    }
+
+    if (rows.length) {
+      await messlyCacheDb.messages.bulkPut(rows);
+    }
+  });
+}
+
+export async function readProfileCache(accountId: string): Promise<Record<string, UserProfileEntity>> {
+  const rows = await messlyCacheDb.profiles.where("accountId").equals(accountId).toArray();
+  return Object.fromEntries(rows.map(({ accountId: _accountId, ...profile }) => [profile.id, profile]));
+}
+
+export async function writeProfileCache(accountId: string, profiles: Record<string, UserProfileEntity>): Promise<void> {
+  const rows = Object.values(profiles).map((profile) => withAccount<CachedProfileRecord>(accountId, profile));
+
+  await messlyCacheDb.transaction("rw", messlyCacheDb.profiles, async () => {
+    await messlyCacheDb.profiles.where("accountId").equals(accountId).delete();
+    if (rows.length) {
+      await messlyCacheDb.profiles.bulkPut(rows);
+    }
+  });
+}
+
+export async function readPresenceCache(accountId: string): Promise<Record<string, UserPresenceEntity>> {
+  const rows = await messlyCacheDb.presenceSnapshots.where("accountId").equals(accountId).toArray();
+  return Object.fromEntries(rows.map(({ accountId: _accountId, ...presence }) => [presence.userId, presence]));
+}
+
+export async function writePresenceCache(
+  accountId: string,
+  presences: Record<string, UserPresenceEntity>,
+): Promise<void> {
+  const rows = Object.values(presences).map((presence) => withAccount<CachedPresenceRecord>(accountId, presence));
+
+  await messlyCacheDb.transaction("rw", messlyCacheDb.presenceSnapshots, async () => {
+    await messlyCacheDb.presenceSnapshots.where("accountId").equals(accountId).delete();
+    if (rows.length) {
+      await messlyCacheDb.presenceSnapshots.bulkPut(rows);
+    }
+  });
+}

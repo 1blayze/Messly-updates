@@ -36,7 +36,7 @@ export default function ImageEditControls({
           step={step}
           value={zoom}
           onChange={(event) => onZoomChange(Number(event.target.value))}
-          aria-label="Nivel de zoom"
+          aria-label="Nível de zoom"
           disabled={disabled}
         />
         <button

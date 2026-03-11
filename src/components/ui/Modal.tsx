@@ -60,12 +60,26 @@ export default function Modal({
   };
 
   return createPortal(
-    <div className={styles.backdrop} role="presentation" onMouseDown={handleBackdropMouseDown}>
+    <div
+      className={styles.backdrop}
+      role="presentation"
+      data-messly-modal-root="true"
+      onMouseDown={handleBackdropMouseDown}
+      onTouchStart={(event) => {
+        event.stopPropagation();
+      }}
+    >
       <section
         className={`${styles.panel}${panelClassName ? ` ${panelClassName}` : ""}`}
         role="dialog"
         aria-modal="true"
         aria-label={ariaLabel ?? title ?? "Modal"}
+        onMouseDown={(event) => {
+          event.stopPropagation();
+        }}
+        onTouchStart={(event) => {
+          event.stopPropagation();
+        }}
       >
         {title || showCloseButton ? (
           <header className={styles.header}>

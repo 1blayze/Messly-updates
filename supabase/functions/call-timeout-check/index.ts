@@ -1,3 +1,4 @@
+/// <reference path="../_shared/edge-runtime.d.ts" />
 import {
   computeDurationSeconds,
   getCallTimeoutMs,
@@ -177,7 +178,7 @@ async function closeTimedOutActiveCalls(cutoffIso: string): Promise<number> {
   return updatedCount;
 }
 
-Deno.serve(async (request) => {
+Deno.serve(async (request: Request) => {
   const context = createRequestContext(ROUTE);
 
   try {

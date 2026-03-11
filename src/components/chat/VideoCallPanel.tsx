@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type ChangeEvent, type MutableRefObject, type SyntheticEvent, type WheelEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ChangeEvent, type MutableRefObject, type WheelEvent } from "react";
 import { flushSync } from "react-dom";
 import MaterialSymbolIcon from "../ui/MaterialSymbolIcon";
-import { getNameAvatarUrl, isDefaultAvatarUrl } from "../../services/cdn/mediaUrls";
+import AvatarImage from "../ui/AvatarImage";
 import "../../styles/components/VideoCallPanel.css";
 
 export type VideoCallPanelState = "idle" | "dialing" | "incoming" | "connecting" | "active";
@@ -32,6 +32,8 @@ interface VideoCallPanelProps {
   onToggleMute: () => void;
   isOutputAudioEnabled: boolean;
   onOutputAudioEnabledChange?: (enabled: boolean) => void;
+  outputDeviceId?: string | null;
+  outputVolume?: number | null;
   isCameraActive: boolean;
   onToggleCamera: () => void;
   isScreenSharing: boolean;
@@ -58,6 +60,10 @@ interface AvatarCardPalette {
   glow: string;
   glowSoft: string;
 }
+
+type SinkSelectableMediaElement = HTMLMediaElement & {
+  setSinkId?: (sinkId: string) => Promise<void>;
+};
 
 function StreamVideo({ className, stream, muted = false, videoRef }: StreamVideoProps) {
   const ref = useRef<HTMLVideoElement | null>(null);
@@ -96,21 +102,6 @@ function StreamVideo({ className, stream, muted = false, videoRef }: StreamVideo
   }, [videoRef]);
 
   return <video ref={ref} className={className} autoPlay playsInline muted={muted} />;
-}
-
-function resolveAvatarImageSrc(avatarSrcRaw: string, nameRaw: string): string {
-  const fallback = getNameAvatarUrl(String(nameRaw ?? "").trim() || "U");
-  const avatarSrc = String(avatarSrcRaw ?? "").trim();
-  if (!avatarSrc || isDefaultAvatarUrl(avatarSrc)) {
-    return fallback;
-  }
-  return avatarSrc;
-}
-
-function handleAvatarImageError(event: SyntheticEvent<HTMLImageElement>, nameRaw: string): void {
-  const target = event.currentTarget;
-  target.onerror = null;
-  target.src = getNameAvatarUrl(String(nameRaw ?? "").trim() || "U");
 }
 
 function hasVideoTrack(stream: MediaStream | null): boolean {
@@ -237,10 +228,25 @@ async function extractDominantAvatarHue(avatarSrcRaw: string): Promise<number | 
     return null;
   }
 
+  const canReadPixelsFromSource = (() => {
+    if (avatarSrc.startsWith("data:") || avatarSrc.startsWith("blob:")) {
+      return true;
+    }
+    try {
+      const parsed = new URL(avatarSrc, window.location.href);
+      return parsed.origin === window.location.origin;
+    } catch {
+      return false;
+    }
+  })();
+
+  // Avoid CORS noise with signed external URLs (R2/S3/etc.) and use hash fallback.
+  if (!canReadPixelsFromSource) {
+    return null;
+  }
+
   return new Promise((resolve) => {
     const image = new Image();
-    image.crossOrigin = "anonymous";
-    image.referrerPolicy = "no-referrer";
     image.decoding = "async";
 
     image.onload = () => {
@@ -322,6 +328,8 @@ export default function VideoCallPanel({
   onToggleMute,
   isOutputAudioEnabled,
   onOutputAudioEnabledChange,
+  outputDeviceId = "",
+  outputVolume = 100,
   isCameraActive,
   onToggleCamera,
   isScreenSharing,
@@ -708,6 +716,11 @@ export default function VideoCallPanel({
   }, [isOutputAudioEnabled]);
 
   useEffect(() => {
+    const normalizedOutputVolume = Math.max(0, Math.min(100, Math.round(Number(outputVolume) || 0)));
+    setPlaybackVolume(normalizedOutputVolume / 100);
+  }, [outputVolume]);
+
+  useEffect(() => {
     const sinkElements = [remoteVideoRef.current, remoteAudioRef.current].filter(
       (element): element is HTMLMediaElement => Boolean(element),
     );
@@ -721,6 +734,35 @@ export default function VideoCallPanel({
       sinkElement.volume = nextVolume;
     }
   }, [isPlaybackMuted, playbackVolume, remoteStream, remoteVideoEnabled]);
+
+  useEffect(() => {
+    const normalizedSinkId = String(outputDeviceId ?? "").trim();
+    const sinkElements = [remoteVideoRef.current, remoteAudioRef.current].filter(
+      (element): element is SinkSelectableMediaElement => Boolean(element),
+    );
+    if (sinkElements.length === 0) {
+      return;
+    }
+
+    let cancelled = false;
+    const applySinkId = async (): Promise<void> => {
+      for (const sinkElement of sinkElements) {
+        if (cancelled || typeof sinkElement.setSinkId !== "function") {
+          continue;
+        }
+        try {
+          await sinkElement.setSinkId(normalizedSinkId);
+        } catch (error) {
+          console.warn("[call-audio] Falha ao aplicar dispositivo de saida da chamada.", error);
+        }
+      }
+    };
+
+    void applySinkId();
+    return () => {
+      cancelled = true;
+    };
+  }, [outputDeviceId, remoteStream, remoteVideoEnabled]);
 
   useEffect(() => {
     const remoteAudio = remoteAudioRef.current;
@@ -1192,7 +1234,7 @@ export default function VideoCallPanel({
             type="button"
             onClick={onAccept}
             aria-label="Aceitar chamada"
-            title="Aceitar chamada"
+            data-tooltip="Aceitar chamada"
           >
             <MaterialSymbolIcon name="call" size={18} />
           </button>
@@ -1201,7 +1243,7 @@ export default function VideoCallPanel({
             type="button"
             onClick={onDecline}
             aria-label="Recusar chamada"
-            title="Recusar chamada"
+            data-tooltip="Recusar chamada"
           >
             <MaterialSymbolIcon name="call_end" size={18} />
           </button>
@@ -1215,8 +1257,8 @@ export default function VideoCallPanel({
           type="button"
           className={`video-call-control${isMicEnabled ? "" : " is-off"}`}
           onClick={onToggleMute}
-          aria-label={isMicEnabled ? "Mutar microfone" : "Desmutar microfone"}
-          title={isMicEnabled ? "Mutar microfone" : "Desmutar microfone"}
+          aria-label={isMicEnabled ? "Silenciar microfone" : "Ativar microfone"}
+          data-tooltip={isMicEnabled ? "Silenciar" : "Ativar"}
         >
           <MaterialSymbolIcon name={isMicEnabled ? "mic" : "mic_off"} size={18} />
         </button>
@@ -1224,8 +1266,8 @@ export default function VideoCallPanel({
           type="button"
           className={`video-call-control${isCameraActive ? "" : " is-off"}`}
           onClick={onToggleCamera}
-          aria-label={isCameraActive ? "Desligar camera" : "Ligar camera"}
-          title={isCameraActive ? "Desligar camera" : "Ligar camera"}
+          aria-label={isCameraActive ? "Desligar câmera" : "Ligar câmera"}
+          data-tooltip={isCameraActive ? "Desligar câmera" : "Ligar câmera"}
         >
           <MaterialSymbolIcon name={isCameraActive ? "videocam" : "videocam_off"} size={18} />
         </button>
@@ -1233,8 +1275,8 @@ export default function VideoCallPanel({
           type="button"
           className={`video-call-control${isScreenSharing ? " is-active" : ""}`}
           onClick={onToggleScreenShare}
-          aria-label={isScreenSharing ? "Parar compartilhamento de tela" : "Compartilhar tela"}
-          title={isScreenSharing ? "Parar compartilhamento de tela" : "Compartilhar tela"}
+          aria-label={isScreenSharing ? "Parar transmissão" : "Compartilhar tela"}
+          data-tooltip={isScreenSharing ? "Parar transmissão" : "Compartilhar tela"}
         >
           <MaterialSymbolIcon name={isScreenSharing ? "stop_screen_share" : "screen_share"} size={18} />
         </button>
@@ -1243,7 +1285,7 @@ export default function VideoCallPanel({
           className="video-call-control is-hangup"
           onClick={onEndCall}
           aria-label="Desconectar"
-          title="Desconectar"
+          data-tooltip="Desconectar"
         >
           <MaterialSymbolIcon name="call_end" size={18} />
         </button>
@@ -1255,7 +1297,7 @@ export default function VideoCallPanel({
     <div
       className={`video-call-share-controls${className ? ` ${className}` : ""}`}
       role="toolbar"
-      aria-label="Controles da transmissao"
+      aria-label="Controles da transmissão"
       style={style}
     >
       <div className={`video-call-volume-control${isVolumeAnimating ? " is-volume-anim" : ""}`}>
@@ -1264,8 +1306,7 @@ export default function VideoCallPanel({
           className={`video-call-share-btn video-call-share-btn--volume-toggle${isPlaybackMuted ? " is-active" : ""}`}
           onClick={handleToggleMutePlayback}
           onWheel={handleVolumeWheel}
-          aria-label={isPlaybackMuted ? "Ativar som da transmissao" : "Silenciar som da transmissao"}
-          title={`${isPlaybackMuted ? "Ativar som" : "Silenciar som"} (${volumePercent}%)`}
+          aria-label={isPlaybackMuted ? "Ativar som da transmissão" : "Silenciar som da transmissão"}
           disabled={!canAdjustVolume}
         >
           <MaterialSymbolIcon name={isPlaybackMuted ? "volume_off" : "volume_up"} size={16} />
@@ -1279,7 +1320,7 @@ export default function VideoCallPanel({
             className="video-call-volume-slider"
             value={volumePercent}
             onChange={handleVolumeRangeChange}
-            aria-label="Volume da transmissao"
+            aria-label="Volume da transmissão"
             disabled={!canAdjustVolume}
           />
         </div>
@@ -1288,8 +1329,7 @@ export default function VideoCallPanel({
         type="button"
         className={`video-call-share-btn${isFullscreen ? " is-active" : ""}`}
         onClick={handleToggleFullscreen}
-        aria-label={isFullscreen ? "Sair da tela cheia" : "Colocar transmissao em tela cheia"}
-        title={isFullscreen ? "Sair da tela cheia" : "Tela cheia"}
+        aria-label={isFullscreen ? "Sair da tela cheia" : "Colocar transmissão em tela cheia"}
       >
         <MaterialSymbolIcon name={isFullscreen ? "fullscreen_exit" : "fullscreen"} size={18} />
       </button>
@@ -1297,8 +1337,7 @@ export default function VideoCallPanel({
         type="button"
         className={`video-call-share-btn${isCallPopoutOpen ? " is-active" : ""}`}
         onClick={onToggleCallPopout}
-        aria-label={isCallPopoutOpen ? "Voltar transmissao para chamada" : "Abrir transmissao em outra janela"}
-        title={isCallPopoutOpen ? "Voltar transmissao para chamada" : "Abrir transmissao em outra janela"}
+        aria-label={isCallPopoutOpen ? "Voltar transmissão para a chamada" : "Abrir transmissão em outra janela"}
       >
         <MaterialSymbolIcon name={isCallPopoutOpen ? "keyboard_return" : "open_in_new"} size={18} />
       </button>
@@ -1306,15 +1345,14 @@ export default function VideoCallPanel({
   );
 
   const renderTransmissionPreviewControls = (): JSX.Element => (
-    <div className="video-call-screen-tile__controls" role="toolbar" aria-label="Controles da transmissao">
+    <div className="video-call-screen-tile__controls" role="toolbar" aria-label="Controles da transmissão">
       <div className={`video-call-volume-control${isVolumeAnimating ? " is-volume-anim" : ""}`}>
         <button
           type="button"
           className={`video-call-share-btn video-call-share-btn--volume-toggle${isPlaybackMuted ? " is-active" : ""}`}
           onClick={handleToggleMutePlayback}
           onWheel={handleVolumeWheel}
-          aria-label={isPlaybackMuted ? "Ativar som da transmissao" : "Silenciar som da transmissao"}
-          title={`${isPlaybackMuted ? "Ativar som" : "Silenciar som"} (${volumePercent}%)`}
+          aria-label={isPlaybackMuted ? "Ativar som da transmissão" : "Silenciar som da transmissão"}
           disabled={!canAdjustVolume}
         >
           <MaterialSymbolIcon name={isPlaybackMuted ? "volume_off" : "volume_up"} size={16} />
@@ -1328,7 +1366,7 @@ export default function VideoCallPanel({
             className="video-call-volume-slider"
             value={volumePercent}
             onChange={handleVolumeRangeChange}
-            aria-label="Volume da transmissao"
+            aria-label="Volume da transmissão"
             disabled={!canAdjustVolume}
           />
         </div>
@@ -1337,8 +1375,7 @@ export default function VideoCallPanel({
         type="button"
         className={`video-call-share-btn${isFullscreen ? " is-active" : ""}`}
         onClick={handleToggleFullscreen}
-        aria-label={isFullscreen ? "Sair da tela cheia" : "Colocar transmissao em tela cheia"}
-        title={isFullscreen ? "Sair da tela cheia" : "Tela cheia"}
+        aria-label={isFullscreen ? "Sair da tela cheia" : "Colocar transmissão em tela cheia"}
       >
         <MaterialSymbolIcon name={isFullscreen ? "fullscreen_exit" : "fullscreen"} size={18} />
       </button>
@@ -1346,8 +1383,7 @@ export default function VideoCallPanel({
         type="button"
         className={`video-call-share-btn${isCallPopoutOpen ? " is-active" : ""}`}
         onClick={onToggleCallPopout}
-        aria-label={isCallPopoutOpen ? "Voltar transmissao para chamada" : "Abrir transmissao em outra janela"}
-        title={isCallPopoutOpen ? "Voltar transmissao para chamada" : "Abrir transmissao em outra janela"}
+        aria-label={isCallPopoutOpen ? "Voltar transmissão para a chamada" : "Abrir transmissão em outra janela"}
       >
         <MaterialSymbolIcon name={isCallPopoutOpen ? "keyboard_return" : "open_in_new"} size={18} />
       </button>
@@ -1370,7 +1406,7 @@ export default function VideoCallPanel({
             {isTransmissionMode ? (
               <div className="video-call-screen-layout">
                 {isScreenGridMode ? (
-                  <div className="video-call-screen-grid" aria-label="Grade da chamada com transmissao">
+                  <div className="video-call-screen-grid" aria-label="Grade da chamada com transmissão">
                     <div
                       className="video-call-screen-grid__tile video-call-screen-grid__tile--share"
                       role="button"
@@ -1383,7 +1419,6 @@ export default function VideoCallPanel({
                         }
                       }}
                       aria-label={`Tela compartilhada de ${presenterParticipant.name}`}
-                      title={`Tela compartilhada de ${presenterParticipant.name}`}
                     >
                       <StreamVideo
                         className="video-call-screen-grid__video"
@@ -1428,7 +1463,6 @@ export default function VideoCallPanel({
                             }
                           }}
                           aria-label={`Participante ${participant.name}`}
-                          title={participant.name}
                         >
                           {isParticipantScreenSharing ? (
                             <span className="video-call-screen-tile__badge">
@@ -1439,14 +1473,12 @@ export default function VideoCallPanel({
                           {hasPreview ? (
                             <StreamVideo className="video-call-screen-tile__video" stream={previewStream} muted={isLocalTile} />
                           ) : (
-                            <img
+                            <AvatarImage
                               className="video-call-screen-tile__avatar"
-                              src={resolveAvatarImageSrc(participant.avatarSrc, participant.name)}
+                              src={participant.avatarSrc}
+                              name={participant.name}
                               alt={`Avatar de ${participant.name}`}
                               loading="lazy"
-                              onError={(event) => {
-                                handleAvatarImageError(event, participant.name);
-                              }}
                             />
                           )}
                           <span className="video-call-screen-tile__meta">
@@ -1486,7 +1518,7 @@ export default function VideoCallPanel({
                 >
                   {isTransmissionDetached ? (
                     <div className="video-call-transmission-detached" role="status" aria-live="polite">
-                      <p>Transmissao aberta em outra janela.</p>
+                      <p>Transmissão aberta em outra janela.</p>
                       <button
                         type="button"
                         className="video-call-transmission-detached__return"
@@ -1494,7 +1526,7 @@ export default function VideoCallPanel({
                           onToggleCallPopout();
                         }}
                       >
-                        Voltar transmissao para chamada
+                        Voltar para a chamada
                       </button>
                     </div>
                   ) : (
@@ -1505,14 +1537,12 @@ export default function VideoCallPanel({
                           style={getParticipantCardStyle(focusedParticipant)}
                         >
                           <div className="video-call-screen-stage__member-glass" aria-hidden="true" />
-                          <img
+                          <AvatarImage
                             className="video-call-screen-stage__member-avatar"
-                            src={resolveAvatarImageSrc(focusedParticipant.avatarSrc, focusedParticipant.name)}
+                            src={focusedParticipant.avatarSrc}
+                            name={focusedParticipant.name}
                             alt={`Avatar de ${focusedParticipant.name}`}
                             loading="lazy"
-                            onError={(event) => {
-                              handleAvatarImageError(event, focusedParticipant.name);
-                            }}
                           />
                           <div className="video-call-screen-stage__member-name">
                             <span>{focusedParticipant.name}</span>
@@ -1568,8 +1598,6 @@ export default function VideoCallPanel({
                                 setIsScreenShareMembersVisible((current) => !current);
                               }}
                               aria-label={isScreenShareMembersVisible ? "Ocultar membros" : "Mostrar membros"}
-                              title={isScreenShareMembersVisible ? "Ocultar membros" : "Mostrar membros"}
-                              data-tooltip={isScreenShareMembersVisible ? "Ocultar membros" : "Mostrar membros"}
                             >
                               <MaterialSymbolIcon name={isScreenShareMembersVisible ? "expand_more" : "expand_less"} size={14} />
                               <MaterialSymbolIcon name="groups" size={16} />
@@ -1611,7 +1639,6 @@ export default function VideoCallPanel({
                           }
                         }}
                         aria-label={`Tela compartilhada de ${presenterParticipant.name}`}
-                        title={`Tela compartilhada de ${presenterParticipant.name}`}
                       >
                         <StreamVideo
                           className="video-call-screen-tile__video"
@@ -1663,7 +1690,6 @@ export default function VideoCallPanel({
                             }
                           }}
                           aria-label={`Participante ${participant.name}`}
-                          title={participant.name}
                         >
                           {isParticipantScreenSharing ? (
                             <span className="video-call-screen-tile__badge">
@@ -1674,14 +1700,12 @@ export default function VideoCallPanel({
                           {hasPreview ? (
                             <StreamVideo className="video-call-screen-tile__video" stream={previewStream} muted={isLocalTile} />
                           ) : (
-                            <img
+                            <AvatarImage
                               className="video-call-screen-tile__avatar"
-                              src={resolveAvatarImageSrc(participant.avatarSrc, participant.name)}
+                              src={participant.avatarSrc}
+                              name={participant.name}
                               alt={`Avatar de ${participant.name}`}
                               loading="lazy"
-                              onError={(event) => {
-                                handleAvatarImageError(event, participant.name);
-                              }}
                             />
                           )}
                           <span className="video-call-screen-tile__meta">
@@ -1707,12 +1731,10 @@ export default function VideoCallPanel({
                     className={`video-call-participant${isParticipantSpeaking(participant.id) ? " is-speaking" : ""}`}
                     style={getParticipantCardStyle(participant)}
                   >
-                    <img
-                      src={resolveAvatarImageSrc(participant.avatarSrc, participant.name)}
+                    <AvatarImage
+                      src={participant.avatarSrc}
+                      name={participant.name}
                       alt={`Avatar de ${participant.name}`}
-                      onError={(event) => {
-                        handleAvatarImageError(event, participant.name);
-                      }}
                     />
                   </div>
                 ))}
@@ -1735,8 +1757,6 @@ export default function VideoCallPanel({
                         setIsScreenShareMembersVisible((current) => !current);
                       }}
                       aria-label={isScreenShareMembersVisible ? "Ocultar membros" : "Mostrar membros"}
-                      title={isScreenShareMembersVisible ? "Ocultar membros" : "Mostrar membros"}
-                      data-tooltip={isScreenShareMembersVisible ? "Ocultar membros" : "Mostrar membros"}
                     >
                       <MaterialSymbolIcon name={isScreenShareMembersVisible ? "expand_more" : "expand_less"} size={14} />
                       <MaterialSymbolIcon name="groups" size={16} />
@@ -1757,3 +1777,4 @@ export default function VideoCallPanel({
     </div>
   );
 }
+

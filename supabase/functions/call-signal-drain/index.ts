@@ -1,5 +1,6 @@
+/// <reference path="../_shared/edge-runtime.d.ts" />
 import { z } from "npm:zod@3.25.76";
-import { validateFirebaseToken } from "../_shared/auth.ts";
+import { validateSupabaseToken } from "../_shared/auth.ts";
 import { resolveCallAuthorizationContext, validateSignalType } from "../_shared/calls.ts";
 import { enforceRateLimit } from "../_shared/rateLimit.ts";
 import {
@@ -28,8 +29,8 @@ const payloadSchema = z
 function parsePayload(raw: unknown): { callId: string; since: string | null } {
   const parsed = payloadSchema.safeParse(raw);
   if (!parsed.success) {
-    throw new HttpError(400, "INVALID_PAYLOAD", "Payload invalido.", {
-      issues: parsed.error.issues.map((issue) => ({
+    throw new HttpError(400, "INVALID_PAYLOAD", "Payload inválido.", {
+      issues: parsed.error.issues.map((issue: { path: PropertyKey[]; message: string }) => ({
         path: issue.path.join("."),
         message: issue.message,
       })),
@@ -41,7 +42,7 @@ function parsePayload(raw: unknown): { callId: string; since: string | null } {
   };
 }
 
-Deno.serve(async (request) => {
+Deno.serve(async (request: Request) => {
   const context = createRequestContext(ROUTE);
 
   try {
@@ -50,7 +51,7 @@ Deno.serve(async (request) => {
     }
 
     assertMethod(request, "POST");
-    const auth = await validateFirebaseToken(request);
+    const auth = await validateSupabaseToken(request);
     context.uid = auth.uid;
     context.action = "signal-drain";
 

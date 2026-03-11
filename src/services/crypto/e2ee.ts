@@ -1,37 +1,53 @@
+import { base64ToBytes, bytesToBase64, toArrayBuffer } from "./e2ee/encoding";
+import { assertOrThrow, E2EEError } from "./e2ee/errors";
+import { getWebCrypto, randomBytes } from "./e2ee/runtime";
+
 const AES_KEY_LENGTH = 256;
-const IV_LENGTH = 12;
+const LEGACY_IV_LENGTH = 12;
+
+export * from "./e2ee/index";
 
 export function isE2EEEnabled(): boolean {
   const raw = String(import.meta.env.VITE_CHAT_E2EE_ENABLED ?? "").trim().toLowerCase();
   return raw === "1" || raw === "true" || raw === "yes";
 }
 
-export async function generateConversationKey(): Promise<CryptoKey> {
-  return crypto.subtle.generateKey(
+/**
+ * Legacy helper kept only for backward compatibility with old payloads.
+ * New E2EE flow must use per-device sessions from src/services/crypto/e2ee/* modules.
+ */
+export async function generateConversationKey(options?: { extractable?: boolean }): Promise<CryptoKey> {
+  return getWebCrypto().subtle.generateKey(
     {
       name: "AES-GCM",
       length: AES_KEY_LENGTH,
     },
-    true,
+    options?.extractable === true,
     ["encrypt", "decrypt"],
   );
 }
 
+/**
+ * Legacy helper kept only for compatibility with old imports/exports.
+ */
 export async function exportConversationKey(key: CryptoKey): Promise<string> {
-  const raw = await crypto.subtle.exportKey("raw", key);
-  return btoa(String.fromCharCode(...new Uint8Array(raw)));
+  assertOrThrow(key.extractable, "missing_key_material", "Legacy conversation key is not exportable.");
+  const raw = await getWebCrypto().subtle.exportKey("raw", key);
+  return bytesToBase64(new Uint8Array(raw));
 }
 
+/**
+ * Legacy helper kept only for compatibility with old imports/exports.
+ */
 export async function importConversationKey(base64: string): Promise<CryptoKey> {
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index);
-  }
+  const bytes = base64ToBytes(base64, {
+    label: "legacy conversation key",
+    expectedLength: 32,
+  });
 
-  return crypto.subtle.importKey(
+  return getWebCrypto().subtle.importKey(
     "raw",
-    bytes,
+    toArrayBuffer(bytes),
     {
       name: "AES-GCM",
       length: AES_KEY_LENGTH,
@@ -41,49 +57,64 @@ export async function importConversationKey(base64: string): Promise<CryptoKey> 
   );
 }
 
+/**
+ * Legacy message encryption path.
+ * New code should use session-based envelopes from message.ts.
+ */
 export async function encryptMessage(key: CryptoKey, plainText: string): Promise<{ ivBase64: string; cipherTextBase64: string }> {
-  const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
-  const encoded = new TextEncoder().encode(plainText);
+  const iv = randomBytes(LEGACY_IV_LENGTH);
+  const encoded = new TextEncoder().encode(String(plainText ?? ""));
 
-  const cipherBuffer = await crypto.subtle.encrypt(
-    {
-      name: "AES-GCM",
-      iv,
-    },
-    key,
-    encoded,
-  );
-
-  const cipherBytes = new Uint8Array(cipherBuffer);
+  let cipherBuffer: ArrayBuffer;
+  try {
+    cipherBuffer = await getWebCrypto().subtle.encrypt(
+      {
+        name: "AES-GCM",
+        iv: toArrayBuffer(iv),
+      },
+      key,
+      toArrayBuffer(encoded),
+    );
+  } catch (error) {
+    throw new E2EEError("invalid_payload", "Legacy encryptMessage failed.", {
+      cause: error,
+    });
+  }
 
   return {
-    ivBase64: btoa(String.fromCharCode(...iv)),
-    cipherTextBase64: btoa(String.fromCharCode(...cipherBytes)),
+    ivBase64: bytesToBase64(iv),
+    cipherTextBase64: bytesToBase64(new Uint8Array(cipherBuffer)),
   };
 }
 
+/**
+ * Legacy message decryption path.
+ * New code should use session-based envelopes from message.ts.
+ */
 export async function decryptMessage(key: CryptoKey, ivBase64: string, cipherTextBase64: string): Promise<string> {
-  const ivBinary = atob(ivBase64);
-  const cipherBinary = atob(cipherTextBase64);
+  const iv = base64ToBytes(ivBase64, {
+    label: "legacy iv",
+    expectedLength: LEGACY_IV_LENGTH,
+  });
+  const cipher = base64ToBytes(cipherTextBase64, {
+    label: "legacy ciphertext",
+  });
 
-  const iv = new Uint8Array(ivBinary.length);
-  for (let index = 0; index < ivBinary.length; index += 1) {
-    iv[index] = ivBinary.charCodeAt(index);
+  let plainBuffer: ArrayBuffer;
+  try {
+    plainBuffer = await getWebCrypto().subtle.decrypt(
+      {
+        name: "AES-GCM",
+        iv: toArrayBuffer(iv),
+      },
+      key,
+      toArrayBuffer(cipher),
+    );
+  } catch (error) {
+    throw new E2EEError("decrypt_failed", "Legacy decryptMessage failed.", {
+      cause: error,
+    });
   }
-
-  const cipher = new Uint8Array(cipherBinary.length);
-  for (let index = 0; index < cipherBinary.length; index += 1) {
-    cipher[index] = cipherBinary.charCodeAt(index);
-  }
-
-  const plainBuffer = await crypto.subtle.decrypt(
-    {
-      name: "AES-GCM",
-      iv,
-    },
-    key,
-    cipher,
-  );
 
   return new TextDecoder().decode(plainBuffer);
 }

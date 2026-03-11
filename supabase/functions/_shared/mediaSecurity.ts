@@ -1,7 +1,7 @@
 import { HttpError } from "./http.ts";
 
 const SAFE_MEDIA_KEY_REGEX = /^[a-z0-9/_\-.]+$/i;
-const ALLOWED_PREFIXES = ["attachments/", "avatars/", "banners/"] as const;
+const ALLOWED_PREFIXES = ["attachments/", "avatars/", "banners/", "messages/", "guilds/", "emojis/"] as const;
 const BLOCKED_EXTENSIONS = new Set([
   "exe",
   "msi",
@@ -36,7 +36,7 @@ const ALLOWED_UPLOAD_MIME_TYPES = new Set([
 
 export function sanitizeMediaKey(rawKey: unknown): string {
   if (typeof rawKey !== "string") {
-    throw new HttpError(400, "INVALID_MEDIA_KEY", "Media key invalida.");
+    throw new HttpError(400, "INVALID_MEDIA_KEY", "Media key inválida.");
   }
 
   const normalized = rawKey.trim().replace(/^\/+/, "");
@@ -45,16 +45,16 @@ export function sanitizeMediaKey(rawKey: unknown): string {
   }
 
   if (normalized.includes("..") || normalized.includes("\\") || normalized.includes("//")) {
-    throw new HttpError(400, "INVALID_MEDIA_KEY", "Media key invalida.");
+    throw new HttpError(400, "INVALID_MEDIA_KEY", "Media key inválida.");
   }
 
   if (!SAFE_MEDIA_KEY_REGEX.test(normalized)) {
-    throw new HttpError(400, "INVALID_MEDIA_KEY", "Media key invalida.");
+    throw new HttpError(400, "INVALID_MEDIA_KEY", "Media key inválida.");
   }
 
   const hasAllowedPrefix = ALLOWED_PREFIXES.some((prefix) => normalized.startsWith(prefix));
   if (!hasAllowedPrefix) {
-    throw new HttpError(400, "INVALID_MEDIA_KEY", "Prefixo de media key nao permitido.");
+    throw new HttpError(400, "INVALID_MEDIA_KEY", "Prefixo de media key não permitido.");
   }
 
   return normalized;
@@ -88,7 +88,7 @@ export function assertSafeUploadType(key: string, contentType: string): void {
   }
 
   if (!ALLOWED_UPLOAD_MIME_TYPES.has(contentType)) {
-    throw new HttpError(400, "DISALLOWED_MIME_TYPE", "Tipo MIME nao permitido.", {
+    throw new HttpError(400, "DISALLOWED_MIME_TYPE", "Tipo MIME não permitido.", {
       mimeType: contentType,
     });
   }

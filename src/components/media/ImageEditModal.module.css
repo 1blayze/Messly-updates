@@ -206,26 +206,36 @@
 .controlIconButton {
   width: 28px;
   height: 28px;
-  border: 0;
+  border: 1px solid var(--button-ghost-border);
   border-radius: 8px;
-  background: transparent;
-  color: rgba(232, 238, 246, 0.9);
+  background: var(--button-ghost-bg);
+  color: var(--button-ghost-text-hover);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   padding: 0;
   cursor: pointer;
-  transition: background-color 120ms ease, color 120ms ease, opacity 120ms ease;
+  transition: var(--button-transition);
 }
 
 .controlIconButton:hover,
 .controlIconButton:focus-visible {
-  background: rgba(255, 255, 255, 0.12);
-  color: #f0f4ff;
+  background: var(--button-ghost-bg-hover);
+  border-color: var(--button-ghost-border-hover);
+  color: var(--button-ghost-text-hover);
+}
+
+.controlIconButton:active {
+  background: var(--button-ghost-bg-active);
+}
+
+.controlIconButton:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--button-focus-ring);
 }
 
 .controlIconButton:disabled {
-  opacity: 0.5;
+  opacity: var(--button-disabled-opacity);
   cursor: not-allowed;
 }
 
@@ -256,50 +266,77 @@
   min-height: 36px;
   border-radius: 10px;
   padding: 0 16px;
-  border: 1px solid var(--border-subtle);
-  background: rgba(255, 255, 255, 0.03);
-  color: var(--text-primary);
+  border: 1px solid var(--button-secondary-border);
+  background: var(--button-secondary-bg);
+  color: var(--button-secondary-text);
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
-  transition: background-color 120ms ease, border-color 120ms ease, opacity 120ms ease;
+  box-shadow: var(--button-secondary-shadow);
+  transition: var(--button-transition);
 }
 
 .resetButton {
   border-color: transparent;
   background: transparent;
-  color: #9ca6f8;
+  color: var(--button-ghost-text-hover);
   padding-left: 0;
   padding-right: 0;
+  box-shadow: none;
 }
 
 .cancelButton:hover,
 .cancelButton:focus-visible {
-  background: rgba(255, 255, 255, 0.08);
-  border-color: rgba(255, 255, 255, 0.2);
+  background: var(--button-secondary-bg-hover);
+  border-color: var(--button-secondary-border-hover);
+}
+
+.cancelButton:active {
+  background: var(--button-secondary-bg-active);
+  border-color: var(--button-secondary-border-active);
 }
 
 .applyButton {
-  border-color: #5965f3;
-  background: linear-gradient(180deg, #5f6bff, #545fe7);
+  border-color: var(--button-primary-border);
+  background: var(--button-primary-bg);
+  color: var(--button-primary-text);
+  box-shadow: var(--button-primary-shadow);
 }
 
 .applyButton:hover,
 .applyButton:focus-visible {
-  border-color: #7080ff;
-  background: linear-gradient(180deg, #6672ff, #5a66ec);
+  border-color: var(--button-primary-border-hover);
+  background: var(--button-primary-bg-hover);
+}
+
+.applyButton:active {
+  border-color: var(--button-primary-border-active);
+  background: var(--button-primary-bg-active);
 }
 
 .resetButton:hover,
 .resetButton:focus-visible {
-  color: #bcc3ff;
+  background: var(--button-ghost-bg-hover);
+  color: var(--button-ghost-text-hover);
+}
+
+.resetButton:active {
+  background: var(--button-ghost-bg-active);
+}
+
+.resetButton:focus-visible,
+.cancelButton:focus-visible,
+.applyButton:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--button-focus-ring);
 }
 
 .resetButton:disabled,
 .cancelButton:disabled,
 .applyButton:disabled {
-  opacity: 0.55;
+  opacity: var(--button-disabled-opacity);
   cursor: not-allowed;
+  box-shadow: none;
 }
 
 @media (max-width: 720px) {

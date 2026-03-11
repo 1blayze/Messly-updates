@@ -4,12 +4,18 @@ import {
   AVATAR_MAX_MB,
   BANNER_ALLOWED_TYPES,
   BANNER_MAX_BYTES,
+  BANNER_MAX_H,
   BANNER_MAX_MB,
+  BANNER_MAX_W,
+  BANNER_MIN_H,
+  BANNER_MIN_W,
 } from "./imageLimits";
-import { getAuthenticatedEdgeHeaders } from "../auth/firebaseToken";
+import { uploadMediaAsset } from "../uploadMedia";
+import { hashFile } from "../../utils/hashFile";
+import { getSupabaseFunctionHeaders } from "../supabase";
 import { EdgeFunctionError, invokeEdgeJson } from "../edge/edgeClient";
-import { supabase } from "../supabase";
 import { uploadWithRetry } from "./uploadWithRetry";
+import { getRuntimeAppApiUrl } from "../../config/runtimeApiConfig";
 
 export type ProfileMediaKind = "avatar" | "banner";
 
@@ -21,305 +27,36 @@ export type ProfileMediaUploadErrorCode =
   | "INVALID_IMAGE"
   | "GIF_TOO_MANY_FRAMES";
 
+const ELECTRON_MEDIA_UPLOAD_ERROR_PREFIX = "MEDIA_UPLOAD_ERROR::";
+
 interface UploadProfileMediaResponse {
   key: string;
   hash: string;
   size: number;
 }
 
-interface ParsedUploadErrorPayload {
-  code: ProfileMediaUploadErrorCode;
-  details?: Record<string, unknown>;
+interface EdgeUploadResponse {
+  key?: unknown;
+  size?: unknown;
+  code?: unknown;
+  error?: unknown;
+  message?: unknown;
 }
 
-interface PresignRequest {
-  action: "put";
-  key: string;
-  contentType: string;
-  fileSize: number;
+interface EdgePresignUploadResponse {
+  url?: unknown;
+  key?: unknown;
+  contentType?: unknown;
+  expiresIn?: unknown;
 }
 
-interface PresignResponse {
-  key: string;
-  action: "put";
-  url: string;
-}
-
-interface EdgeErrorEnvelope {
-  error?: {
-    code?: string;
-    message?: string;
-    details?: unknown;
-    requestId?: string;
-  };
-}
-
-const MEDIA_UPLOAD_ERROR_PREFIX = "MEDIA_UPLOAD_ERROR::";
-const PROFILE_MEDIA_PREFIX_BY_KIND: Record<ProfileMediaKind, string> = {
-  avatar: "avatars",
-  banner: "banners",
-};
-const ENABLE_DIRECT_PROFILE_UPLOAD =
-  String(import.meta.env.VITE_PROFILE_DIRECT_UPLOAD ?? "")
-    .trim()
-    .toLowerCase() === "true";
-
-function resolveMimeType(file: File): string {
-  const declaredType = file.type.trim().toLowerCase();
-  if (declaredType) {
-    return declaredType;
-  }
-
-  const ext = file.name.split(".").pop()?.trim().toLowerCase();
-  switch (ext) {
-    case "jpg":
-    case "jpeg":
-      return "image/jpeg";
-    case "png":
-      return "image/png";
-    case "webp":
-      return "image/webp";
-    case "gif":
-      return "image/gif";
-    default:
-      return "application/octet-stream";
-  }
-}
-
-function getFileExtension(file: File, mimeType: string): string {
-  const normalizedMime = mimeType.trim().toLowerCase();
-  if (normalizedMime === "image/webp") {
-    return "webp";
-  }
-  if (normalizedMime === "image/png") {
-    return "png";
-  }
-  if (normalizedMime === "image/jpeg") {
-    return "jpg";
-  }
-  if (normalizedMime === "image/gif") {
-    return "gif";
-  }
-
-  const nameExt = file.name.split(".").pop()?.trim().toLowerCase();
-  return nameExt || "bin";
-}
-
-async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  const subtle = globalThis.crypto?.subtle;
-  if (subtle) {
-    const digestInput = new Uint8Array(bytes.byteLength);
-    digestInput.set(bytes);
-    const digest = await subtle.digest("SHA-256", digestInput.buffer);
-    return Array.from(new Uint8Array(digest))
-      .map((byte) => byte.toString(16).padStart(2, "0"))
-      .join("");
-  }
-
-  // Browser fallback when SubtleCrypto is unavailable.
-  const fallback = Math.random().toString(16).slice(2) + Date.now().toString(16);
-  return fallback.padEnd(64, "0").slice(0, 64);
-}
-
-async function uploadProfileMediaViaWebStorage(
-  kind: ProfileMediaKind,
-  userId: string,
-  file: File,
-): Promise<UploadProfileMediaResponse> {
-  const mimeType = resolveMimeType(file);
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  const hash = await sha256Hex(bytes);
-  const ext = getFileExtension(file, mimeType);
-  const key = `${PROFILE_MEDIA_PREFIX_BY_KIND[kind]}/${userId}/${hash}.${ext}`;
-
-  if (ENABLE_DIRECT_PROFILE_UPLOAD) {
-    try {
-      const presigned = await invokeEdgeJson<PresignRequest, PresignResponse>(
-        "r2-presign",
-        {
-          action: "put",
-          key,
-          contentType: mimeType,
-          fileSize: file.size,
-        },
-        {
-          retries: 1,
-          timeoutMs: 18_000,
-        },
-      );
-
-      if (!presigned?.url) {
-        throw new Error("Falha ao obter URL de upload.");
-      }
-
-      await uploadWithRetry({
-        url: presigned.url,
-        file,
-        contentType: mimeType,
-        retries: 2,
-        timeoutMs: 45_000,
-      });
-    } catch (error) {
-      if (!shouldFallbackToEdgeProxy(error)) {
-        throw error;
-      }
-
-      await uploadProfileMediaViaEdgeProxy(file, key, mimeType);
-    }
-  } else {
-    await uploadProfileMediaViaEdgeProxy(file, key, mimeType);
-  }
-
-  return {
-    key,
-    hash,
-    size: file.size,
-  };
-}
-
-function shouldFallbackToEdgeProxy(error: unknown): boolean {
-  if (error instanceof EdgeFunctionError) {
-    return false;
-  }
-
-  if (error instanceof DOMException && error.name === "AbortError") {
-    return false;
-  }
-
-  const message = String(error instanceof Error ? error.message : error ?? "").toLowerCase();
-  if (!message) {
-    return false;
-  }
-
-  return (
-    message.includes("network error while uploading") ||
-    message.includes("failed to fetch") ||
-    message.includes("err_failed") ||
-    message.includes("cors") ||
-    message.includes("preflight")
-  );
-}
-
-async function uploadProfileMediaViaEdgeProxy(file: File, key: string, mimeType: string): Promise<void> {
-  const requestHeaders = {
-    "Content-Type": mimeType,
-    "x-media-key": key,
-  };
-  let functionHeaders = await getAuthenticatedEdgeHeaders(requestHeaders, { mode: "firebase" });
-  let uploadResponse = await supabase.functions.invoke("r2-upload", {
-    body: file,
-    headers: functionHeaders,
-  });
-
-  if (uploadResponse.error && (await isInvalidJwtInvokeError(uploadResponse.error))) {
-    functionHeaders = await getAuthenticatedEdgeHeaders(requestHeaders, { mode: "firebase", forceRefresh: true });
-    uploadResponse = await supabase.functions.invoke("r2-upload", {
-      body: file,
-      headers: functionHeaders,
-    });
-  }
-
-  if (uploadResponse.error && (await isInvalidJwtInvokeError(uploadResponse.error))) {
-    functionHeaders = await getAuthenticatedEdgeHeaders(requestHeaders, { mode: "supabase" });
-    uploadResponse = await supabase.functions.invoke("r2-upload", {
-      body: file,
-      headers: functionHeaders,
-    });
-  }
-
-  if (uploadResponse.error) {
-    const message = await extractEdgeInvokeErrorMessage(uploadResponse.error);
-    throw new Error(message || "Nao foi possivel enviar o arquivo para o storage.");
-  }
-}
-
-async function extractEdgeInvokeErrorMessage(error: unknown): Promise<string> {
-  const fallbackMessage =
-    typeof error === "object" && error !== null && "message" in error
-      ? String((error as { message?: string }).message ?? "").trim()
-      : "";
-
-  const context =
-    typeof error === "object" && error !== null && "context" in error
-      ? (error as { context?: unknown }).context
-      : null;
-
-  if (!(context instanceof Response)) {
-    return fallbackMessage;
-  }
-
-  try {
-    const parsed = (await context.clone().json()) as EdgeErrorEnvelope;
-    const code = String(parsed?.error?.code ?? "").trim();
-    const message = String(parsed?.error?.message ?? "").trim();
-
-    if (message) {
-      if (code) {
-        return `${message} (${code})`;
-      }
-      return message;
-    }
-  } catch {
-    // noop
-  }
-
-  try {
-    const rawText = (await context.clone().text()).trim();
-    if (rawText) {
-      return rawText;
-    }
-  } catch {
-    // noop
-  }
-
-  return fallbackMessage;
-}
-
-async function isInvalidJwtInvokeError(error: unknown): Promise<boolean> {
-  const context =
-    typeof error === "object" && error !== null && "context" in error
-      ? (error as { context?: unknown }).context
-      : null;
-
-  if (context instanceof Response) {
-    if (context.status !== 401) {
-      return false;
-    }
-
-    try {
-      const parsed = (await context.clone().json()) as {
-        code?: string | number;
-        message?: string;
-        error?: { code?: string | number; message?: string };
-      };
-      const code = String(parsed.error?.code ?? parsed.code ?? "").toLowerCase();
-      const message = String(parsed.error?.message ?? parsed.message ?? "").toLowerCase();
-      return code.includes("401") || message.includes("invalid jwt") || message.includes("unauthorized");
-    } catch {
-      const text = (await context.clone().text()).toLowerCase();
-      return text.includes("invalid jwt") || text.includes("unauthorized");
-    }
-  }
-
-  const message =
-    typeof error === "object" && error !== null && "message" in error
-      ? String((error as { message?: string }).message ?? "").toLowerCase()
-      : "";
-  return message.includes("invalid jwt") || message.includes("unauthorized");
-}
+let r2UploadFunctionUnavailable = false;
+let r2PresignFunctionUnavailable = false;
 
 function toNumberOrUndefined(value: unknown): number | undefined {
   if (typeof value === "number" && Number.isFinite(value)) {
     return value;
   }
-
-  if (typeof value === "string" && value.trim()) {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed)) {
-      return parsed;
-    }
-  }
-
   return undefined;
 }
 
@@ -358,50 +95,6 @@ export function isProfileMediaUploadError(error: unknown): error is ProfileMedia
   );
 }
 
-function isMissingElectronR2EnvError(error: unknown): boolean {
-  const message =
-    typeof error === "object" && error !== null && "message" in error
-      ? String((error as { message?: string }).message ?? "")
-      : String(error ?? "");
-
-  if (!message.includes("Missing required environment variable:")) {
-    return false;
-  }
-
-  return (
-    message.includes("R2_BUCKET") ||
-    message.includes("R2_ENDPOINT") ||
-    message.includes("R2_ACCESS_KEY_ID") ||
-    message.includes("R2_SECRET_ACCESS_KEY")
-  );
-}
-
-function parseUploadErrorPayload(error: unknown): ParsedUploadErrorPayload | null {
-  const message =
-    typeof error === "object" && error !== null && "message" in error
-      ? String((error as { message?: string }).message ?? "")
-      : String(error ?? "");
-
-  if (!message.startsWith(MEDIA_UPLOAD_ERROR_PREFIX)) {
-    return null;
-  }
-
-  const rawPayload = message.slice(MEDIA_UPLOAD_ERROR_PREFIX.length).trim();
-  if (!rawPayload) {
-    return null;
-  }
-
-  try {
-    const parsed = JSON.parse(rawPayload) as ParsedUploadErrorPayload;
-    if (!parsed || typeof parsed !== "object" || typeof parsed.code !== "string") {
-      return null;
-    }
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
 function getUploadErrorMessage(code: ProfileMediaUploadErrorCode, details: Record<string, unknown>): string {
   switch (code) {
     case "FILE_TOO_LARGE": {
@@ -412,38 +105,186 @@ function getUploadErrorMessage(code: ProfileMediaUploadErrorCode, details: Recor
       const allowedTypes = Array.isArray(details.allowedTypes)
         ? details.allowedTypes.filter((value): value is string => typeof value === "string")
         : [];
-      if (allowedTypes.length > 0) {
-        return `Formato nao suportado. Use: ${allowedTypes.join(", ")}.`;
-      }
-      return "Formato nao suportado.";
+      return allowedTypes.length > 0 ? `Formato nao suportado. Use: ${allowedTypes.join(", ")}.` : "Formato nao suportado.";
     }
     case "DIMENSIONS_TOO_SMALL": {
       const minWidth = toNumberOrUndefined(details.minWidth);
       const minHeight = toNumberOrUndefined(details.minHeight);
-      if (minWidth && minHeight) {
-        return `Imagem menor que o minimo permitido (${minWidth}x${minHeight}).`;
-      }
-      return "Imagem menor que o minimo permitido.";
+      return minWidth && minHeight
+        ? `Imagem menor que o minimo permitido (${minWidth}x${minHeight}).`
+        : "Imagem menor que o minimo permitido.";
     }
     case "DIMENSIONS_TOO_LARGE": {
       const maxWidth = toNumberOrUndefined(details.maxWidth);
       const maxHeight = toNumberOrUndefined(details.maxHeight);
-      if (maxWidth && maxHeight) {
-        return `Imagem maior que o maximo permitido (${maxWidth}x${maxHeight}).`;
-      }
-      return "Imagem maior que o maximo permitido.";
+      return maxWidth && maxHeight
+        ? `Imagem maior que o maximo permitido (${maxWidth}x${maxHeight}).`
+        : "Imagem maior que o maximo permitido.";
     }
-    case "GIF_TOO_MANY_FRAMES": {
-      const maxFrames = toNumberOrUndefined(details.maxFrames);
-      if (maxFrames) {
-        return `GIF excede o limite de ${maxFrames} frames.`;
-      }
+    case "GIF_TOO_MANY_FRAMES":
       return "GIF excede o limite de frames permitido.";
-    }
     case "INVALID_IMAGE":
     default:
       return "Arquivo de imagem invalido.";
   }
+}
+
+function parseElectronProfileMediaUploadError(error: unknown): ProfileMediaUploadError | null {
+  const message = String(error instanceof Error ? error.message : error ?? "").trim();
+  const markerIndex = message.indexOf(ELECTRON_MEDIA_UPLOAD_ERROR_PREFIX);
+  if (markerIndex < 0) {
+    return null;
+  }
+
+  const payloadRaw = message.slice(markerIndex + ELECTRON_MEDIA_UPLOAD_ERROR_PREFIX.length).trim();
+  if (!payloadRaw) {
+    return new ProfileMediaUploadError("INVALID_IMAGE", {}, "Nao foi possivel processar a imagem enviada.");
+  }
+
+  try {
+    const parsed = JSON.parse(payloadRaw) as { code?: unknown; details?: unknown };
+    const code = String(parsed.code ?? "").trim() as ProfileMediaUploadErrorCode;
+    const details =
+      parsed.details && typeof parsed.details === "object" && !Array.isArray(parsed.details)
+        ? (parsed.details as Record<string, unknown>)
+        : {};
+
+    if (
+      code !== "FILE_TOO_LARGE"
+      && code !== "UNSUPPORTED_TYPE"
+      && code !== "DIMENSIONS_TOO_SMALL"
+      && code !== "DIMENSIONS_TOO_LARGE"
+      && code !== "INVALID_IMAGE"
+      && code !== "GIF_TOO_MANY_FRAMES"
+    ) {
+      return new ProfileMediaUploadError("INVALID_IMAGE", details, "Nao foi possivel processar a imagem enviada.");
+    }
+
+    return new ProfileMediaUploadError(code, details, getUploadErrorMessage(code, details));
+  } catch {
+    return new ProfileMediaUploadError("INVALID_IMAGE", {}, "Nao foi possivel processar a imagem enviada.");
+  }
+}
+
+function shouldFallbackFromElectronUploadError(error: unknown): boolean {
+  const message = String(error instanceof Error ? error.message : error ?? "").trim().toLowerCase();
+  if (!message) {
+    return false;
+  }
+
+  if (message.includes("missing required environment variable")) {
+    return true;
+  }
+
+  if (message.includes("error invoking remote method") && message.includes("media:upload-profile")) {
+    return true;
+  }
+
+  return false;
+}
+
+function getSupabaseFunctionsBaseUrl(): string | null {
+  const supabaseUrl = String(import.meta.env.VITE_SUPABASE_URL ?? "").trim();
+  if (!supabaseUrl) {
+    return null;
+  }
+
+  if (import.meta.env.DEV && typeof window !== "undefined") {
+    const host = String(window.location.hostname ?? "").trim().toLowerCase();
+    if (host === "localhost" || host === "127.0.0.1") {
+      return "/__supabase/functions/v1";
+    }
+  }
+
+  return `${supabaseUrl.replace(/\/+$/, "")}/functions/v1`;
+}
+
+function getProfileMediaKey(kind: ProfileMediaKind, userId: string): string {
+  return kind === "avatar" ? `avatars/${userId}.webp` : `banners/${userId}.webp`;
+}
+
+function shouldSkipGatewayMediaFallback(): boolean {
+  if (typeof window === "undefined" || typeof window.electronAPI === "undefined") {
+    return false;
+  }
+
+  const explicitApiUrl = String(import.meta.env.VITE_MESSLY_API_URL ?? "").trim();
+  if (explicitApiUrl) {
+    return false;
+  }
+
+  const runtimeApiUrl = String(getRuntimeAppApiUrl() ?? "").trim();
+  if (runtimeApiUrl) {
+    return false;
+  }
+
+  return true;
+}
+
+function parseEdgeUploadErrorMessage(payload: unknown, fallbackMessage: string): string {
+  if (!payload || typeof payload !== "object") {
+    return fallbackMessage;
+  }
+
+  const record = payload as { error?: unknown; message?: unknown };
+  const nestedError = record.error;
+  if (nestedError && typeof nestedError === "object") {
+    const nestedMessage = String((nestedError as { message?: unknown }).message ?? "").trim();
+    if (nestedMessage) {
+      return nestedMessage;
+    }
+  }
+
+  if (typeof nestedError === "string" && nestedError.trim()) {
+    return nestedError.trim();
+  }
+
+  const topLevelMessage = String(record.message ?? "").trim();
+  if (topLevelMessage) {
+    return topLevelMessage;
+  }
+
+  return fallbackMessage;
+}
+
+function isEdgeFunctionMissing(payload: unknown, status: number): boolean {
+  if (status === 404) {
+    return true;
+  }
+
+  if (!payload || typeof payload !== "object") {
+    return false;
+  }
+
+  const record = payload as { code?: unknown; error?: unknown };
+  const directCode = String(record.code ?? "").trim().toUpperCase();
+  if (directCode === "NOT_FOUND") {
+    return true;
+  }
+
+  if (record.error && typeof record.error === "object") {
+    const nestedCode = String((record.error as { code?: unknown }).code ?? "").trim().toUpperCase();
+    if (nestedCode === "NOT_FOUND") {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function isEdgeFunctionUnavailableError(error: unknown): boolean {
+  if (error instanceof EdgeFunctionError) {
+    const code = String(error.code ?? "").trim().toUpperCase();
+    return error.status === 404 || code === "NOT_FOUND" || code === "HTTP_404";
+  }
+
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const status = Number((error as { status?: unknown }).status ?? NaN);
+  const code = String((error as { code?: unknown }).code ?? "").trim().toUpperCase();
+  return status === 404 || code === "NOT_FOUND" || code === "HTTP_404";
 }
 
 function ensureLocalConstraints(kind: ProfileMediaKind, file: File): void {
@@ -457,34 +298,14 @@ function ensureLocalConstraints(kind: ProfileMediaKind, file: File): void {
   }
 
   const declaredType = file.type.trim().toLowerCase();
-  if (!declaredType) {
-    return;
-  }
-
   const allowedTypes = getAllowedTypes(kind);
-  if (!allowedTypes.includes(declaredType)) {
+  if (declaredType && !allowedTypes.includes(declaredType)) {
     throw new ProfileMediaUploadError(
       "UNSUPPORTED_TYPE",
       { allowedTypes: [...allowedTypes] },
       getUploadErrorMessage("UNSUPPORTED_TYPE", { allowedTypes: [...allowedTypes] }),
     );
   }
-}
-
-function getLegacyTargetSize(kind: ProfileMediaKind): { width: number; height: number; quality: number } {
-  if (kind === "avatar") {
-    return {
-      width: 512,
-      height: 512,
-      quality: 0.92,
-    };
-  }
-
-  return {
-    width: 1200,
-    height: 480,
-    quality: 0.9,
-  };
 }
 
 function computeCoverCrop(
@@ -521,7 +342,13 @@ async function loadImageFromFile(file: File): Promise<HTMLImageElement> {
 
     image.onerror = () => {
       URL.revokeObjectURL(objectUrl);
-      reject(new Error("Nao foi possivel ler a imagem selecionada."));
+      reject(
+        new ProfileMediaUploadError(
+          "INVALID_IMAGE",
+          {},
+          "Nao foi possivel ler a imagem selecionada.",
+        ),
+      );
     };
 
     image.src = objectUrl;
@@ -533,7 +360,7 @@ async function canvasToWebp(canvas: HTMLCanvasElement, quality: number): Promise
     canvas.toBlob(
       (blob) => {
         if (!blob) {
-          reject(new Error("Nao foi possivel converter a imagem para WebP."));
+          reject(new ProfileMediaUploadError("INVALID_IMAGE", {}, "Nao foi possivel converter a imagem para WebP."));
           return;
         }
         resolve(blob);
@@ -544,13 +371,47 @@ async function canvasToWebp(canvas: HTMLCanvasElement, quality: number): Promise
   });
 }
 
-async function encodeLegacyWebp(kind: ProfileMediaKind, file: File): Promise<Uint8Array> {
-  if (!file.type.startsWith("image/")) {
-    throw new Error("Selecione um arquivo de imagem valido.");
+function getTargetSize(kind: ProfileMediaKind): { width: number; height: number; quality: number } {
+  if (kind === "avatar") {
+    return {
+      width: 256,
+      height: 256,
+      quality: 0.92,
+    };
   }
 
+  return {
+    width: 1024,
+    height: 410,
+    quality: 0.9,
+  };
+}
+
+function assertImageDimensions(kind: ProfileMediaKind, image: HTMLImageElement): void {
+  if (kind === "banner") {
+    if (image.naturalWidth < BANNER_MIN_W || image.naturalHeight < BANNER_MIN_H) {
+      throw new ProfileMediaUploadError(
+        "DIMENSIONS_TOO_SMALL",
+        { minWidth: BANNER_MIN_W, minHeight: BANNER_MIN_H },
+        getUploadErrorMessage("DIMENSIONS_TOO_SMALL", { minWidth: BANNER_MIN_W, minHeight: BANNER_MIN_H }),
+      );
+    }
+
+    if (image.naturalWidth > BANNER_MAX_W || image.naturalHeight > BANNER_MAX_H) {
+      throw new ProfileMediaUploadError(
+        "DIMENSIONS_TOO_LARGE",
+        { maxWidth: BANNER_MAX_W, maxHeight: BANNER_MAX_H },
+        getUploadErrorMessage("DIMENSIONS_TOO_LARGE", { maxWidth: BANNER_MAX_W, maxHeight: BANNER_MAX_H }),
+      );
+    }
+  }
+}
+
+async function normalizeProfileMedia(kind: ProfileMediaKind, file: File, userId: string): Promise<File> {
   const image = await loadImageFromFile(file);
-  const { width, height, quality } = getLegacyTargetSize(kind);
+  assertImageDimensions(kind, image);
+
+  const { width, height, quality } = getTargetSize(kind);
   const crop = computeCoverCrop(image.naturalWidth, image.naturalHeight, width, height);
 
   const canvas = document.createElement("canvas");
@@ -559,7 +420,7 @@ async function encodeLegacyWebp(kind: ProfileMediaKind, file: File): Promise<Uin
 
   const context = canvas.getContext("2d");
   if (!context) {
-    throw new Error("Nao foi possivel preparar a imagem.");
+    throw new ProfileMediaUploadError("INVALID_IMAGE", {}, "Nao foi possivel preparar a imagem.");
   }
 
   context.imageSmoothingEnabled = true;
@@ -567,7 +428,177 @@ async function encodeLegacyWebp(kind: ProfileMediaKind, file: File): Promise<Uin
   context.drawImage(image, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, width, height);
 
   const webpBlob = await canvasToWebp(canvas, quality);
-  return new Uint8Array(await webpBlob.arrayBuffer());
+  return new File([webpBlob], `${userId}.webp`, {
+    type: "image/webp",
+    lastModified: Date.now(),
+  });
+}
+
+async function uploadProfileMediaViaElectron(
+  kind: ProfileMediaKind,
+  userId: string,
+  uploadFile: File,
+): Promise<UploadProfileMediaResponse | null> {
+  const uploadProfileMedia = window.electronAPI?.uploadProfileMedia;
+  if (!uploadProfileMedia) {
+    return null;
+  }
+
+  try {
+    const bytes = await uploadFile.arrayBuffer();
+    const uploaded = await uploadProfileMedia({
+      kind,
+      userId,
+      bytes,
+      mimeType: uploadFile.type,
+      fileName: uploadFile.name,
+    });
+
+    return {
+      key: uploaded.key,
+      hash: uploaded.hash,
+      size: uploaded.size,
+    };
+  } catch (error) {
+    const parsedError = parseElectronProfileMediaUploadError(error);
+    if (parsedError) {
+      throw parsedError;
+    }
+    if (shouldFallbackFromElectronUploadError(error)) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function uploadProfileMediaViaEdgeFunction(
+  kind: ProfileMediaKind,
+  userId: string,
+  normalizedFile: File,
+): Promise<UploadProfileMediaResponse | null> {
+  // If presign endpoint is absent in the current project, avoid hitting
+  // the legacy direct-upload function and producing duplicate 404 noise.
+  if (r2PresignFunctionUnavailable) {
+    return null;
+  }
+
+  if (r2UploadFunctionUnavailable) {
+    return null;
+  }
+
+  const functionBaseUrl = getSupabaseFunctionsBaseUrl();
+  if (!functionBaseUrl) {
+    return null;
+  }
+
+  const functionHeaders = await getSupabaseFunctionHeaders({ requireAuth: true });
+  if (!functionHeaders || !String(functionHeaders.authorization ?? "").trim()) {
+    throw new Error("Sessao invalida ou expirada para envio de imagem.");
+  }
+
+  const mediaKey = getProfileMediaKey(kind, userId);
+  const response = await fetch(`${functionBaseUrl}/r2-upload`, {
+    method: "POST",
+    headers: {
+      ...functionHeaders,
+      "x-media-key": mediaKey,
+      "x-presign-expires": "300",
+      "content-type": normalizedFile.type || "application/octet-stream",
+    },
+    body: normalizedFile,
+  });
+
+  const parsed = (await response.json().catch(() => null)) as EdgeUploadResponse | null;
+  if (!response.ok) {
+    if (isEdgeFunctionMissing(parsed, response.status)) {
+      r2UploadFunctionUnavailable = true;
+      return null;
+    }
+
+    const fallbackMessage = "Falha ao enviar imagem de perfil.";
+    throw new Error(parseEdgeUploadErrorMessage(parsed, fallbackMessage));
+  }
+
+  const returnedKey = String(parsed?.key ?? "").trim() || mediaKey;
+  const sha256 = await hashFile(normalizedFile);
+  const uploadedSize = Number(parsed?.size ?? normalizedFile.size);
+
+  return {
+    key: returnedKey,
+    hash: sha256,
+    size: Number.isFinite(uploadedSize) ? uploadedSize : normalizedFile.size,
+  };
+}
+
+async function uploadProfileMediaViaPresign(
+  kind: ProfileMediaKind,
+  userId: string,
+  normalizedFile: File,
+): Promise<UploadProfileMediaResponse | null> {
+  if (r2PresignFunctionUnavailable) {
+    return null;
+  }
+
+  const mediaKey = getProfileMediaKey(kind, userId);
+  let presignResponse: EdgePresignUploadResponse;
+
+  try {
+    presignResponse = await invokeEdgeJson<
+      {
+        action: "put";
+        key: string;
+        contentType: string;
+        fileSize: number;
+        expiresSeconds: number;
+      },
+      EdgePresignUploadResponse
+    >(
+      "r2-presign",
+      {
+        action: "put",
+        key: mediaKey,
+        contentType: normalizedFile.type || "application/octet-stream",
+        fileSize: normalizedFile.size,
+        expiresSeconds: 300,
+      },
+      {
+        requireAuth: true,
+        retries: 1,
+        timeoutMs: 18_000,
+      },
+    );
+  } catch (error) {
+    if (isEdgeFunctionUnavailableError(error)) {
+      r2PresignFunctionUnavailable = true;
+      return null;
+    }
+    throw error;
+  }
+
+  const uploadUrl = String(presignResponse?.url ?? "").trim();
+  if (!uploadUrl) {
+    throw new Error("Falha ao obter URL de upload de imagem de perfil.");
+  }
+
+  const contentType = String(presignResponse?.contentType ?? normalizedFile.type ?? "application/octet-stream").trim()
+    || "application/octet-stream";
+
+  await uploadWithRetry({
+    url: uploadUrl,
+    file: normalizedFile,
+    contentType,
+    retries: 2,
+    timeoutMs: 60_000,
+  });
+
+  const returnedKey = String(presignResponse?.key ?? "").trim() || mediaKey;
+  const sha256 = await hashFile(normalizedFile);
+
+  return {
+    key: returnedKey,
+    hash: sha256,
+    size: normalizedFile.size,
+  };
 }
 
 export async function uploadProfileMediaAsset(
@@ -575,59 +606,39 @@ export async function uploadProfileMediaAsset(
   userId: string,
   file: File,
 ): Promise<UploadProfileMediaResponse> {
-  const uploadHandler = window.electronAPI?.uploadProfileMedia;
   ensureLocalConstraints(kind, file);
-
-  if (!uploadHandler) {
-    return uploadProfileMediaViaWebStorage(kind, userId, file);
-  }
-
-  const bytes = new Uint8Array(await file.arrayBuffer());
-
-  let response: UploadProfileMediaResponse;
-  try {
-    response = await uploadHandler({
-      kind,
-      userId,
-      bytes,
-      mimeType: file.type || undefined,
-      fileName: file.name || undefined,
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error ?? "");
-    if (message.includes("Profile media payload must be WebP.")) {
-      const legacyWebpBytes = await encodeLegacyWebp(kind, file);
-      response = await uploadHandler({
-        kind,
-        userId,
-        bytes: legacyWebpBytes,
-        mimeType: "image/webp",
-        fileName: file.name || undefined,
-      });
-    } else {
-      // Installed Electron builds may not ship local R2 credentials. Fall back to
-      // the web/edge upload path so avatar/banner uploads still work for end users.
-      if (isMissingElectronR2EnvError(error)) {
-        return uploadProfileMediaViaWebStorage(kind, userId, file);
-      }
-
-      if (message.includes("No handler registered for 'media:upload-profile'")) {
-        throw new Error("Upload de perfil indisponivel. Reinicie o aplicativo.");
-      }
-
-      const parsed = parseUploadErrorPayload(error);
-      if (parsed) {
-        const details = parsed.details && typeof parsed.details === "object" ? parsed.details : {};
-        throw new ProfileMediaUploadError(parsed.code, details, getUploadErrorMessage(parsed.code, details));
-      }
-
-      throw error;
+  if (typeof window !== "undefined" && window.electronAPI?.uploadProfileMedia) {
+    const electronUpload = await uploadProfileMediaViaElectron(kind, userId, file);
+    if (electronUpload) {
+      return electronUpload;
     }
   }
 
-  if (!response?.key || !response?.hash) {
-    throw new Error("Resposta invalida do upload.");
+  const normalizedFile = await normalizeProfileMedia(kind, file, userId);
+  const presignUpload = await uploadProfileMediaViaPresign(kind, userId, normalizedFile);
+  if (presignUpload) {
+    return presignUpload;
   }
 
-  return response;
+  const edgeUpload = await uploadProfileMediaViaEdgeFunction(kind, userId, normalizedFile);
+  if (edgeUpload) {
+    return edgeUpload;
+  }
+
+  if (shouldSkipGatewayMediaFallback()) {
+    throw new Error(
+      "Upload de imagem indisponivel: configure VITE_MESSLY_API_URL no build do desktop ou publique a Edge Function r2-presign.",
+    );
+  }
+
+  const uploaded = await uploadMediaAsset({
+    kind,
+    file: normalizedFile,
+  });
+
+  return {
+    key: uploaded.fileKey,
+    hash: uploaded.sha256,
+    size: normalizedFile.size,
+  };
 }

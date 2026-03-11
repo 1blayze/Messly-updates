@@ -1,0 +1,55 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "users": {
+      "$uid": {
+        ".read": "auth != null && auth.uid == $uid",
+        ".write": "auth != null && auth.uid == $uid",
+        "preferredPresence": {
+          ".read": "auth != null && auth.uid == $uid",
+          ".write": "auth != null && auth.uid == $uid",
+          ".validate": "newData.hasChildren(['state','updatedAt'])",
+          "state": {
+            ".validate": "newData.isString() && newData.val().matches(/^(online|idle|dnd|invisivel)$/)"
+          },
+          "updatedAt": { ".validate": "newData.isNumber()" },
+          "$other": { ".validate": false }
+        },
+        "$other": { ".validate": false }
+      }
+    },
+    "presence": {
+      "$uid": {
+        ".read": "auth != null",
+        "$deviceId": {
+          ".read": "auth != null",
+          ".write": "auth != null && auth.uid == $uid",
+          ".validate": "newData.hasChildren(['state','platform','updatedAt'])",
+          "state": {
+            ".validate": "newData.isString() && newData.val().matches(/^(online|idle|dnd|invisivel)$/)"
+          },
+          "platform": {
+            ".validate": "newData.isString() && newData.val().matches(/^(desktop|mobile|browser)$/)"
+          },
+          "updatedAt": { ".validate": "newData.isNumber()" },
+          "lastActive": { ".validate": "!newData.exists() || newData.isNumber()" },
+          "activity": {
+            ".validate": "!newData.exists() || newData.hasChildren(['provider','trackId','trackTitle','artistNames','trackUrl','coverUrl','progressSeconds','durationSeconds','updatedAt'])",
+            "provider": { ".validate": "newData.isString() && newData.val() == 'spotify'" },
+            "trackId": { ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 200" },
+            "trackTitle": { ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 200" },
+            "artistNames": { ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 300" },
+            "trackUrl": { ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 2048" },
+            "coverUrl": { ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 2048" },
+            "progressSeconds": { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 86400" },
+            "durationSeconds": { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 86400" },
+            "updatedAt": { ".validate": "newData.isNumber()" },
+            "$other": { ".validate": false }
+          },
+          "$other": { ".validate": false }
+        }
+      }
+    }
+  }
+}

@@ -106,9 +106,9 @@ export default function ScreenShareModal({
 
       <div className="dm-screen-share-grid">
         {isLoading ? (
-          <div className="dm-screen-share-empty">Carregando fontes...</div>
+          <div className="dm-screen-share-empty">Carregando opções...</div>
         ) : sources.length === 0 ? (
-          <div className="dm-screen-share-empty">Nenhuma fonte disponivel.</div>
+          <div className="dm-screen-share-empty">Nenhuma opção disponível.</div>
         ) : (
           sources.map((source) => {
             const isSelected = selectedSourceId === source.id;
@@ -158,7 +158,7 @@ export default function ScreenShareModal({
       <div className="dm-screen-share-footer">
         <div className="dm-screen-share-quality">
           <div className="dm-screen-share-quality__field">
-            <label htmlFor="dm-screen-share-resolution">Resolucao</label>
+            <label htmlFor="dm-screen-share-resolution">Resolução</label>
             <select
               id="dm-screen-share-resolution"
               value={resolution}

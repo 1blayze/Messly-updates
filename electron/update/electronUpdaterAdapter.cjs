@@ -44,6 +44,24 @@ function normalizeReleaseNotes(rawNotes) {
   return safeString(rawNotes);
 }
 
+function getErrorMessage(error) {
+  return safeString(error instanceof Error ? error.message : String(error ?? "")) ?? "";
+}
+
+function isNoPublishedReleaseError(error) {
+  const normalized = getErrorMessage(error).toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  if (normalized.includes("no published versions on github")) {
+    return true;
+  }
+  return normalized.includes("latest version on github") && (
+    normalized.includes("production release exists") ||
+    normalized.includes("release exists")
+  );
+}
+
 function createElectronUpdaterAdapter({ app }) {
   const state = {
     enabled: true,
@@ -74,6 +92,23 @@ function createElectronUpdaterAdapter({ app }) {
   const setState = (patch) => {
     Object.assign(state, patch);
     emit();
+  };
+
+  const setUnavailableState = (patch = {}) => {
+    setState({
+      status: "unavailable",
+      latestVersion: null,
+      releaseName: null,
+      publishedAt: null,
+      releaseNotes: null,
+      assetName: null,
+      downloadedBytes: 0,
+      totalBytes: 0,
+      progressPercent: 0,
+      errorMessage: null,
+      lastCheckedAt: new Date().toISOString(),
+      ...patch,
+    });
   };
 
   const applyInfoToState = (info) => {
@@ -143,9 +178,14 @@ function createElectronUpdaterAdapter({ app }) {
   });
 
   autoUpdater.on("error", (error) => {
+    if (isNoPublishedReleaseError(error)) {
+      setUnavailableState();
+      return;
+    }
     setState({
       status: "error",
-      errorMessage: error instanceof Error ? error.message : String(error ?? "Falha no updater."),
+      errorMessage: getErrorMessage(error) || "Falha no updater.",
+      lastCheckedAt: new Date().toISOString(),
     });
   });
 
@@ -154,10 +194,15 @@ function createElectronUpdaterAdapter({ app }) {
       await autoUpdater.checkForUpdates();
       return { ...state };
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error ?? "Falha ao verificar atualizacao.");
+      if (isNoPublishedReleaseError(error)) {
+        setUnavailableState();
+        return { ...state };
+      }
+      const message = getErrorMessage(error) || "Falha ao verificar atualizacao.";
       setState({
         status: "error",
         errorMessage: message,
+        lastCheckedAt: new Date().toISOString(),
       });
       throw new Error(message);
     }
@@ -173,7 +218,7 @@ function createElectronUpdaterAdapter({ app }) {
         filePath: latestDownloadedFile,
       };
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error ?? "Falha ao baixar atualizacao.");
+      const message = getErrorMessage(error) || "Falha ao baixar atualizacao.";
       setState({
         status: "error",
         errorMessage: message,
@@ -233,4 +278,3 @@ function createElectronUpdaterAdapter({ app }) {
 module.exports = {
   createElectronUpdaterAdapter,
 };
-

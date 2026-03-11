@@ -1,5 +1,6 @@
+/// <reference path="../_shared/edge-runtime.d.ts" />
 import { z } from "npm:zod@3.25.76";
-import { validateFirebaseToken } from "../_shared/auth.ts";
+import { validateSupabaseToken } from "../_shared/auth.ts";
 import {
   ensureFirebaseUidInConversation,
   getCallTimeoutMs,
@@ -21,7 +22,7 @@ import {
   responseNoContent,
 } from "../_shared/http.ts";
 import { getSupabaseAdminClient } from "../_shared/supabaseAdmin.ts";
-import { assertConversationMembership, resolveUserIdByFirebaseUid } from "../_shared/user.ts";
+import { assertConversationMembership, resolveUserId } from "../_shared/user.ts";
 
 const ROUTE = "call-start";
 
@@ -42,8 +43,8 @@ interface StartCallPayload {
 function parsePayload(raw: unknown): StartCallPayload {
   const result = payloadSchema.safeParse(raw);
   if (!result.success) {
-    throw new HttpError(400, "INVALID_PAYLOAD", "Payload invalido.", {
-      issues: result.error.issues.map((issue) => ({
+    throw new HttpError(400, "INVALID_PAYLOAD", "Payload inválido.", {
+      issues: result.error.issues.map((issue: { path: PropertyKey[]; message: string }) => ({
         path: issue.path.join("."),
         message: issue.message,
       })),
@@ -59,7 +60,7 @@ function parsePayload(raw: unknown): StartCallPayload {
 
 function normalizeCallSession(raw: unknown): CallSessionRow {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    throw new HttpError(500, "CALL_CREATE_FAILED", "Resposta invalida ao criar chamada.");
+    throw new HttpError(500, "CALL_CREATE_FAILED", "Resposta inválida ao criar chamada.");
   }
 
   const casted = raw as Record<string, unknown>;
@@ -79,11 +80,11 @@ function normalizeCallSession(raw: unknown): CallSessionRow {
   } as CallSessionRow;
 
   if (!call.id || !call.conversation_id || !call.created_by || !call.created_at || !call.last_activity_at) {
-    throw new HttpError(500, "CALL_CREATE_FAILED", "Resposta invalida ao criar chamada.");
+    throw new HttpError(500, "CALL_CREATE_FAILED", "Resposta inválida ao criar chamada.");
   }
 
   if (!["audio", "video"].includes(call.mode) || !["ringing", "active", "ended", "missed", "declined"].includes(call.status)) {
-    throw new HttpError(500, "CALL_CREATE_FAILED", "Resposta invalida ao criar chamada.");
+    throw new HttpError(500, "CALL_CREATE_FAILED", "Resposta inválida ao criar chamada.");
   }
 
   return call;
@@ -106,7 +107,7 @@ function serializeCall(call: CallSessionRow): Record<string, unknown> {
   };
 }
 
-Deno.serve(async (request) => {
+Deno.serve(async (request: Request) => {
   const context = createRequestContext(ROUTE);
 
   try {
@@ -115,14 +116,14 @@ Deno.serve(async (request) => {
     }
 
     assertMethod(request, "POST");
-    const auth = await validateFirebaseToken(request);
+    const auth = await validateSupabaseToken(request);
     context.uid = auth.uid;
     context.action = "start";
 
     await enforceRateLimit(`call-start:${auth.uid}`, 10, 60_000, ROUTE);
 
     const payload = parsePayload(await parseJsonBody<unknown>(request));
-    const callerUserId = await resolveUserIdByFirebaseUid(auth.uid, auth.email);
+    const callerUserId = await resolveUserId(auth.uid, auth.email);
     await assertConversationMembership(payload.conversationId, callerUserId);
 
     const members = await getConversationMembers(payload.conversationId);
@@ -130,7 +131,7 @@ Deno.serve(async (request) => {
     ensureFirebaseUidInConversation(members, payload.calleeUid);
 
     if (payload.calleeUid === auth.uid) {
-      throw new HttpError(400, "INVALID_CALLEE", "Nao e possivel iniciar chamada para si mesmo.");
+      throw new HttpError(400, "INVALID_CALLEE", "Não é possível iniciar chamada para si mesmo.");
     }
 
     const supabase = getSupabaseAdminClient();
@@ -149,7 +150,7 @@ Deno.serve(async (request) => {
 
     const existingId = String((existingData as { id?: unknown } | null)?.id ?? "").trim();
     if (existingId) {
-      throw new HttpError(409, "CALL_ALREADY_IN_PROGRESS", "Ja existe uma chamada em andamento nesta conversa.", {
+      throw new HttpError(409, "CALL_ALREADY_IN_PROGRESS", "Já existe uma chamada em andamento nesta conversa.", {
         callId: existingId,
       });
     }

@@ -1,6 +1,6 @@
 const HEX_BANNER_COLOR_REGEX = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i;
 
-export const DEFAULT_BANNER_COLOR = "#000000";
+export const DEFAULT_BANNER_COLOR = "#1f2a44";
 
 export function normalizeBannerColor(rawValue: string | null | undefined): string | null {
   const trimmed = String(rawValue ?? "").trim();

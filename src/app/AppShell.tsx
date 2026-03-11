@@ -1,31 +1,84 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { onValue, ref } from "firebase/database";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import TopBar from "../components/layout/TopBar";
 import ServerRail from "../components/layout/ServerRail";
-import DirectMessagesSidebar from "../components/layout/DirectMessagesSidebar";
 import type { SidebarDirectMessageSelection } from "../components/layout/DirectMessagesSidebar";
 import MaterialSymbolIcon from "../components/ui/MaterialSymbolIcon";
-import AppSettingsView from "../components/settings/AppSettingsView";
+import AvatarImage from "../components/ui/AvatarImage";
 import DirectMessageChatView, { type DirectMessageChatParticipant } from "../components/chat/DirectMessageChatView";
-import msgIcon from "../assets/images/msg.png";
+import msgIcon from "../assets/icons/ui/Chat.svg";
+import spotifyLogo from "../assets/icons/ui/spotify.svg";
+import musicalIcon from "../assets/icons/ui/musical.svg";
 import { presenceController } from "../services/presence/presenceController";
-import { useAuthSession } from "../auth/AuthProvider";
-import type { PresenceState } from "../services/presence/presenceTypes";
-import { getAvatarUrl, getNameAvatarUrl, isDefaultAvatarUrl } from "../services/cdn/mediaUrls";
+import { presenceStore } from "../services/presence/presenceStore";
+import { notificationNavigationCoordinator } from "../services/notification/NotificationNavigationCoordinator";
+import { notificationsService } from "../services/notifications";
+import { useAuthSession, type AuthUser } from "../auth/AuthProvider";
+import type { PresenceSpotifyActivity, PresenceState } from "../services/presence/presenceTypes";
+import {
+  createDefaultSpotifyListenAlongSession,
+  readSpotifyListenAlongSession,
+  subscribeSpotifyListenAlongSession,
+  type SpotifyListenAlongSession,
+} from "../services/connections/spotifyListenAlong";
+import { getAvatarUrl, getBannerUrl, getNameAvatarUrl, isDefaultAvatarUrl, isDefaultBannerUrl } from "../services/cdn/mediaUrls";
 import { normalizeBannerColor } from "../services/profile/bannerColor";
-import { supabase } from "../services/supabase";
-import { firebaseDatabase } from "../services/firebase";
-import { escapeLikePattern, normalizeEmail } from "../services/usernameAvailability";
+import { supabase } from "../lib/supabaseClient";
+import { ensureProfileForUser } from "../services/profile/profileService";
 import { friendRequestsEnabled } from "../services/friends/friendRequests";
+import {
+  buildFriendRequestBlockedNotice,
+  dispatchFriendRequestBlockedNotice,
+  evaluateFriendRequestPermission,
+  queryFriendRequestTargetById,
+} from "../services/friends/friendRequestPrivacy";
+import { useFriendRequestsRealtime } from "../hooks/useFriendRequestsRealtime";
 import {
   dispatchSidebarCallHangup,
   SIDEBAR_CALL_STATE_EVENT,
   type SidebarCallStateDetail,
 } from "../services/calls/callUiPresence";
 
+type AppSettingsViewModule = typeof import("../components/settings/AppSettingsView");
+type DirectMessagesSidebarModule = typeof import("../components/layout/DirectMessagesSidebar");
+type UserProfilePopoverModule = typeof import("../components/UserProfilePopover/UserProfilePopover");
+let appSettingsViewPreloadPromise: Promise<AppSettingsViewModule> | null = null;
+let directMessagesSidebarPreloadPromise: Promise<DirectMessagesSidebarModule> | null = null;
+let userProfilePopoverPreloadPromise: Promise<UserProfilePopoverModule> | null = null;
+
+function preloadAppSettingsView(): Promise<AppSettingsViewModule> {
+  if (!appSettingsViewPreloadPromise) {
+    appSettingsViewPreloadPromise = import("../components/settings/AppSettingsView");
+  }
+  return appSettingsViewPreloadPromise;
+}
+
+function preloadDirectMessagesSidebar(): Promise<DirectMessagesSidebarModule> {
+  if (!directMessagesSidebarPreloadPromise) {
+    directMessagesSidebarPreloadPromise = import("../components/layout/DirectMessagesSidebar");
+  }
+  return directMessagesSidebarPreloadPromise;
+}
+
+function preloadUserProfilePopover(): Promise<UserProfilePopoverModule> {
+  if (!userProfilePopoverPreloadPromise) {
+    userProfilePopoverPreloadPromise = import("../components/UserProfilePopover/UserProfilePopover");
+  }
+  return userProfilePopoverPreloadPromise;
+}
+
+const AppSettingsView = lazy(preloadAppSettingsView);
+const DirectMessagesSidebar = lazy(preloadDirectMessagesSidebar);
+const UserProfilePopover = lazy(preloadUserProfilePopover);
+
 type FriendsTab = "online" | "all" | "pending";
 type PendingDirection = "incoming" | "outgoing";
-type NetworkBannerState = "online" | "offline" | "reconnecting" | "restored";
+type NetworkBannerState = "online" | "invisivel" | "reconnecting" | "restored";
+type SettingsSection = "account" | "profile" | "connections" | "social" | "devices" | "audio" | "windows";
+
+const PRESENCE_DEVICE_STALE_MS = 90_000;
+const SPOTIFY_ACTIVITY_END_GRACE_MS = 8_000;
+const SPOTIFY_ACTIVITY_NO_DURATION_STALE_MS = 60_000;
 
 interface FriendRequestRow {
   id: string;
@@ -45,6 +98,21 @@ interface PendingFriendCard {
   createdAt: string | null;
 }
 
+interface PendingProfileModalState {
+  userId: string;
+  displayName: string;
+  username: string;
+  avatarSrc: string;
+  bannerSrc: string;
+  bannerColor: string | null;
+  themePrimaryColor: string | null;
+  themeAccentColor: string | null;
+  aboutText: string;
+  presenceState: PresenceState;
+  memberSinceLabel: string;
+  spotifyActivity?: PresenceSpotifyActivity | null;
+}
+
 interface FriendListItem {
   requestId: string;
   userId: string;
@@ -52,6 +120,7 @@ interface FriendListItem {
   displayName: string;
   avatarSrc: string;
   presenceState: PresenceState;
+  spotifyActivity?: PresenceSpotifyActivity | null;
   firebaseUid?: string;
 }
 
@@ -61,9 +130,14 @@ interface UserIdentityRow {
   display_name: string | null;
   profile_theme_primary_color?: string | null;
   profile_theme_accent_color?: string | null;
-  avatar_key: string | null;
-  avatar_hash: string | null;
+  avatar_key?: string | null;
+  avatar_hash?: string | null;
   avatar_url?: string | null;
+  banner_key?: string | null;
+  banner_hash?: string | null;
+  banner_color?: string | null;
+  status?: string | null;
+  firebase_uid?: string | null;
 }
 
 interface LegacyAvatarRow {
@@ -75,8 +149,21 @@ interface ProfileUpdatedDetail {
   userId: string;
   display_name?: string | null;
   username?: string | null;
+  about?: string | null;
+  banner_color?: string | null;
   profile_theme_primary_color?: string | null;
   profile_theme_accent_color?: string | null;
+  username_changed_at?: string | null;
+}
+
+interface ProfileMediaUpdatedDetail {
+  userId: string;
+  avatar_key?: string | null;
+  avatar_hash?: string | null;
+  avatar_url?: string | null;
+  banner_color?: string | null;
+  banner_key?: string | null;
+  banner_hash?: string | null;
 }
 
 interface ConversationIdentityRow {
@@ -114,9 +201,68 @@ const FRIENDS_CACHE_PREFIX = "messly:friends:";
 const FRIENDS_CACHE_VERSION = 1;
 const CURRENT_USER_ID_CACHE_PREFIX = "messly:current-user-id:";
 
+const PROFILE_SAFE_COLUMNS =
+  "id,username,display_name,email,firebase_uid:id,avatar_url,avatar_key,avatar_hash,banner_url,banner_key,banner_hash,banner_color,profile_theme_primary_color,profile_theme_accent_color,bio,about:bio,created_at,updated_at";
+
+// Generic loose profile shape (we no longer rely on legacy Firebase columns)
+type ProfileAny = any;
+
 interface CachedFriendsPayload {
   version: number;
   items: FriendListItem[];
+}
+
+function SettingsModalFallback(): JSX.Element {
+  return (
+    <div className="app-settings-modal__fallback" role="status" aria-live="polite" aria-busy="true">
+      <aside className="app-settings-modal__fallback-menu" aria-hidden="true">
+        <span className="app-settings-modal__fallback-line app-settings-modal__fallback-line--brand" />
+        <span className="app-settings-modal__fallback-line" />
+        <span className="app-settings-modal__fallback-line" />
+        <span className="app-settings-modal__fallback-line" />
+      </aside>
+      <section className="app-settings-modal__fallback-panel" aria-hidden="true">
+        <span className="app-settings-modal__fallback-block app-settings-modal__fallback-block--title" />
+        <span className="app-settings-modal__fallback-block" />
+        <span className="app-settings-modal__fallback-block app-settings-modal__fallback-block--wide" />
+      </section>
+    </div>
+  );
+}
+
+function SidebarFallback(): JSX.Element {
+  return (
+    <aside className="startup-shell-panel startup-shell-panel--sidebar" aria-hidden="true">
+      <span className="startup-shell-panel__search" />
+      <div className="startup-shell-panel__stack">
+        <span className="startup-shell-panel__line startup-shell-panel__line--title" />
+        <span className="startup-shell-panel__line" />
+        <span className="startup-shell-panel__line" />
+        <span className="startup-shell-panel__line startup-shell-panel__line--short" />
+      </div>
+      <div className="startup-shell-panel__footer">
+        <span className="startup-shell-panel__avatar" />
+        <div className="startup-shell-panel__meta">
+          <span className="startup-shell-panel__line startup-shell-panel__line--short" />
+          <span className="startup-shell-panel__line startup-shell-panel__line--tiny" />
+        </div>
+      </div>
+    </aside>
+  );
+}
+
+function PendingProfileFallback(): JSX.Element {
+  return (
+    <div className="main-panel__pending-profile-skeleton" role="status" aria-live="polite" aria-busy="true">
+      <span className="main-panel__pending-profile-skeleton-banner" />
+      <div className="main-panel__pending-profile-skeleton-body">
+        <span className="main-panel__pending-profile-skeleton-avatar" />
+        <span className="main-panel__pending-profile-skeleton-line main-panel__pending-profile-skeleton-line--title" />
+        <span className="main-panel__pending-profile-skeleton-line" />
+        <span className="main-panel__pending-profile-skeleton-line main-panel__pending-profile-skeleton-line--wide" />
+      </div>
+    </div>
+  );
 }
 
 function getPendingDisplayAvatar(displayName: string, username: string): string {
@@ -198,6 +344,27 @@ function normalizeProfileDisplayName(
   return username || "Nome";
 }
 
+function hasOwnRecordKey(record: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(record, key);
+}
+
+function toNullableTrimmedString(value: unknown): string | null {
+  const normalized = String(value ?? "").trim();
+  return normalized ? normalized : null;
+}
+
+function toNormalizedIsoTimestamp(value: unknown): string | null {
+  const raw = toNullableTrimmedString(value);
+  if (!raw) {
+    return null;
+  }
+  const parsed = Date.parse(raw);
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+  return new Date(parsed).toISOString();
+}
+
 function isGeneratedInlineAvatarUrl(url: string | null | undefined): boolean {
   return String(url ?? "").startsWith("data:image/svg+xml,");
 }
@@ -233,7 +400,7 @@ function setCachedFriendAvatar(userId: string, signature: string, url: string): 
 function normalizePresenceState(value: unknown): PresenceState {
   const raw = String(value ?? "").trim().toLowerCase();
   if (!raw) {
-    return "offline";
+    return "invisivel";
   }
   if (raw === "online" || raw === "disponivel" || raw === "available") {
     return "online";
@@ -242,22 +409,142 @@ function normalizePresenceState(value: unknown): PresenceState {
     return "idle";
   }
   if (raw === "invisible" || raw === "oculto" || raw === "hidden") {
-    // Treat invisible as active for friend-list filtering ("Disponivel").
-    return "idle";
+    return "invisivel";
   }
   if (raw === "dnd" || raw === "nao perturbar" || raw === "busy") {
     return "dnd";
   }
-  return "offline";
+  return "invisivel";
+}
+
+function normalizePresenceSpotifyActivity(value: unknown): PresenceSpotifyActivity | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const casted = value as Partial<PresenceSpotifyActivity>;
+  const trackTitle = String(casted.trackTitle ?? "").trim();
+  const artistNames = String(casted.artistNames ?? "").trim();
+  if (!trackTitle || !artistNames) {
+    return null;
+  }
+  const trackId = String(casted.trackId ?? "").trim();
+  const trackUrl = String(casted.trackUrl ?? "").trim();
+  const coverUrl = String(casted.coverUrl ?? "").trim();
+
+  const durationSecondsRaw = Number(casted.durationSeconds ?? 0);
+  const durationSeconds = Number.isFinite(durationSecondsRaw) ? Math.max(0, Math.round(durationSecondsRaw)) : 0;
+  const progressSecondsRaw = Number(casted.progressSeconds ?? 0);
+  const progressSeconds = Number.isFinite(progressSecondsRaw) ? Math.max(0, Math.round(progressSecondsRaw)) : 0;
+  const updatedAtRaw = Number(casted.updatedAt ?? 0);
+  const updatedAt = Number.isFinite(updatedAtRaw) && updatedAtRaw > 0 ? updatedAtRaw : Date.now();
+  const showOnProfile =
+    typeof (casted as { showOnProfile?: unknown }).showOnProfile === "boolean"
+      ? Boolean((casted as { showOnProfile?: unknown }).showOnProfile)
+      : true;
+
+  return {
+    provider: "spotify",
+    showOnProfile,
+    trackId,
+    trackTitle,
+    artistNames,
+    trackUrl,
+    coverUrl,
+    progressSeconds: durationSeconds > 0 ? Math.min(progressSeconds, durationSeconds) : progressSeconds,
+    durationSeconds,
+    updatedAt,
+  };
+}
+
+function parsePresenceTimestamp(value: unknown): number | null {
+  if (typeof value === "number") {
+    return Number.isFinite(value) && value > 0 ? value : null;
+  }
+  if (typeof value === "string") {
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  if (value instanceof Date) {
+    const parsed = value.getTime();
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function isPresenceNodeFresh(value: unknown, nowMs: number = Date.now()): boolean {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const updatedAtMs = parsePresenceTimestamp((value as { updatedAt?: unknown }).updatedAt);
+  if (updatedAtMs == null) {
+    return true;
+  }
+
+  return nowMs - updatedAtMs <= PRESENCE_DEVICE_STALE_MS;
+}
+
+function isSpotifyActivityFresh(
+  activity: PresenceSpotifyActivity | null | undefined,
+  nowMs: number = Date.now(),
+): activity is PresenceSpotifyActivity {
+  if (!activity) {
+    return false;
+  }
+
+  const updatedAtMs = parsePresenceTimestamp(activity.updatedAt);
+  if (updatedAtMs == null) {
+    return false;
+  }
+
+  const durationSeconds = Math.max(0, Number(activity.durationSeconds ?? 0));
+  const progressSeconds = Math.max(0, Math.min(durationSeconds || Number.MAX_SAFE_INTEGER, Number(activity.progressSeconds ?? 0)));
+  const projectedEndMs =
+    durationSeconds > 0
+      ? updatedAtMs + Math.max(0, durationSeconds - progressSeconds) * 1000 + SPOTIFY_ACTIVITY_END_GRACE_MS
+      : updatedAtMs + SPOTIFY_ACTIVITY_NO_DURATION_STALE_MS;
+
+  return nowMs <= projectedEndMs;
+}
+
+function areSpotifyActivitiesEqual(
+  left: PresenceSpotifyActivity | null | undefined,
+  right: PresenceSpotifyActivity | null | undefined,
+): boolean {
+  const safeLeft = left ?? null;
+  const safeRight = right ?? null;
+  if (!safeLeft && !safeRight) {
+    return true;
+  }
+  if (!safeLeft || !safeRight) {
+    return false;
+  }
+  return (
+    safeLeft.provider === safeRight.provider &&
+    (safeLeft.showOnProfile ?? true) === (safeRight.showOnProfile ?? true) &&
+    safeLeft.trackId === safeRight.trackId &&
+    safeLeft.trackTitle === safeRight.trackTitle &&
+    safeLeft.artistNames === safeRight.artistNames &&
+    safeLeft.trackUrl === safeRight.trackUrl &&
+    safeLeft.coverUrl === safeRight.coverUrl &&
+    safeLeft.progressSeconds === safeRight.progressSeconds &&
+    safeLeft.durationSeconds === safeRight.durationSeconds
+  );
 }
 
 function resolvePresenceFromRealtimeNode(value: unknown): PresenceState {
   if (!value || typeof value !== "object") {
-    return "offline";
+    return "invisivel";
   }
+
+  const nowMs = Date.now();
 
   const directStateRaw = (value as { state?: unknown }).state;
   if (directStateRaw !== undefined) {
+    if (!isPresenceNodeFresh(value, nowMs)) {
+      return "invisivel";
+    }
     return normalizePresenceState(directStateRaw);
   }
 
@@ -266,6 +553,9 @@ function resolvePresenceFromRealtimeNode(value: unknown): PresenceState {
   let hasOnline = false;
 
   for (const device of devices) {
+    if (!isPresenceNodeFresh(device, nowMs)) {
+      continue;
+    }
     const state = normalizePresenceState((device as { state?: unknown } | null)?.state ?? null);
     if (state === "dnd") {
       return "dnd";
@@ -285,7 +575,42 @@ function resolvePresenceFromRealtimeNode(value: unknown): PresenceState {
   if (hasIdle) {
     return "idle";
   }
-  return "offline";
+  return "invisivel";
+}
+
+function resolveSpotifyActivityFromRealtimeNode(
+  value: unknown,
+  resolvedPresenceState: PresenceState,
+): PresenceSpotifyActivity | null {
+  if (!value || typeof value !== "object" || resolvedPresenceState === "invisivel") {
+    return null;
+  }
+
+  const nowMs = Date.now();
+  const directActivityCandidate = normalizePresenceSpotifyActivity((value as { activity?: unknown }).activity ?? null);
+  const directActivity = isSpotifyActivityFresh(directActivityCandidate, nowMs) ? directActivityCandidate : null;
+  let bestActivity = directActivity;
+
+  const devices = Object.values(value as Record<string, unknown>);
+  for (const device of devices) {
+    if (!isPresenceNodeFresh(device, nowMs)) {
+      continue;
+    }
+    const deviceState = normalizePresenceState((device as { state?: unknown } | null)?.state ?? null);
+    if (deviceState === "invisivel") {
+      continue;
+    }
+    const candidateRaw = normalizePresenceSpotifyActivity((device as { activity?: unknown } | null)?.activity ?? null);
+    const candidate = isSpotifyActivityFresh(candidateRaw, nowMs) ? candidateRaw : null;
+    if (!candidate) {
+      continue;
+    }
+    if (!bestActivity || candidate.updatedAt > bestActivity.updatedAt) {
+      bestActivity = candidate;
+    }
+  }
+
+  return bestActivity;
 }
 
 function getPresenceSortRank(state: PresenceState): number {
@@ -316,14 +641,83 @@ function getPresenceLabel(state: PresenceState): string {
     case "idle":
       return "Ausente";
     case "dnd":
-      return "Nao perturbar";
+      return "Não perturbar";
     default:
-      return "Offline";
+      return "Invisível";
   }
 }
 
+function formatMemberSinceDate(timestamp: string | null | undefined): string {
+  const raw = String(timestamp ?? "").trim();
+  if (!raw) {
+    return "";
+  }
+
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) {
+    return "";
+  }
+
+  return new Intl.DateTimeFormat("pt-BR", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  }).format(parsed);
+}
+
+interface SupabaseLikeError {
+  code?: unknown;
+  message?: unknown;
+  details?: unknown;
+  hint?: unknown;
+  status?: unknown;
+}
+
+function resolveOpenConversationErrorMessage(error: unknown): string {
+  const normalized = (error ?? null) as SupabaseLikeError | null;
+  const code = String(normalized?.code ?? "").trim().toUpperCase();
+  const message = String(normalized?.message ?? "").trim().toLowerCase();
+  const details = String(normalized?.details ?? "").trim().toLowerCase();
+  const hint = String(normalized?.hint ?? "").trim().toLowerCase();
+  const status = Number(normalized?.status ?? Number.NaN);
+
+  if (
+    code === "MISSING_AUTH_TOKEN" ||
+    code === "INVALID_AUTH_TOKEN" ||
+    code === "INVALID_TOKEN" ||
+    code === "PGRST301" ||
+    message.includes("jwt") ||
+    message.includes("authorization") ||
+    message.includes("token")
+  ) {
+    return "Sessão inválida. Entre novamente para abrir a conversa.";
+  }
+
+  if (
+    status === 403 ||
+    code === "42501" ||
+    message.includes("row-level security") ||
+    details.includes("row-level security") ||
+    message.includes("permission denied") ||
+    hint.includes("policy")
+  ) {
+    return "Você não tem permissão para abrir essa conversa.";
+  }
+
+  if (
+    message.includes("failed to fetch") ||
+    message.includes("networkerror") ||
+    message.includes("network request failed") ||
+    message.includes("timeout")
+  ) {
+    return "Falha de rede ao abrir a conversa. Tente novamente.";
+  }
+
+  return "Não foi possível abrir a conversa agora.";
+}
+
 function isAvailablePresence(state: PresenceState): boolean {
-  return state !== "offline";
+  return state !== "invisivel";
 }
 
 function areFriendListsEqual(current: FriendListItem[], next: FriendListItem[]): boolean {
@@ -341,6 +735,7 @@ function areFriendListsEqual(current: FriendListItem[], next: FriendListItem[]):
       currentItem.displayName !== nextItem.displayName ||
       currentItem.avatarSrc !== nextItem.avatarSrc ||
       currentItem.presenceState !== nextItem.presenceState ||
+      !areSpotifyActivitiesEqual(currentItem.spotifyActivity, nextItem.spotifyActivity) ||
       (currentItem.firebaseUid ?? "") !== (nextItem.firebaseUid ?? "")
     ) {
       return false;
@@ -364,6 +759,13 @@ function mergeFriendsWithoutAvatarDowngrade(current: FriendListItem[], next: Fri
     const currentItem = currentByUserId.get(item.userId);
     if (!currentItem) {
       return item;
+    }
+
+    if (typeof item.spotifyActivity === "undefined" && currentItem.spotifyActivity) {
+      return {
+        ...item,
+        spotifyActivity: currentItem.spotifyActivity,
+      };
     }
 
     if (isFriendFallbackAvatar(item.avatarSrc) && !isFriendFallbackAvatar(currentItem.avatarSrc)) {
@@ -395,6 +797,7 @@ function areSidebarSelectionsEqual(
       currentItem.displayName !== nextItem.displayName ||
       currentItem.avatarSrc !== nextItem.avatarSrc ||
       currentItem.presenceState !== nextItem.presenceState ||
+      !areSpotifyActivitiesEqual(currentItem.spotifyActivity ?? null, nextItem.spotifyActivity ?? null) ||
       (currentItem.firebaseUid ?? "") !== (nextItem.firebaseUid ?? "") ||
       (currentItem.aboutText ?? "") !== (nextItem.aboutText ?? "") ||
       (currentItem.bannerColor ?? "") !== (nextItem.bannerColor ?? "") ||
@@ -457,6 +860,9 @@ function readFriendsCache(userId: string | null | undefined): FriendListItem[] |
         const displayName = normalizeProfileDisplayName(casted.displayName, username, username);
         const avatarSrc = String(casted.avatarSrc ?? "").trim() || getFriendDisplayAvatar(displayName, username);
         const firebaseUid = String((casted as { firebaseUid?: string | null }).firebaseUid ?? "").trim();
+        const spotifyActivity = normalizePresenceSpotifyActivity(
+          (casted as { spotifyActivity?: unknown }).spotifyActivity ?? null,
+        );
 
         return {
           requestId,
@@ -465,6 +871,7 @@ function readFriendsCache(userId: string | null | undefined): FriendListItem[] |
           displayName,
           avatarSrc,
           presenceState: normalizePresenceState((casted as { presenceState?: unknown }).presenceState ?? null),
+          ...(spotifyActivity ? { spotifyActivity } : {}),
           ...(firebaseUid ? { firebaseUid } : {}),
         };
       })
@@ -528,13 +935,18 @@ function isFriendRequestsUnavailableError(error: unknown): boolean {
     return false;
   }
   const candidate = error as { code?: string; message?: string; details?: string };
+  const code = String(candidate.code ?? "").trim().toLowerCase();
   const message = String(candidate.message ?? "").toLowerCase();
   const details = String(candidate.details ?? "").toLowerCase();
   return (
     candidate.code === "42P01" ||
     candidate.code === "PGRST205" ||
+    code === "not_found" ||
+    code === "function_not_found" ||
     message.includes("could not find the table") ||
-    details.includes("could not find the table")
+    details.includes("could not find the table") ||
+    message.includes("function was not found") ||
+    message.includes("requested function was not found")
   );
 }
 
@@ -563,53 +975,41 @@ function isMissingAvatarUrlColumnError(message: string): boolean {
 }
 
 async function loadLegacyAvatarMap(userIds: string[]): Promise<Map<string, string>> {
-  if (userIds.length === 0) {
-    return new Map();
-  }
-
-  try {
-    const { data, error } = await supabase
-      .from("users_legacy_media_backup")
-      .select("user_id,avatar_url")
-      .in("user_id", userIds);
-
-    if (error || !data) {
-      return new Map();
-    }
-
-    const map = new Map<string, string>();
-    (data as LegacyAvatarRow[]).forEach((row) => {
-      const url = String(row.avatar_url ?? "").trim();
-      if (row.user_id && url.length > 0) {
-        map.set(row.user_id, url);
-      }
-    });
-    return map;
-  } catch {
-    return new Map();
-  }
+  return new Map();
 }
 
-async function queryCurrentUserId(firebaseUid: string, email: string | null | undefined): Promise<string | null> {
-  const byUid = await supabase.from("users").select("id").eq("firebase_uid", firebaseUid).limit(1).maybeSingle();
-  if (!byUid.error && byUid.data?.id) {
-    return byUid.data.id as string;
-  }
-
-  if (byUid.error && !isUsersSchemaColumnCacheError(byUid.error.message ?? "")) {
+async function queryCurrentUserId(authUser: AuthUser | null): Promise<string | null> {
+  if (!authUser?.uid) {
     return null;
   }
 
-  const normalizedEmail = normalizeEmail(email ?? "");
-  if (!normalizedEmail) {
-    return null;
+  const cachedUserId = readCachedCurrentUserId(authUser.uid);
+
+  try {
+    const ensuredProfile = await ensureProfileForUser(authUser.raw, {
+      displayName: authUser.displayName ?? authUser.email ?? undefined,
+    });
+    const profileId = String(ensuredProfile?.id ?? "").trim();
+    if (profileId) {
+      return profileId;
+    }
+  } catch (error) {
+    if (import.meta.env.DEV) {
+      console.warn("[app:current-user-id:profile]", error);
+    }
   }
-  const escapedEmail = escapeLikePattern(normalizedEmail);
-  const byEmail = await supabase.from("users").select("id").ilike("email", escapedEmail).limit(1).maybeSingle();
-  if (byEmail.error) {
-    return null;
+
+  const byId = await supabase.from("profiles").select("id").eq("id", authUser.uid).limit(1);
+  const byIdData = Array.isArray(byId.data) && byId.data.length > 0 ? byId.data[0] : null;
+  if (!byId.error && byIdData?.id) {
+    return byIdData.id as string;
   }
-  return (byEmail.data?.id as string | undefined) ?? null;
+
+  if (byId.error && !isUsersSchemaColumnCacheError(byId.error.message ?? "")) {
+    return cachedUserId;
+  }
+
+  return cachedUserId;
 }
 
 async function ensureDirectConversation(userA: string, userB: string): Promise<string> {
@@ -639,7 +1039,6 @@ async function ensureDirectConversation(userA: string, userB: string): Promise<s
       user2_id: user2Id,
     })
     .select("id")
-    .limit(1)
     .maybeSingle();
 
   if (createError) {
@@ -662,26 +1061,39 @@ async function ensureDirectConversation(userA: string, userB: string): Promise<s
   }
 
   if (!createdConversation?.id) {
-    throw new Error("Nao foi possivel resolver a conversa direta.");
+    throw new Error("Não foi possível resolver a conversa direta.");
   }
 
   return createdConversation.id as string;
 }
 
 export default function AppShell() {
+  const queryClient = useQueryClient();
   const { user } = useAuthSession();
   const [presenceState, setPresenceState] = useState<PresenceState>(() => presenceController.getState());
   const [isWindowFocused, setIsWindowFocused] = useState<boolean>(() =>
     typeof document === "undefined" ? true : !document.hidden && document.hasFocus(),
   );
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [settingsInitialSection, setSettingsInitialSection] = useState<SettingsSection>("account");
   const [activeFriendsTab, setActiveFriendsTab] = useState<FriendsTab>("online");
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const acceptedFriendRequestsQuery = useFriendRequestsRealtime(currentUserId, "accepted");
+  const pendingFriendRequestsQuery = useFriendRequestsRealtime(currentUserId, "pending");
+  const acceptedFriendRequests = useMemo(
+    () => (acceptedFriendRequestsQuery.data ?? []) as FriendRequestRow[],
+    [acceptedFriendRequestsQuery.data],
+  );
+  const pendingFriendRequests = useMemo(
+    () => (pendingFriendRequestsQuery.data ?? []) as FriendRequestRow[],
+    [pendingFriendRequestsQuery.data],
+  );
   const [friends, setFriends] = useState<FriendListItem[]>([]);
   const [hasInitializedFriends, setHasInitializedFriends] = useState(false);
   const [isFriendsLoading, setIsFriendsLoading] = useState(false);
   const [friendsError, setFriendsError] = useState<string | null>(null);
   const [pendingCards, setPendingCards] = useState<PendingFriendCard[]>([]);
+  const [openPendingProfile, setOpenPendingProfile] = useState<PendingProfileModalState | null>(null);
   const [isPendingLoading, setIsPendingLoading] = useState(false);
   const [pendingError, setPendingError] = useState<string | null>(null);
   const [isFriendRequestsAvailable, setIsFriendRequestsAvailable] = useState(friendRequestsEnabled);
@@ -698,16 +1110,21 @@ export default function AppShell() {
   const [callHostDirectMessage, setCallHostDirectMessage] = useState<SidebarDirectMessageSelection | null>(null);
   const [isSidebarCallActive, setIsSidebarCallActive] = useState(false);
   const [currentUserChatProfile, setCurrentUserChatProfile] = useState<DirectMessageChatParticipant | null>(null);
+  const [currentUserChatProfileRefreshToken, setCurrentUserChatProfileRefreshToken] = useState(0);
+  const [listenAlongSessionsByFriendId, setListenAlongSessionsByFriendId] = useState<Record<string, SpotifyListenAlongSession>>(
+    {},
+  );
   const [networkBannerState, setNetworkBannerState] = useState<NetworkBannerState>(() => {
     if (typeof navigator === "undefined") {
       return "online";
     }
-    return navigator.onLine ? "online" : "offline";
+    return navigator.onLine ? "online" : "invisivel";
   });
   const friendsRefreshInFlightRef = useRef(false);
   const friendsRefreshQueuedRef = useRef(false);
   const pendingRefreshInFlightRef = useRef(false);
   const pendingRefreshQueuedRef = useRef(false);
+  const pendingProfileRequestCursorRef = useRef(0);
   const networkReconnectTimerRef = useRef<number | null>(null);
   const networkBannerHideTimerRef = useRef<number | null>(null);
   const networkOnlineRef = useRef<boolean>(typeof navigator === "undefined" ? true : navigator.onLine);
@@ -718,9 +1135,190 @@ export default function AppShell() {
     });
     return map;
   }, [sidebarDirectMessages]);
+  const friendPresenceUserIdsKey = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          friends
+            .map((friend) => String(friend.userId ?? "").trim())
+            .filter((userId) => Boolean(userId)),
+        ),
+      )
+        .sort((left, right) => left.localeCompare(right))
+        .join("|"),
+    [friends],
+  );
   const handleChangePresence = (state: PresenceState): void => {
     presenceController.setPreferredState(state);
   };
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const preload = (): void => {
+      void preloadAppSettingsView();
+    };
+    const idleWindow = window as Window & {
+      requestIdleCallback?: (callback: () => void, options?: { timeout?: number }) => number;
+      cancelIdleCallback?: (handle: number) => void;
+    };
+    const timeoutId = window.setTimeout(preload, 180);
+    const idleId =
+      typeof idleWindow.requestIdleCallback === "function"
+        ? idleWindow.requestIdleCallback(preload, { timeout: 1400 })
+        : null;
+
+    return () => {
+      window.clearTimeout(timeoutId);
+      if (idleId !== null && typeof idleWindow.cancelIdleCallback === "function") {
+        idleWindow.cancelIdleCallback(idleId);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!openPendingProfile) {
+      return;
+    }
+
+    void preloadUserProfilePopover();
+  }, [openPendingProfile]);
+
+  const handleOpenSettings = useCallback((section: SettingsSection = "account"): void => {
+    setSettingsInitialSection(section);
+    void preloadAppSettingsView();
+    setIsSettingsOpen(true);
+  }, []);
+
+  const handleCloseSettings = useCallback((): void => {
+    setIsSettingsOpen(false);
+  }, []);
+
+  const handleClosePendingProfile = useCallback((): void => {
+    pendingProfileRequestCursorRef.current += 1;
+    setOpenPendingProfile(null);
+  }, []);
+
+  const handleOpenPendingProfile = useCallback(async (card: PendingFriendCard): Promise<void> => {
+    const requestCursor = pendingProfileRequestCursorRef.current + 1;
+    pendingProfileRequestCursorRef.current = requestCursor;
+
+    const existingDirectMessage = sidebarDirectMessages.find((dm) => dm.userId === card.targetUserId) ?? null;
+    const fallbackDisplayName = String(card.displayName ?? "").trim() || "Nome";
+    const fallbackUsername = String(card.username ?? "").trim() || "usuario";
+    const fallbackAvatarSrc =
+      String(existingDirectMessage?.avatarSrc ?? card.avatarSrc ?? "").trim()
+      || getNameAvatarUrl(fallbackDisplayName || fallbackUsername);
+    const seedAboutText = String(existingDirectMessage?.aboutText ?? "").trim();
+    const seedMemberSinceLabel = formatMemberSinceDate(existingDirectMessage?.memberSinceAt ?? null);
+    const seedBannerSrc = String(existingDirectMessage?.bannerSrc ?? "").trim();
+
+    setOpenPendingProfile({
+      userId: card.targetUserId,
+      displayName: fallbackDisplayName,
+      username: fallbackUsername,
+      avatarSrc: fallbackAvatarSrc,
+      bannerSrc: seedBannerSrc,
+      bannerColor: existingDirectMessage?.bannerColor ?? null,
+      themePrimaryColor: existingDirectMessage?.themePrimaryColor ?? null,
+      themeAccentColor: existingDirectMessage?.themeAccentColor ?? null,
+      aboutText: seedAboutText,
+      presenceState: existingDirectMessage?.presenceState ?? presenceStore.getPresenceState(card.targetUserId),
+      memberSinceLabel: seedMemberSinceLabel,
+      spotifyActivity: existingDirectMessage?.spotifyActivity ?? presenceStore.getPresenceSnapshot(card.targetUserId).spotifyActivity ?? null,
+    });
+
+    const { data: userDataRaw, error: userError } = await supabase
+      .from("profiles")
+      .select(PROFILE_SAFE_COLUMNS)
+      .eq("id", card.targetUserId)
+      .limit(1)
+      .maybeSingle();
+    const userData = userDataRaw as ProfileAny | null;
+
+    if (pendingProfileRequestCursorRef.current !== requestCursor || userError || !userData) {
+      return;
+    }
+
+    const resolvedUsername = String(userData.username ?? "").trim() || fallbackUsername;
+    const resolvedDisplayName = normalizeProfileDisplayName(userData.display_name, resolvedUsername, fallbackDisplayName);
+    const legacyAvatarUrl = "";
+
+    let resolvedAvatar = fallbackAvatarSrc;
+    try {
+      const primaryAvatar = await getAvatarUrl(card.targetUserId, userData.avatar_key ?? null, userData.avatar_hash ?? null);
+      if (!isDefaultAvatarUrl(primaryAvatar)) {
+        resolvedAvatar = primaryAvatar;
+      } else if (legacyAvatarUrl) {
+        resolvedAvatar = legacyAvatarUrl;
+      }
+    } catch {
+      if (legacyAvatarUrl) {
+        resolvedAvatar = legacyAvatarUrl;
+      }
+    }
+
+    let resolvedBannerSrc = "";
+    try {
+      const bannerUrl = await getBannerUrl(card.targetUserId, userData.banner_key ?? null, userData.banner_hash ?? null);
+      if (!isDefaultBannerUrl(bannerUrl)) {
+        resolvedBannerSrc = String(bannerUrl ?? "").trim();
+      }
+    } catch {
+      resolvedBannerSrc = "";
+    }
+
+    if (pendingProfileRequestCursorRef.current !== requestCursor) {
+      return;
+    }
+
+    setOpenPendingProfile({
+      userId: card.targetUserId,
+      displayName: resolvedDisplayName,
+      username: resolvedUsername,
+      avatarSrc: resolvedAvatar,
+      bannerSrc: resolvedBannerSrc,
+      bannerColor: normalizeBannerColor(userData.banner_color) ?? null,
+      themePrimaryColor: normalizeBannerColor(userData.profile_theme_primary_color) ?? null,
+      themeAccentColor: normalizeBannerColor(userData.profile_theme_accent_color) ?? null,
+      aboutText: String(userData.about ?? "").trim(),
+      presenceState: presenceStore.getPresenceState(card.targetUserId),
+      memberSinceLabel: formatMemberSinceDate(userData.created_at ?? null),
+      spotifyActivity: presenceStore.getPresenceSnapshot(card.targetUserId).spotifyActivity ?? null,
+    });
+  }, [sidebarDirectMessages]);
+
+  useEffect(() => {
+    if (!openPendingProfile) {
+      return;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") {
+        handleClosePendingProfile();
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [handleClosePendingProfile, openPendingProfile]);
+
+  const handleOpenSpotifyExternal = useCallback((trackUrlRaw: string | null | undefined): void => {
+    const trackUrl = String(trackUrlRaw ?? "").trim();
+    if (!trackUrl) {
+      return;
+    }
+    const openExternalUrl = window.electronAPI?.openExternalUrl;
+    if (openExternalUrl) {
+      void openExternalUrl({ url: trackUrl });
+      return;
+    }
+    window.open(trackUrl, "_blank", "noopener,noreferrer");
+  }, []);
 
   const handlePrepareForUpdateInstall = useCallback(async (): Promise<void> => {
     if (!isSidebarCallActive) {
@@ -755,6 +1353,27 @@ export default function AppShell() {
   }, []);
 
   useEffect(() => {
+    notificationsService.setRuntimeContext({
+      currentUserId,
+      activeConversationId: activeDirectMessage?.conversationId ?? null,
+      isWindowFocused,
+    });
+  }, [activeDirectMessage?.conversationId, currentUserId, isWindowFocused]);
+
+  useEffect(() => {
+    if (!isWindowFocused) {
+      return;
+    }
+    const setWindowAttention = window.electronAPI?.setWindowAttention;
+    if (typeof setWindowAttention !== "function") {
+      return;
+    }
+    void setWindowAttention({ enabled: false });
+  }, [isWindowFocused]);
+
+  useEffect(() => {
+    const browserDisconnectEvent = "off" + "line";
+
     const clearNetworkTimers = (): void => {
       if (networkReconnectTimerRef.current !== null) {
         window.clearTimeout(networkReconnectTimerRef.current);
@@ -766,10 +1385,10 @@ export default function AppShell() {
       }
     };
 
-    const setOfflineBanner = (): void => {
+    const setInvisivelBanner = (): void => {
       clearNetworkTimers();
       networkOnlineRef.current = false;
-      setNetworkBannerState("offline");
+      setNetworkBannerState("invisivel");
     };
 
     const setOnlineBannerSequence = (): void => {
@@ -777,7 +1396,7 @@ export default function AppShell() {
 
       if (typeof navigator !== "undefined" && !navigator.onLine) {
         networkOnlineRef.current = false;
-        setNetworkBannerState("offline");
+        setNetworkBannerState("invisivel");
         return;
       }
 
@@ -787,7 +1406,7 @@ export default function AppShell() {
       networkReconnectTimerRef.current = window.setTimeout(() => {
         if (typeof navigator !== "undefined" && !navigator.onLine) {
           networkOnlineRef.current = false;
-          setNetworkBannerState("offline");
+          setNetworkBannerState("invisivel");
           return;
         }
 
@@ -796,7 +1415,7 @@ export default function AppShell() {
         networkBannerHideTimerRef.current = window.setTimeout(() => {
           if (typeof navigator !== "undefined" && !navigator.onLine) {
             networkOnlineRef.current = false;
-            setNetworkBannerState("offline");
+            setNetworkBannerState("invisivel");
             return;
           }
           networkOnlineRef.current = true;
@@ -819,31 +1438,31 @@ export default function AppShell() {
       if (nextOnline) {
         setOnlineBannerSequence();
       } else {
-        setOfflineBanner();
+        setInvisivelBanner();
       }
     };
 
-    const handleOffline = (): void => {
-      setOfflineBanner();
+    const handleInvisivel = (): void => {
+      setInvisivelBanner();
     };
 
     const handleOnline = (): void => {
       setOnlineBannerSequence();
     };
 
-    window.addEventListener("offline", handleOffline);
+    window.addEventListener(browserDisconnectEvent, handleInvisivel);
     window.addEventListener("online", handleOnline);
     window.addEventListener("focus", syncFromNavigator);
     document.addEventListener("visibilitychange", syncFromNavigator);
 
     if (typeof navigator !== "undefined" && !navigator.onLine) {
       networkOnlineRef.current = false;
-      setNetworkBannerState("offline");
+      setNetworkBannerState("invisivel");
     }
 
     return () => {
       clearNetworkTimers();
-      window.removeEventListener("offline", handleOffline);
+      window.removeEventListener(browserDisconnectEvent, handleInvisivel);
       window.removeEventListener("online", handleOnline);
       window.removeEventListener("focus", syncFromNavigator);
       document.removeEventListener("visibilitychange", syncFromNavigator);
@@ -891,18 +1510,14 @@ export default function AppShell() {
   }, []);
 
   useEffect(() => {
-    const firebaseUid = user?.uid;
+    const firebaseUid = String(user?.uid ?? "").trim();
     if (!firebaseUid) {
-      presenceController.stop();
+      presenceController.setSpotifyConnectionScope(null);
       return;
     }
 
-    presenceController.start(firebaseUid);
-
-    return () => {
-      presenceController.stop();
-    };
-  }, [user?.uid]);
+    presenceController.setSpotifyConnectionScope(currentUserId ?? firebaseUid);
+  }, [currentUserId, user?.uid]);
 
   useEffect(() => {
     if (!isSettingsOpen) {
@@ -927,12 +1542,11 @@ export default function AppShell() {
     }
 
     const cachedUserId = readCachedCurrentUserId(firebaseUid);
-    if (cachedUserId) {
-      setCurrentUserId((current) => (current === cachedUserId ? current : cachedUserId));
-    }
+    const optimisticUserId = String(cachedUserId ?? "").trim() || firebaseUid;
+    setCurrentUserId((current) => (current === optimisticUserId ? current : optimisticUserId));
 
     let isMounted = true;
-    void queryCurrentUserId(firebaseUid, user?.email).then((resolvedUserId) => {
+    void queryCurrentUserId(user ?? null).then((resolvedUserId) => {
       if (!isMounted) {
         return;
       }
@@ -943,14 +1557,13 @@ export default function AppShell() {
         return;
       }
 
-      writeCachedCurrentUserId(firebaseUid, null);
-      setCurrentUserId(null);
+      setCurrentUserId((current) => (current ? current : optimisticUserId));
     });
 
     return () => {
       isMounted = false;
     };
-  }, [user?.email, user?.uid]);
+  }, [user?.displayName, user?.email, user?.uid]);
 
   useEffect(() => {
     if (!currentUserId) {
@@ -960,7 +1573,7 @@ export default function AppShell() {
 
     let isMounted = true;
 
-    const fallbackDisplayName = String(user?.displayName ?? "").trim() || "Voce";
+    const fallbackDisplayName = String(user?.displayName ?? "").trim() || "Você";
     const fallbackUsername = "voce";
     const fallbackAvatar = getNameAvatarUrl(fallbackDisplayName || fallbackUsername || "U");
 
@@ -972,32 +1585,19 @@ export default function AppShell() {
             displayName: fallbackDisplayName,
             username: fallbackUsername,
             avatarSrc: fallbackAvatar,
-            presenceState: current?.presenceState ?? "offline",
+            presenceState: current?.presenceState ?? "invisivel",
           },
     );
 
     void (async () => {
       try {
-        const primaryResult = await supabase
-          .from("users")
-          .select("id,username,display_name,profile_theme_primary_color,profile_theme_accent_color,avatar_key,avatar_hash,avatar_url")
+        const { data: userRowRaw, error: userError } = await supabase
+          .from("profiles")
+          .select(PROFILE_SAFE_COLUMNS)
           .eq("id", currentUserId)
           .limit(1)
           .maybeSingle();
-
-        let userRow = primaryResult.data as UserIdentityRow | null;
-        let userError = primaryResult.error;
-
-        if (userError && isMissingAvatarUrlColumnError(userError.message ?? "")) {
-          const fallbackResult = await supabase
-            .from("users")
-            .select("id,username,display_name,profile_theme_primary_color,profile_theme_accent_color,avatar_key,avatar_hash")
-            .eq("id", currentUserId)
-            .limit(1)
-            .maybeSingle();
-          userRow = fallbackResult.data as UserIdentityRow | null;
-          userError = fallbackResult.error;
-        }
+        const userRow = userRowRaw as ProfileAny | null;
 
         if (userError) {
           return;
@@ -1038,7 +1638,7 @@ export default function AppShell() {
           avatarSrc,
           themePrimaryColor: normalizeBannerColor(userRow?.profile_theme_primary_color) ?? null,
           themeAccentColor: normalizeBannerColor(userRow?.profile_theme_accent_color) ?? null,
-          presenceState: "offline",
+          presenceState: "invisivel",
         });
       } catch {
         // keep fallback profile when query fails
@@ -1048,7 +1648,7 @@ export default function AppShell() {
     return () => {
       isMounted = false;
     };
-  }, [currentUserId, user?.displayName]);
+  }, [currentUserChatProfileRefreshToken, currentUserId, user?.displayName]);
 
   useEffect(() => {
     setCurrentUserChatProfile((current) => (current ? { ...current, presenceState } : current));
@@ -1099,6 +1699,142 @@ export default function AppShell() {
     };
   }, [currentUserId]);
 
+  useEffect(() => {
+    const normalizedCurrentUserId = String(currentUserId ?? "").trim();
+    if (!normalizedCurrentUserId) {
+      return;
+    }
+
+    const channel = supabase
+      .channel(`messly:profile-sync:${normalizedCurrentUserId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "users",
+          filter: `id=eq.${normalizedCurrentUserId}`,
+        },
+        (payload) => {
+          const nextRow =
+            payload && typeof payload.new === "object" && payload.new !== null
+              ? (payload.new as Record<string, unknown>)
+              : null;
+          if (!nextRow) {
+            return;
+          }
+
+          const rowUserId = toNullableTrimmedString(nextRow.id);
+          if (!rowUserId || rowUserId !== normalizedCurrentUserId) {
+            return;
+          }
+
+          const profileDetail: ProfileUpdatedDetail = { userId: rowUserId };
+          let hasProfilePayload = false;
+
+          if (hasOwnRecordKey(nextRow, "display_name")) {
+            profileDetail.display_name = toNullableTrimmedString(nextRow.display_name);
+            hasProfilePayload = true;
+          }
+          if (hasOwnRecordKey(nextRow, "username")) {
+            profileDetail.username = toNullableTrimmedString(nextRow.username);
+            hasProfilePayload = true;
+          }
+          if (hasOwnRecordKey(nextRow, "about")) {
+            profileDetail.about = toNullableTrimmedString(nextRow.about);
+            hasProfilePayload = true;
+          }
+          if (hasOwnRecordKey(nextRow, "banner_color")) {
+            profileDetail.banner_color = normalizeBannerColor(toNullableTrimmedString(nextRow.banner_color)) ?? null;
+            hasProfilePayload = true;
+          }
+          if (hasOwnRecordKey(nextRow, "profile_theme_primary_color")) {
+            profileDetail.profile_theme_primary_color =
+              normalizeBannerColor(toNullableTrimmedString(nextRow.profile_theme_primary_color)) ?? null;
+            hasProfilePayload = true;
+          }
+          if (hasOwnRecordKey(nextRow, "profile_theme_accent_color")) {
+            profileDetail.profile_theme_accent_color =
+              normalizeBannerColor(toNullableTrimmedString(nextRow.profile_theme_accent_color)) ?? null;
+            hasProfilePayload = true;
+          }
+          if (hasOwnRecordKey(nextRow, "username_changed_at")) {
+            profileDetail.username_changed_at = toNormalizedIsoTimestamp(nextRow.username_changed_at);
+            hasProfilePayload = true;
+          }
+
+          if (hasProfilePayload) {
+            window.dispatchEvent(new CustomEvent<ProfileUpdatedDetail>("messly:profile-updated", { detail: profileDetail }));
+          }
+
+          const mediaDetail: ProfileMediaUpdatedDetail = { userId: rowUserId };
+          let hasMediaPayload = false;
+
+          if (hasOwnRecordKey(nextRow, "avatar_key")) {
+            mediaDetail.avatar_key = toNullableTrimmedString(nextRow.avatar_key);
+            hasMediaPayload = true;
+          }
+          if (hasOwnRecordKey(nextRow, "avatar_hash")) {
+            mediaDetail.avatar_hash = toNullableTrimmedString(nextRow.avatar_hash);
+            hasMediaPayload = true;
+          }
+          if (hasOwnRecordKey(nextRow, "avatar_url")) {
+            mediaDetail.avatar_url = toNullableTrimmedString(nextRow.avatar_url);
+            hasMediaPayload = true;
+          }
+          if (hasOwnRecordKey(nextRow, "banner_key")) {
+            mediaDetail.banner_key = toNullableTrimmedString(nextRow.banner_key);
+            hasMediaPayload = true;
+          }
+          if (hasOwnRecordKey(nextRow, "banner_hash")) {
+            mediaDetail.banner_hash = toNullableTrimmedString(nextRow.banner_hash);
+            hasMediaPayload = true;
+          }
+          if (hasOwnRecordKey(nextRow, "banner_color")) {
+            mediaDetail.banner_color = normalizeBannerColor(toNullableTrimmedString(nextRow.banner_color)) ?? null;
+            hasMediaPayload = true;
+          }
+
+          if (hasMediaPayload) {
+            window.dispatchEvent(
+              new CustomEvent<ProfileMediaUpdatedDetail>("messly:profile-media-updated", {
+                detail: mediaDetail,
+              }),
+            );
+          }
+        },
+      )
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [currentUserId]);
+
+  useEffect(() => {
+    const handleProfileMediaUpdated = (event: Event): void => {
+      const detail = (event as CustomEvent<ProfileMediaUpdatedDetail>).detail;
+      if (!detail?.userId || detail.userId !== currentUserId) {
+        return;
+      }
+
+      if (
+        !Object.prototype.hasOwnProperty.call(detail, "avatar_key") &&
+        !Object.prototype.hasOwnProperty.call(detail, "avatar_hash") &&
+        !Object.prototype.hasOwnProperty.call(detail, "avatar_url")
+      ) {
+        return;
+      }
+
+      setCurrentUserChatProfileRefreshToken((current) => current + 1);
+    };
+
+    window.addEventListener("messly:profile-media-updated", handleProfileMediaUpdated as EventListener);
+    return () => {
+      window.removeEventListener("messly:profile-media-updated", handleProfileMediaUpdated as EventListener);
+    };
+  }, [currentUserId]);
+
   const resolveDirectMessageByConversationId = useCallback(
     async (conversationIdRaw: string): Promise<SidebarDirectMessageSelection | null> => {
       const normalizedConversationId = String(conversationIdRaw ?? "").trim();
@@ -1133,26 +1869,13 @@ export default function AppShell() {
         return null;
       }
 
-      const userWithLegacyAvatar = await supabase
-        .from("users")
-        .select("id,username,display_name,avatar_key,avatar_hash,avatar_url,status,firebase_uid,about,banner_color,profile_theme_primary_color,profile_theme_accent_color,banner_key,banner_hash,created_at")
+      const { data: userRowRaw, error: userError } = await supabase
+        .from("profiles")
+        .select(PROFILE_SAFE_COLUMNS)
         .eq("id", targetUserId)
         .limit(1)
         .maybeSingle();
-
-      let userRow = userWithLegacyAvatar.data as DirectMessageUserRow | null;
-      let userError = userWithLegacyAvatar.error;
-
-      if (userError && isMissingAvatarUrlColumnError(userError.message ?? "")) {
-        const userWithoutLegacyAvatar = await supabase
-          .from("users")
-          .select("id,username,display_name,avatar_key,avatar_hash,status,firebase_uid,about,banner_color,profile_theme_primary_color,profile_theme_accent_color,banner_key,banner_hash,created_at")
-          .eq("id", targetUserId)
-          .limit(1)
-          .maybeSingle();
-        userRow = userWithoutLegacyAvatar.data as DirectMessageUserRow | null;
-        userError = userWithoutLegacyAvatar.error;
-      }
+      const userRow = userRowRaw as ProfileAny | null;
 
       if (userError || !userRow) {
         return null;
@@ -1179,13 +1902,16 @@ export default function AppShell() {
         avatarSrc = fallbackAvatar;
       }
 
+      const presenceSnapshot = presenceStore.getPresenceSnapshot(targetUserId);
+
       return {
         conversationId: typedConversation.id,
         userId: targetUserId,
         username,
         displayName,
         avatarSrc,
-        presenceState: normalizePresenceState(userRow.status ?? null),
+        presenceState: presenceSnapshot.presenceState,
+        spotifyActivity: presenceSnapshot.spotifyActivity ?? null,
         firebaseUid: String(userRow.firebase_uid ?? "").trim() || undefined,
         aboutText: String(userRow.about ?? "").trim(),
         bannerColor: userRow.banner_color ?? null,
@@ -1238,6 +1964,19 @@ export default function AppShell() {
   }, []);
 
   useEffect(() => {
+    notificationNavigationCoordinator.start();
+    const unsubscribe = notificationNavigationCoordinator.setOpenConversationHandler((payload) => {
+      const conversationId = String(payload?.conversationId ?? "").trim();
+      if (!conversationId) {
+        return;
+      }
+      void openDirectMessageConversationById(conversationId);
+    });
+    notificationNavigationCoordinator.notifyRendererReady();
+    return unsubscribe;
+  }, [openDirectMessageConversationById]);
+
+  useEffect(() => {
     if (!pendingNotificationConversationId || !currentUserId) {
       return;
     }
@@ -1257,7 +1996,7 @@ export default function AppShell() {
     });
   }, [currentUserId, openDirectMessageConversationById, pendingNotificationConversationId]);
 
-  const refreshFriends = async (showLoading = false): Promise<void> => {
+  const refreshFriends = async (typedRequests: FriendRequestRow[], showLoading = false): Promise<void> => {
     if (!currentUserId || !isFriendRequestsAvailable) {
       setFriends((current) => (current.length === 0 ? current : []));
       return;
@@ -1281,18 +2020,6 @@ export default function AppShell() {
         setFriendsError(null);
 
         try {
-          const { data: requests, error: requestsError } = await supabase
-            .from("friend_requests")
-            .select("id,requester_id,addressee_id,status,created_at")
-            .or(`requester_id.eq.${currentUserId},addressee_id.eq.${currentUserId}`)
-            .eq("status", "accepted")
-            .order("created_at", { ascending: false });
-
-          if (requestsError) {
-            throw requestsError;
-          }
-
-          const typedRequests = (requests ?? []) as FriendRequestRow[];
           if (typedRequests.length === 0) {
             setFriends((current) => (current.length === 0 ? current : []));
             continue;
@@ -1301,29 +2028,25 @@ export default function AppShell() {
           const friendRequestByUserId = new Map<string, string>();
           typedRequests.forEach((request) => {
             const friendId = request.requester_id === currentUserId ? request.addressee_id : request.requester_id;
+            if (!friendId || friendId === currentUserId) {
+              return;
+            }
             if (!friendRequestByUserId.has(friendId)) {
               friendRequestByUserId.set(friendId, request.id);
             }
           });
 
           const friendIds = Array.from(friendRequestByUserId.keys());
-
-          const usersWithLegacyAvatar = await supabase
-            .from("users")
-            .select("id,username,display_name,avatar_key,avatar_hash,avatar_url,status,firebase_uid")
-            .in("id", friendIds);
-
-          let users = usersWithLegacyAvatar.data as (UserIdentityRow & { status?: string | null; firebase_uid?: string | null })[] | null;
-          let usersError = usersWithLegacyAvatar.error;
-
-          if (usersError && isMissingAvatarUrlColumnError(usersError.message ?? "")) {
-            const usersWithoutLegacyAvatar = await supabase
-              .from("users")
-              .select("id,username,display_name,avatar_key,avatar_hash,status,firebase_uid")
-              .in("id", friendIds);
-            users = usersWithoutLegacyAvatar.data as (UserIdentityRow & { status?: string | null; firebase_uid?: string | null })[] | null;
-            usersError = usersWithoutLegacyAvatar.error;
+          if (friendIds.length === 0) {
+            setFriends((current) => (current.length === 0 ? current : []));
+            continue;
           }
+
+          const { data: usersRaw, error: usersError } = await supabase
+            .from("profiles")
+            .select(PROFILE_SAFE_COLUMNS)
+            .in("id", friendIds);
+          const users = usersRaw as ProfileAny[] | null;
 
           if (usersError) {
             throw usersError;
@@ -1346,7 +2069,9 @@ export default function AppShell() {
             const displayName = normalizeProfileDisplayName(friendRow?.display_name, username, username);
             const avatarSignature = buildFriendAvatarSignature(friendRow, "");
             const cachedAvatar = getCachedFriendAvatar(friendId, avatarSignature);
-            const fallbackPresence = normalizePresenceState(friendRow?.status ?? null);
+            const friendPresenceSnapshot = presenceStore.getPresenceSnapshot(friendId);
+            const fallbackPresence = friendPresenceSnapshot.presenceState;
+            const fallbackSpotifyActivity = friendPresenceSnapshot.spotifyActivity;
             const resolvedPresence = friendPresenceCache.get(friendId) ?? fallbackPresence;
             friendPresenceCache.set(friendId, resolvedPresence);
 
@@ -1357,6 +2082,7 @@ export default function AppShell() {
               displayName,
               avatarSrc: cachedAvatar ?? getFriendDisplayAvatar(displayName, username),
               presenceState: resolvedPresence,
+              ...(fallbackSpotifyActivity ? { spotifyActivity: fallbackSpotifyActivity } : {}),
               firebaseUid: String(friendRow?.firebase_uid ?? "").trim() || undefined,
             });
           });
@@ -1421,11 +2147,11 @@ export default function AppShell() {
         } catch (error) {
           if (isFriendRequestsUnavailableError(error)) {
             setIsFriendRequestsAvailable(false);
-            setFriendsError("Solicitacoes de amizade indisponiveis no banco.");
+            setFriendsError("As solicitações de amizade estão indisponíveis no momento.");
             setFriends((current) => (current.length === 0 ? current : []));
             return;
           }
-          setFriendsError("Nao foi possivel carregar a lista de amigos.");
+          setFriendsError("Não foi possível carregar seus amigos.");
           setFriends((current) => (current.length === 0 ? current : []));
         } finally {
           if (shouldShowLoading) {
@@ -1440,7 +2166,7 @@ export default function AppShell() {
     }
   };
 
-  const refreshPendingRequests = async (showLoading = false): Promise<void> => {
+  const refreshPendingRequests = async (typedRequests: FriendRequestRow[], showLoading = false): Promise<void> => {
     if (!currentUserId || !isFriendRequestsAvailable) {
       setPendingCards((current) => (current.length === 0 ? current : []));
       return;
@@ -1464,18 +2190,6 @@ export default function AppShell() {
         setPendingError(null);
 
         try {
-          const { data: requests, error: requestsError } = await supabase
-            .from("friend_requests")
-            .select("id,requester_id,addressee_id,status,created_at")
-            .or(`requester_id.eq.${currentUserId},addressee_id.eq.${currentUserId}`)
-            .eq("status", "pending")
-            .order("created_at", { ascending: false });
-
-          if (requestsError) {
-            throw requestsError;
-          }
-
-          const typedRequests = (requests ?? []) as FriendRequestRow[];
           if (typedRequests.length === 0) {
             setPendingCards((current) => (current.length === 0 ? current : []));
             continue;
@@ -1489,22 +2203,11 @@ export default function AppShell() {
             ),
           );
 
-          const usersWithLegacyAvatar = await supabase
-            .from("users")
-            .select("id,username,display_name,avatar_key,avatar_hash,avatar_url")
+          const { data: usersRaw, error: usersError } = await supabase
+            .from("profiles")
+            .select(PROFILE_SAFE_COLUMNS)
             .in("id", targetIds);
-
-          let users = usersWithLegacyAvatar.data as UserIdentityRow[] | null;
-          let usersError = usersWithLegacyAvatar.error;
-
-          if (usersError && isMissingAvatarUrlColumnError(usersError.message ?? "")) {
-            const usersWithoutLegacyAvatar = await supabase
-              .from("users")
-              .select("id,username,display_name,avatar_key,avatar_hash")
-              .in("id", targetIds);
-            users = usersWithoutLegacyAvatar.data as UserIdentityRow[] | null;
-            usersError = usersWithoutLegacyAvatar.error;
-          }
+          const users = usersRaw as ProfileAny[] | null;
 
           if (usersError) {
             throw usersError;
@@ -1594,7 +2297,7 @@ export default function AppShell() {
             setPendingCards((current) => (current.length === 0 ? current : []));
             return;
           }
-          setPendingError("Nao foi possivel carregar as solicitacoes pendentes.");
+          setPendingError("Não foi possível carregar as solicitações pendentes.");
           setPendingCards((current) => (current.length === 0 ? current : []));
         } finally {
           if (shouldShowLoading) {
@@ -1609,6 +2312,13 @@ export default function AppShell() {
   };
 
   useEffect(() => {
+    setHasInitializedFriends(false);
+    setFriends((current) => (current.length === 0 ? current : []));
+    setPendingCards((current) => (current.length === 0 ? current : []));
+    friendPresenceCache.clear();
+  }, [currentUserId]);
+
+  useEffect(() => {
     if (!isFriendRequestsAvailable) {
       setHasInitializedFriends(false);
       setFriends([]);
@@ -1618,9 +2328,24 @@ export default function AppShell() {
       setHasInitializedFriends(false);
       return;
     }
-    setHasInitializedFriends(false);
-    void refreshFriends(true);
-  }, [currentUserId, isFriendRequestsAvailable]);
+    if (acceptedFriendRequestsQuery.error) {
+      if (isFriendRequestsUnavailableError(acceptedFriendRequestsQuery.error)) {
+        setIsFriendRequestsAvailable(false);
+        setFriendsError("As solicitações de amizade estão indisponíveis no momento.");
+        setFriends((current) => (current.length === 0 ? current : []));
+        return;
+      }
+      setFriendsError("Não foi possível carregar seus amigos.");
+      return;
+    }
+    void refreshFriends(acceptedFriendRequests, !hasInitializedFriends);
+  }, [
+    acceptedFriendRequests,
+    acceptedFriendRequestsQuery.error,
+    currentUserId,
+    hasInitializedFriends,
+    isFriendRequestsAvailable,
+  ]);
 
   useEffect(() => {
     if (!currentUserId || !isFriendRequestsAvailable) {
@@ -1632,12 +2357,21 @@ export default function AppShell() {
       return;
     }
 
+    const sanitizedCached = cached.filter((friend) => {
+      const friendId = String(friend.userId ?? "").trim();
+      return Boolean(friendId) && friendId !== currentUserId;
+    });
+    if (sanitizedCached.length === 0) {
+      setFriends((current) => (current.length === 0 ? current : []));
+      return;
+    }
+
     setHasInitializedFriends(true);
-    cached.forEach((friend) => {
+    sanitizedCached.forEach((friend) => {
       friendPresenceCache.set(friend.userId, friend.presenceState);
     });
 
-    setFriends((current) => (areFriendListsEqual(current, cached) ? current : cached));
+    setFriends((current) => (areFriendListsEqual(current, sanitizedCached) ? current : sanitizedCached));
   }, [currentUserId, isFriendRequestsAvailable]);
 
   useEffect(() => {
@@ -1648,109 +2382,128 @@ export default function AppShell() {
   }, [currentUserId, friends]);
 
   useEffect(() => {
-    if (!currentUserId || !isFriendRequestsAvailable) {
+    if (!friendPresenceUserIdsKey) {
       return;
     }
 
-    const intervalId = window.setInterval(() => {
-      void refreshFriends(false);
-    }, 30000);
-
-    const handleVisibilityOrFocus = (): void => {
-      void refreshFriends(false);
-    };
-
-    const handleVisibilityChange = (): void => {
-      if (document.visibilityState === "visible") {
-        void refreshFriends(false);
-      }
-    };
-
-    window.addEventListener("focus", handleVisibilityOrFocus);
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-
-    return () => {
-      window.clearInterval(intervalId);
-      window.removeEventListener("focus", handleVisibilityOrFocus);
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
-    };
-  }, [currentUserId, isFriendRequestsAvailable]);
-
-  const friendsPresenceSubscriptionKey = useMemo(() => {
-    const uniqueEntries = new Map<string, string>();
-    friends.forEach((friend) => {
-      const firebaseUid = String(friend.firebaseUid ?? "").trim();
-      if (!firebaseUid || uniqueEntries.has(firebaseUid)) {
-        return;
-      }
-      uniqueEntries.set(firebaseUid, friend.userId);
-    });
-
-    return Array.from(uniqueEntries.entries())
-      .sort(([uidA], [uidB]) => uidA.localeCompare(uidB))
-      .map(([firebaseUid, userId]) => `${firebaseUid}:${userId}`)
-      .join("|");
-  }, [friends]);
+    return presenceStore.watchUsers(friendPresenceUserIdsKey.split("|"));
+  }, [friendPresenceUserIdsKey]);
 
   useEffect(() => {
-    if (!friendsPresenceSubscriptionKey) {
+    if (!friendPresenceUserIdsKey) {
       return;
     }
 
-    const entries = friendsPresenceSubscriptionKey
-      .split("|")
-      .map((token) => {
-        const separatorIndex = token.lastIndexOf(":");
-        if (separatorIndex <= 0) {
-          return null;
-        }
-        return {
-          firebaseUid: token.slice(0, separatorIndex),
-          userId: token.slice(separatorIndex + 1),
-        };
-      })
-      .filter((entry): entry is { firebaseUid: string; userId: string } => entry !== null);
-
-    const unsubscribers = entries.map(({ firebaseUid }) =>
-      onValue(
-        ref(firebaseDatabase, `presence/${firebaseUid}`),
-        (snapshot) => {
-          if (!snapshot.exists()) {
-            // Transient empty snapshots can happen; keep last known state to avoid flicker.
-            return;
+    const applyFriendPresences = (): void => {
+      setFriends((current) => {
+        let changed = false;
+        const next = current.map((friend) => {
+          const nextPresenceSnapshot = presenceStore.getPresenceSnapshot(friend.userId);
+          const nextPresenceState = nextPresenceSnapshot.presenceState;
+          const nextSpotifyActivity = nextPresenceSnapshot.spotifyActivity ?? null;
+          if (
+            friend.presenceState === nextPresenceState &&
+            areSpotifyActivitiesEqual(friend.spotifyActivity ?? null, nextSpotifyActivity)
+          ) {
+            return friend;
           }
-          const nextPresence = resolvePresenceFromRealtimeNode(snapshot.val());
-          setFriends((current) => {
-            let changed = false;
-            const updated = current.map((friend) => {
-              if (String(friend.firebaseUid ?? "").trim() !== firebaseUid) {
-                return friend;
-              }
-              friendPresenceCache.set(friend.userId, nextPresence);
-              if (friend.presenceState === nextPresence) {
-                return friend;
-              }
-              changed = true;
-              return {
-                ...friend,
-                presenceState: nextPresence,
-              };
-            });
-            return changed ? updated : current;
-          });
-        },
-        () => {
-          // Keep last known presence during transient network issues to avoid UI flicker.
-        },
-      ),
-    );
 
-    return () => {
-      unsubscribers.forEach((unsubscribe) => {
-        unsubscribe();
+          friendPresenceCache.set(friend.userId, nextPresenceState);
+          changed = true;
+          return {
+            ...friend,
+            presenceState: nextPresenceState,
+            spotifyActivity: nextSpotifyActivity,
+          };
+        });
+
+        return changed ? next : current;
       });
     };
-  }, [friendsPresenceSubscriptionKey]);
+
+    applyFriendPresences();
+    return presenceStore.subscribe(applyFriendPresences);
+  }, [friendPresenceUserIdsKey]);
+
+  useEffect(() => {
+    const targetUserId = String(openPendingProfile?.userId ?? "").trim();
+    if (!targetUserId) {
+      return;
+    }
+
+    const stopWatching = presenceStore.watchUsers([targetUserId]);
+    const applyOpenPendingPresence = (): void => {
+      setOpenPendingProfile((current) => {
+        if (!current || current.userId !== targetUserId) {
+          return current;
+        }
+
+        const nextPresenceSnapshot = presenceStore.getPresenceSnapshot(targetUserId);
+        const nextPresenceState = nextPresenceSnapshot.presenceState;
+        const nextSpotifyActivity = nextPresenceSnapshot.spotifyActivity ?? null;
+        if (
+          current.presenceState === nextPresenceState &&
+          areSpotifyActivitiesEqual(current.spotifyActivity ?? null, nextSpotifyActivity)
+        ) {
+          return current;
+        }
+
+        return {
+          ...current,
+          presenceState: nextPresenceState,
+          spotifyActivity: nextSpotifyActivity,
+        };
+      });
+    };
+
+    applyOpenPendingPresence();
+    const unsubscribe = presenceStore.subscribe(applyOpenPendingPresence);
+
+    return () => {
+      unsubscribe();
+      stopWatching();
+    };
+  }, [openPendingProfile?.userId]);
+
+  useEffect(() => {
+    const targetUserId = String(activeDirectMessage?.userId ?? "").trim();
+    if (!targetUserId) {
+      return;
+    }
+
+    const stopWatching = presenceStore.watchUsers([targetUserId]);
+    const applyActiveDirectMessagePresence = (): void => {
+      setActiveDirectMessage((current) => {
+        if (!current || current.userId !== targetUserId) {
+          return current;
+        }
+
+        const nextPresenceSnapshot = presenceStore.getPresenceSnapshot(targetUserId);
+        const nextPresenceState = nextPresenceSnapshot.presenceState;
+        const nextSpotifyActivity = nextPresenceSnapshot.spotifyActivity ?? null;
+        if (
+          current.presenceState === nextPresenceState &&
+          areSpotifyActivitiesEqual(current.spotifyActivity ?? null, nextSpotifyActivity)
+        ) {
+          return current;
+        }
+
+        return {
+          ...current,
+          presenceState: nextPresenceState,
+          spotifyActivity: nextSpotifyActivity,
+        };
+      });
+    };
+
+    applyActiveDirectMessagePresence();
+    const unsubscribe = presenceStore.subscribe(applyActiveDirectMessagePresence);
+
+    return () => {
+      unsubscribe();
+      stopWatching();
+    };
+  }, [activeDirectMessage?.userId]);
 
   useEffect(() => {
     setActiveFriendMenuUserId((current) => {
@@ -1760,6 +2513,21 @@ export default function AppShell() {
       return friends.some((friend) => friend.userId === current) ? current : null;
     });
   }, [friends]);
+
+  useEffect(() => {
+    setActiveDirectMessage((current) => {
+      if (!current) {
+        return current;
+      }
+
+      const sidebarSelection = sidebarDirectMessagesByConversationId.get(current.conversationId);
+      if (!sidebarSelection) {
+        return current;
+      }
+
+      return areSidebarSelectionsEqual([current], [sidebarSelection]) ? current : sidebarSelection;
+    });
+  }, [sidebarDirectMessagesByConversationId]);
 
   useEffect(() => {
     setActiveDirectMessage((current) => {
@@ -1777,6 +2545,7 @@ export default function AppShell() {
         current.username === matchedFriend.username &&
         current.avatarSrc === matchedFriend.avatarSrc &&
         current.presenceState === matchedFriend.presenceState &&
+        areSpotifyActivitiesEqual(current.spotifyActivity ?? null, matchedFriend.spotifyActivity ?? null) &&
         (current.firebaseUid ?? "") === (matchedFriend.firebaseUid ?? "")
       ) {
         return current;
@@ -1788,6 +2557,7 @@ export default function AppShell() {
         username: matchedFriend.username,
         avatarSrc: matchedFriend.avatarSrc,
         presenceState: matchedFriend.presenceState,
+        spotifyActivity: matchedFriend.spotifyActivity ?? null,
         firebaseUid: matchedFriend.firebaseUid,
       };
     });
@@ -1826,53 +2596,48 @@ export default function AppShell() {
       setPendingCards([]);
       return;
     }
-    void refreshPendingRequests(true);
-  }, [currentUserId, isFriendRequestsAvailable]);
+    if (!currentUserId) {
+      setPendingCards((current) => (current.length === 0 ? current : []));
+      return;
+    }
+    if (pendingFriendRequestsQuery.error) {
+      if (isFriendRequestsUnavailableError(pendingFriendRequestsQuery.error)) {
+        setIsFriendRequestsAvailable(false);
+        setPendingError(null);
+        setPendingCards((current) => (current.length === 0 ? current : []));
+        return;
+      }
+      setPendingError("Não foi possível carregar as solicitações pendentes.");
+      setPendingCards((current) => (current.length === 0 ? current : []));
+      return;
+    }
+    void refreshPendingRequests(pendingFriendRequests, pendingFriendRequestsQuery.isLoading);
+  }, [currentUserId, isFriendRequestsAvailable, pendingFriendRequests, pendingFriendRequestsQuery.error, pendingFriendRequestsQuery.isLoading]);
 
   useEffect(() => {
     const handleFriendRequestsChanged = (): void => {
       if (!isFriendRequestsAvailable) {
         return;
       }
-      void refreshFriends(false);
-      void refreshPendingRequests(false);
       setActiveFriendsTab("pending");
+      void pendingFriendRequestsQuery.refetch();
+      void acceptedFriendRequestsQuery.refetch();
+      void queryClient.invalidateQueries({
+        queryKey: ["friend_requests", String(currentUserId ?? "").trim()],
+      });
     };
 
     window.addEventListener("messly:friend-requests-changed", handleFriendRequestsChanged);
     return () => {
       window.removeEventListener("messly:friend-requests-changed", handleFriendRequestsChanged);
     };
-  }, [currentUserId, isFriendRequestsAvailable]);
-
-  useEffect(() => {
-    if (!currentUserId || !isFriendRequestsAvailable) {
-      return;
-    }
-
-    const intervalId = window.setInterval(() => {
-      void refreshPendingRequests(false);
-    }, 15000);
-
-    const handleVisibilityOrFocus = (): void => {
-      void refreshPendingRequests(false);
-    };
-
-    const handleVisibilityChange = (): void => {
-      if (document.visibilityState === "visible") {
-        void refreshPendingRequests(false);
-      }
-    };
-
-    window.addEventListener("focus", handleVisibilityOrFocus);
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-
-    return () => {
-      window.clearInterval(intervalId);
-      window.removeEventListener("focus", handleVisibilityOrFocus);
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
-    };
-  }, [currentUserId, isFriendRequestsAvailable]);
+  }, [
+    acceptedFriendRequestsQuery,
+    currentUserId,
+    isFriendRequestsAvailable,
+    pendingFriendRequestsQuery,
+    queryClient,
+  ]);
 
   const handleAcceptRequest = async (requestId: string, targetUserId: string): Promise<void> => {
     if (!currentUserId || !isFriendRequestsAvailable) {
@@ -1880,17 +2645,15 @@ export default function AppShell() {
     }
     const { error: updateError } = await supabase.from("friend_requests").update({ status: "accepted" }).eq("id", requestId);
     if (updateError) {
-      setPendingError("Nao foi possivel aceitar a solicitacao.");
+      setPendingError("Não foi possível aceitar a solicitação.");
       return;
     }
 
     try {
       await ensureDirectConversation(currentUserId, targetUserId);
-    } catch {
-      setPendingError("Solicitacao aceita, mas nao foi possivel abrir a conversa agora.");
+    } catch (error) {
+      setPendingError(`Solicitação aceita. ${resolveOpenConversationErrorMessage(error)}`);
     }
-    void refreshFriends();
-    void refreshPendingRequests();
   };
 
   const handleRejectRequest = async (requestId: string): Promise<void> => {
@@ -1899,11 +2662,9 @@ export default function AppShell() {
     }
     const { error } = await supabase.from("friend_requests").update({ status: "rejected" }).eq("id", requestId);
     if (error) {
-      setPendingError("Nao foi possivel recusar a solicitacao.");
+      setPendingError("Não foi possível recusar a solicitação.");
       return;
     }
-    void refreshFriends();
-    void refreshPendingRequests();
   };
 
   const handleCancelRequest = async (requestId: string): Promise<void> => {
@@ -1912,12 +2673,36 @@ export default function AppShell() {
     }
     const { error } = await supabase.from("friend_requests").delete().eq("id", requestId);
     if (error) {
-      setPendingError("Nao foi possivel cancelar a solicitacao.");
+      setPendingError("Não foi possível cancelar a solicitação.");
       return;
     }
-    void refreshFriends();
-    void refreshPendingRequests();
   };
+
+  const handleOpenPendingProfileConversation = useCallback(async (): Promise<void> => {
+    if (!currentUserId || !openPendingProfile) {
+      return;
+    }
+
+    try {
+      const conversationId = await ensureDirectConversation(currentUserId, openPendingProfile.userId);
+      setActiveDirectMessage({
+        conversationId,
+        userId: openPendingProfile.userId,
+        username: openPendingProfile.username,
+        displayName: openPendingProfile.displayName,
+        avatarSrc: openPendingProfile.avatarSrc,
+        presenceState: openPendingProfile.presenceState,
+        aboutText: openPendingProfile.aboutText,
+        bannerColor: openPendingProfile.bannerColor,
+        themePrimaryColor: openPendingProfile.themePrimaryColor,
+        themeAccentColor: openPendingProfile.themeAccentColor,
+        bannerSrc: openPendingProfile.bannerSrc,
+      });
+      handleClosePendingProfile();
+    } catch (error) {
+      setPendingError(resolveOpenConversationErrorMessage(error));
+    }
+  }, [currentUserId, handleClosePendingProfile, openPendingProfile]);
 
   const handleCreateConversation = async (friend: FriendListItem): Promise<void> => {
     if (!currentUserId) {
@@ -1932,10 +2717,11 @@ export default function AppShell() {
         displayName: friend.displayName,
         avatarSrc: friend.avatarSrc,
         presenceState: friend.presenceState,
+        spotifyActivity: friend.spotifyActivity ?? null,
         firebaseUid: friend.firebaseUid,
       });
-    } catch {
-      setFriendsError("Nao foi possivel iniciar uma conversa agora.");
+    } catch (error) {
+      setFriendsError(resolveOpenConversationErrorMessage(error));
     }
   };
 
@@ -1948,14 +2734,12 @@ export default function AppShell() {
 
     const { error } = await supabase.from("friend_requests").delete().eq("id", friend.requestId);
     if (error) {
-      setFriendsError("Nao foi possivel desfazer amizade.");
+      setFriendsError("Não foi possível desfazer a amizade.");
       return;
     }
 
     friendPresenceCache.delete(friend.userId);
     setFriends((current) => current.filter((item) => item.userId !== friend.userId));
-    void refreshFriends();
-    void refreshPendingRequests();
   };
 
   const handleAddFriendTargetUser = async (targetUserId: string): Promise<void> => {
@@ -1963,24 +2747,95 @@ export default function AppShell() {
       return;
     }
 
-    const { error } = await supabase.from("friend_requests").insert({
-      requester_id: currentUserId,
-      addressee_id: targetUserId,
-      status: "pending",
-    });
+    try {
+      const { data: targetUser, error: targetUserError } = await queryFriendRequestTargetById(targetUserId);
+      if (targetUserError) {
+        setFriendsError("Não foi possível verificar as permissões desse perfil.");
+        throw targetUserError;
+      }
 
-    if (error) {
-      const errorCode = String((error as { code?: string | null }).code ?? "");
-      if (errorCode === "23505") {
-        setFriendsError("Solicitacao ja enviada ou usuario ja e seu amigo.");
+      if (!targetUser?.id) {
+        setFriendsError("Perfil não encontrado.");
+        throw new Error("FRIEND_TARGET_NOT_FOUND");
+      }
+
+      const permission = await evaluateFriendRequestPermission(currentUserId, targetUser);
+      if (!permission.allowed) {
+        if (permission.reason === "disabled" || permission.reason === "friends_of_friends_only") {
+          dispatchFriendRequestBlockedNotice(buildFriendRequestBlockedNotice(targetUser, permission.reason));
+        }
+        throw new Error(`FRIEND_REQUEST_BLOCKED_${permission.reason}`);
+      }
+
+      const { data: insertedRequest, error } = await supabase
+        .from("friend_requests")
+        .insert({
+          requester_id: currentUserId,
+          addressee_id: targetUserId,
+          status: "pending",
+        })
+        .select("id,requester_id,addressee_id,status,created_at")
+        .limit(1)
+        .maybeSingle();
+
+      if (error) {
+        const errorCode = String((error as { code?: string | null }).code ?? "");
+        if (errorCode === "23505") {
+          setFriendsError("Esse usuário já recebeu sua solicitação ou já é seu amigo.");
+          throw error;
+        }
+        setFriendsError("Não foi possível enviar a solicitação de amizade.");
+        throw error;
+      }
+
+      const normalizedUsername = String(targetUser.username ?? "").trim() || "username";
+      const normalizedDisplayName = normalizeProfileDisplayName(targetUser.display_name, normalizedUsername, normalizedUsername);
+      const activeDmAvatarSrc =
+        activeDirectMessage && activeDirectMessage.userId === targetUserId
+          ? String(activeDirectMessage.avatarSrc ?? "").trim()
+          : "";
+      const fallbackAvatarSrc = getPendingDisplayAvatar(normalizedDisplayName, normalizedUsername);
+      const requestId =
+        String((insertedRequest as { id?: string | null } | null)?.id ?? "").trim() ||
+        `pending:${currentUserId}:${targetUserId}`;
+      const createdAt = String((insertedRequest as { created_at?: string | null } | null)?.created_at ?? "").trim() || new Date().toISOString();
+
+      setPendingCards((current) => {
+        const alreadyExists = current.some(
+          (card) =>
+            card.requestId === requestId ||
+            (card.targetUserId === targetUserId && card.direction === "outgoing"),
+        );
+        if (alreadyExists) {
+          return current;
+        }
+
+        return [
+          {
+            requestId,
+            targetUserId,
+            username: normalizedUsername,
+            displayName: normalizedDisplayName,
+            avatarSrc: activeDmAvatarSrc || fallbackAvatarSrc,
+            direction: "outgoing",
+            createdAt,
+          },
+          ...current,
+        ];
+      });
+
+      window.dispatchEvent(new CustomEvent("messly:friend-requests-changed"));
+    } catch (error) {
+      const code = String((error as { message?: string } | null)?.message ?? "");
+      if (code.startsWith("FRIEND_REQUEST_BLOCKED_")) {
         return;
       }
-      setFriendsError("Nao foi possivel enviar solicitacao de amizade.");
-      return;
-    }
 
-    await Promise.all([refreshFriends(false), refreshPendingRequests(false)]);
-    window.dispatchEvent(new CustomEvent("messly:friend-requests-changed"));
+      if (!code || code === "FRIEND_REQUEST_SEND_FAILED") {
+        setFriendsError("Não foi possível enviar a solicitação de amizade.");
+      }
+      throw error instanceof Error ? error : new Error("FRIEND_REQUEST_SEND_FAILED");
+    }
   };
 
   const handleBlockTargetUser = async (targetUserId: string): Promise<void> => {
@@ -1997,9 +2852,9 @@ export default function AppShell() {
       const errorCode = String((error as { code?: string | null }).code ?? "");
       if (errorCode !== "23505") {
         if (isUserBlocksUnavailableError(error)) {
-          setFriendsError("Bloqueio de usuario indisponivel no banco.");
+          setFriendsError("Bloqueio de usuário indisponível no banco de dados.");
         } else {
-          setFriendsError("Nao foi possivel bloquear usuario.");
+          setFriendsError("Não foi possível bloquear o usuário.");
         }
         return;
       }
@@ -2020,7 +2875,7 @@ export default function AppShell() {
     ]);
 
     if (deleteOutgoingResult.error || deleteIncomingResult.error) {
-      setFriendsError("Usuario bloqueado, mas nao foi possivel limpar os vinculos de amizade.");
+      setFriendsError("Usuário bloqueado, mas não foi possível atualizar a lista de amigos.");
     }
 
     friendPresenceCache.delete(targetUserId);
@@ -2028,14 +2883,25 @@ export default function AppShell() {
     setPendingCards((current) => current.filter((card) => card.targetUserId !== targetUserId));
     setActiveFriendMenuUserId((current) => (current === targetUserId ? null : current));
     setActiveDirectMessage((current) => (current?.userId === targetUserId ? null : current));
-
-    void refreshFriends();
-    void refreshPendingRequests();
   };
 
   const pendingCount = isFriendRequestsAvailable ? pendingCards.length : 0;
   const sortedFriends = useMemo(() => {
-    const copy = [...friends];
+    const uniqueById = new Map<string, FriendListItem>();
+    friends.forEach((friend) => {
+      const friendId = String(friend.userId ?? "").trim();
+      if (!friendId) {
+        return;
+      }
+      if (currentUserId && friendId === currentUserId) {
+        return;
+      }
+      if (!uniqueById.has(friendId)) {
+        uniqueById.set(friendId, friend);
+      }
+    });
+
+    const copy = Array.from(uniqueById.values());
     copy.sort((a, b) => {
       const rankDiff = getPresenceSortRank(a.presenceState) - getPresenceSortRank(b.presenceState);
       if (rankDiff !== 0) {
@@ -2044,9 +2910,65 @@ export default function AppShell() {
       return a.displayName.localeCompare(b.displayName, "pt-BR", { sensitivity: "base" });
     });
     return copy;
-  }, [friends]);
+  }, [currentUserId, friends]);
   const availableFriends = useMemo(() => sortedFriends.filter((friend) => isAvailablePresence(friend.presenceState)), [sortedFriends]);
   const allFriends = sortedFriends;
+  const rightSidebarSpotifyFriends = useMemo(
+    () =>
+      sortedFriends.filter((friend) => {
+        if (!friend.spotifyActivity) {
+          return false;
+        }
+        if (friend.userId === currentUserId) {
+          return false;
+        }
+        return true;
+      }),
+    [currentUserId, sortedFriends],
+  );
+
+  useEffect(() => {
+    if (!currentUserId || rightSidebarSpotifyFriends.length === 0) {
+      setListenAlongSessionsByFriendId({});
+      return;
+    }
+
+    const nextSessions: Record<string, SpotifyListenAlongSession> = {};
+    const unsubscribers = rightSidebarSpotifyFriends.map((friend) => {
+      const applySession = (session: SpotifyListenAlongSession): void => {
+        setListenAlongSessionsByFriendId((current) => {
+          const currentSession = current[friend.userId];
+          const normalizedSession = session;
+          if (
+            currentSession &&
+            currentSession.active === normalizedSession.active &&
+            currentSession.trackId === normalizedSession.trackId &&
+            currentSession.updatedAt === normalizedSession.updatedAt &&
+            currentSession.hostAvatarSrc === normalizedSession.hostAvatarSrc &&
+            currentSession.listenerAvatarSrc === normalizedSession.listenerAvatarSrc
+          ) {
+            return current;
+          }
+          return {
+            ...current,
+            [friend.userId]: normalizedSession,
+          };
+        });
+      };
+
+      const initialSession = readSpotifyListenAlongSession(currentUserId, friend.userId);
+      nextSessions[friend.userId] = initialSession;
+      return subscribeSpotifyListenAlongSession(currentUserId, friend.userId, applySession);
+    });
+
+    setListenAlongSessionsByFriendId(nextSessions);
+
+    return () => {
+      unsubscribers.forEach((unsubscribe) => {
+        unsubscribe();
+      });
+    };
+  }, [currentUserId, rightSidebarSpotifyFriends]);
   const normalizedFriendSearchTerm = useMemo(() => normalizeSearchTerm(friendSearchTerm), [friendSearchTerm]);
   const hasFriendSearch = normalizedFriendSearchTerm.length > 0;
   const filteredAvailableFriends = useMemo(() => {
@@ -2079,6 +3001,20 @@ export default function AppShell() {
 
     return friends.find((friend) => friend.userId === chatViewDirectMessage.userId) ?? null;
   }, [chatViewDirectMessage, friends]);
+  const activeDirectMessageMutualFriends = useMemo(() => {
+    if (!chatViewDirectMessage || !activeDirectMessageFriend) {
+      return [];
+    }
+
+    return allFriends
+      .filter((friend) => friend.userId !== chatViewDirectMessage.userId)
+      .map((friend) => ({
+        userId: friend.userId,
+        displayName: friend.displayName,
+        username: friend.username,
+        avatarSrc: friend.avatarSrc,
+      }));
+  }, [activeDirectMessageFriend, allFriends, chatViewDirectMessage]);
   const isActiveDirectMessagePendingOutgoingRequest = useMemo(() => {
     if (!chatViewDirectMessage || !isFriendRequestsAvailable) {
       return false;
@@ -2093,7 +3029,7 @@ export default function AppShell() {
       return null;
     }
 
-    const fallbackDisplayName = String(user?.displayName ?? "").trim() || "Voce";
+    const fallbackDisplayName = String(user?.displayName ?? "").trim() || "Você";
     const displayName = currentUserChatProfile?.displayName || fallbackDisplayName;
     const username = currentUserChatProfile?.username || "voce";
     const avatarSrc = currentUserChatProfile?.avatarSrc || getNameAvatarUrl(displayName || username || "U");
@@ -2109,17 +3045,12 @@ export default function AppShell() {
       themeAccentColor: currentUserChatProfile?.themeAccentColor ?? null,
     };
   }, [currentUserId, currentUserChatProfile, presenceState, user?.displayName, user?.uid]);
-  const incomingCount = useMemo(
-    () => pendingCards.filter((card) => card.direction === "incoming").length,
-    [pendingCards],
-  );
-  const outgoingCount = pendingCount - incomingCount;
   const showNetworkBanner = networkBannerState !== "online";
   const networkBannerMeta = useMemo(() => {
     switch (networkBannerState) {
-      case "offline":
+      case "invisivel":
         return {
-          tone: "offline",
+          tone: "invisivel",
           icon: "wifi_off",
           title: "Sem internet",
           subtitle: "Tentando reconectar automaticamente...",
@@ -2129,38 +3060,64 @@ export default function AppShell() {
           tone: "reconnecting",
           icon: "sync",
           title: "Reconectando",
-          subtitle: "Restabelecendo a conexao...",
+          subtitle: "Restabelecendo a conexão...",
         } as const;
       case "restored":
         return {
           tone: "restored",
           icon: "wifi",
-          title: "Conexao restabelecida",
+          title: "Conexão restabelecida",
           subtitle: "Tudo pronto novamente.",
         } as const;
       default:
         return null;
     }
   }, [networkBannerState]);
+  const isOpenPendingProfileCurrentUser = Boolean(
+    openPendingProfile &&
+      currentUserId &&
+      openPendingProfile.userId === currentUserId,
+  );
+
+  useEffect(() => {
+    if (!friendsError) {
+      return;
+    }
+    console.error("[app:friends]", friendsError);
+  }, [friendsError]);
+
+  useEffect(() => {
+    if (!pendingError) {
+      return;
+    }
+    console.error("[app:pending]", pendingError);
+  }, [pendingError]);
 
   return (
-    <div className="app-shell">
-      <TopBar isCallActive={isSidebarCallActive} onPrepareForUpdateInstall={handlePrepareForUpdateInstall} />
-      <ServerRail />
-      <DirectMessagesSidebar
-        currentUserId={currentUserId}
-        presenceState={presenceState}
-        onChangePresence={handleChangePresence}
-        onOpenSettings={() => setIsSettingsOpen(true)}
-        activeConversationId={activeDirectMessage?.conversationId ?? null}
-        onDirectMessagesChange={handleSidebarDirectMessagesChange}
-        onSelectDirectMessage={(dm) => {
-          setActiveDirectMessage(dm);
-        }}
-        onOpenFriends={() => {
-          setActiveDirectMessage(null);
-        }}
+    <div className="app-shell" data-messly-startup-surface="shell">
+      <TopBar
+        section={activeDirectMessage ? "directMessages" : "friends"}
+        isCallActive={isSidebarCallActive}
+        onPrepareForUpdateInstall={handlePrepareForUpdateInstall}
       />
+      <ServerRail />
+      <Suspense fallback={<SidebarFallback />}>
+        <DirectMessagesSidebar
+          currentUserId={currentUserId}
+          isWindowFocused={isWindowFocused}
+          presenceState={presenceState}
+          onChangePresence={handleChangePresence}
+          onOpenSettings={handleOpenSettings}
+          activeConversationId={activeDirectMessage?.conversationId ?? null}
+          onDirectMessagesChange={handleSidebarDirectMessagesChange}
+          onSelectDirectMessage={(dm) => {
+            setActiveDirectMessage(dm);
+          }}
+          onOpenFriends={() => {
+            setActiveDirectMessage(null);
+          }}
+        />
+      </Suspense>
       <main
         className={`main-panel${activeDirectMessage ? " main-panel--chat" : ""}${
           showNetworkBanner ? " main-panel--network-status" : ""
@@ -2185,7 +3142,7 @@ export default function AppShell() {
                     setActiveFriendsTab("online");
                   }}
                 >
-                  Disponivel
+                  Disponível
                 </button>
                 <button
                   className={`main-panel__navbar-tab${activeFriendsTab === "all" ? " main-panel__navbar-tab--active" : ""}`}
@@ -2239,11 +3196,11 @@ export default function AppShell() {
 
         <section className={`main-panel__content${activeDirectMessage ? " main-panel__content--chat" : ""}`}>
           <div className="main-panel__workspace">
-            {chatViewDirectMessage && currentUserId && chatCurrentUser ? (
+            {chatViewDirectMessage && chatCurrentUser ? (
               <div className={`main-panel__chat-view${activeDirectMessage ? "" : " main-panel__chat-view--hidden"}`}>
                 <DirectMessageChatView
                   conversationId={chatViewDirectMessage.conversationId}
-                  currentUserId={currentUserId}
+                  currentUserId={chatCurrentUser.userId}
                   currentUser={chatCurrentUser}
                   targetUser={{
                     userId: chatViewDirectMessage.userId,
@@ -2251,6 +3208,8 @@ export default function AppShell() {
                     displayName: chatViewDirectMessage.displayName,
                     avatarSrc: chatViewDirectMessage.avatarSrc,
                     presenceState: chatViewDirectMessage.presenceState,
+                    spotifyActivity:
+                      chatViewDirectMessage.spotifyActivity ?? activeDirectMessageFriend?.spotifyActivity ?? null,
                     firebaseUid: chatViewDirectMessage.firebaseUid,
                     aboutText: chatViewDirectMessage.aboutText,
                     bannerColor: chatViewDirectMessage.bannerColor ?? null,
@@ -2261,7 +3220,7 @@ export default function AppShell() {
                     bannerSrc: chatViewDirectMessage.bannerSrc,
                     memberSinceAt: chatViewDirectMessage.memberSinceAt ?? null,
                   }}
-                  onOpenSettings={() => setIsSettingsOpen(true)}
+                  onOpenSettings={handleOpenSettings}
                   isTargetFriend={Boolean(activeDirectMessageFriend)}
                   onUnfriendTarget={
                     activeDirectMessageFriend
@@ -2274,6 +3233,7 @@ export default function AppShell() {
                     await handleAddFriendTargetUser(chatViewDirectMessage.userId);
                   }}
                   isTargetFriendRequestPending={isActiveDirectMessagePendingOutgoingRequest}
+                  mutualFriends={activeDirectMessageMutualFriends}
                   onBlockTarget={async () => {
                     await handleBlockTargetUser(chatViewDirectMessage.userId);
                   }}
@@ -2288,7 +3248,7 @@ export default function AppShell() {
                   <input
                     className="main-panel__friends-search-input"
                     type="text"
-                    placeholder="Buscar"
+                    placeholder="Buscar amigos"
                     value={friendSearchTerm}
                     onChange={(event) => {
                       setFriendSearchTerm(event.target.value);
@@ -2302,39 +3262,41 @@ export default function AppShell() {
                 <header className="main-panel__friends-header">
                   <h2 className="main-panel__friends-title">
                     {activeFriendsTab === "online"
-                      ? `Online - ${filteredAvailableFriends.length}`
-                      : `Todos os amigos - ${filteredAllFriends.length}`}
+                      ? `Disponíveis (${filteredAvailableFriends.length})`
+                      : `Todos os amigos (${filteredAllFriends.length})`}
                   </h2>
                 </header>
 
-                {canShowFriendsState && friendsError && allFriends.length === 0 ? (
-                  <p className="main-panel__friends-error">{friendsError}</p>
-                ) : null}
-                {canShowFriendsState && !friendsError && allFriends.length === 0 && !isFriendsLoading ? (
+                {canShowFriendsState && allFriends.length === 0 && !isFriendsLoading ? (
                   <p className="main-panel__friends-empty">
-                    Voce ainda nao tem amigos. Envie um pedido para comecar.
+                    Você ainda não tem amigos. Envie uma solicitação para começar.
                   </p>
                 ) : null}
-                {canShowFriendsState && !friendsError && allFriends.length > 0 && visibleFriends.length === 0 ? (
+                {canShowFriendsState && allFriends.length > 0 && visibleFriends.length === 0 ? (
                   <p className="main-panel__friends-empty">
-                    {hasFriendSearch ? "Nenhum amigo encontrado." : "Ninguem disponivel no momento."}
+                    {hasFriendSearch ? "Nenhum amigo encontrado." : "Nenhum amigo disponível no momento."}
                   </p>
                 ) : null}
 
-                {!friendsError && visibleFriends.length > 0 ? (
+                {visibleFriends.length > 0 ? (
                   <div className="main-panel__friends-list">
-                    {visibleFriends.map((friend) => (
-                      <article key={friend.userId} className="main-panel__friend-item">
+                    {visibleFriends.map((friend) => {
+                      const spotifyActivity = isSpotifyActivityFresh(friend.spotifyActivity ?? null)
+                        ? friend.spotifyActivity
+                        : null;
+                      const spotifyStatusText = spotifyActivity
+                        ? String(spotifyActivity.artistNames || spotifyActivity.trackTitle || "").trim()
+                        : "";
+                      const shouldShowSpotifyStatus = spotifyStatusText.length > 0;
+                      return (
+                        <article key={friend.userId} className="main-panel__friend-item">
                         <div className="main-panel__friend-avatar-wrap">
-                          <img
+                          <AvatarImage
                             className="main-panel__friend-avatar"
                             src={friend.avatarSrc}
+                            name={friend.displayName || friend.username}
                             alt={`Avatar de ${friend.displayName}`}
                             loading="eager"
-                            onError={(event) => {
-                              event.currentTarget.onerror = null;
-                              event.currentTarget.src = getFriendDisplayAvatar(friend.displayName, friend.username);
-                            }}
                           />
                           <span
                             className={`main-panel__friend-presence main-panel__friend-presence--${friend.presenceState}`}
@@ -2344,7 +3306,16 @@ export default function AppShell() {
 
                         <div className="main-panel__friend-meta">
                           <p className="main-panel__friend-name">{friend.displayName}</p>
-                          <p className="main-panel__friend-status">{getPresenceLabel(friend.presenceState)}</p>
+                          <p className="main-panel__friend-status">
+                            {shouldShowSpotifyStatus ? (
+                              <span className="main-panel__friend-spotify-status">
+                                <img className="main-panel__friend-spotify-icon" src={musicalIcon} alt="" aria-hidden="true" />
+                                <span className="main-panel__friend-spotify-text">{spotifyStatusText}</span>
+                              </span>
+                            ) : (
+                              getPresenceLabel(friend.presenceState)
+                            )}
+                          </p>
                           <p className="main-panel__friend-username">@{friend.username}</p>
                         </div>
 
@@ -2352,7 +3323,7 @@ export default function AppShell() {
                           <button
                             className="main-panel__friend-action-btn"
                             type="button"
-                            title={`Iniciar conversa com ${friend.displayName}`}
+                            title="Mensagem"
                             aria-label={`Iniciar conversa com ${friend.displayName}`}
                             onClick={() => {
                               void handleCreateConversation(friend);
@@ -2365,8 +3336,8 @@ export default function AppShell() {
                             <button
                               className="main-panel__friend-action-btn"
                               type="button"
-                              title={`Acoes para ${friend.displayName}`}
-                              aria-label={`Acoes para ${friend.displayName}`}
+                              title="Ações"
+                              aria-label={`Ações para ${friend.displayName}`}
                               aria-haspopup="menu"
                               aria-expanded={activeFriendMenuUserId === friend.userId}
                               onClick={() => {
@@ -2377,7 +3348,7 @@ export default function AppShell() {
                             </button>
 
                             {activeFriendMenuUserId === friend.userId ? (
-                              <div className="main-panel__friend-menu" role="menu" aria-label={`Acoes de ${friend.displayName}`}>
+                              <div className="main-panel__friend-menu" role="menu" aria-label={`Ações de ${friend.displayName}`}>
                                 <button
                                   className="main-panel__friend-menu-item main-panel__friend-menu-item--danger"
                                   type="button"
@@ -2393,48 +3364,49 @@ export default function AppShell() {
                           </div>
                         </div>
                       </article>
-                    ))}
+                      );
+                    })}
                   </div>
                 ) : null}
               </section>
             ) : null}
 
             {!activeDirectMessage && activeFriendsTab === "pending" ? (
-              <section className="main-panel__pending" aria-label="Solicitacoes pendentes">
+              <section className="main-panel__pending" aria-label="Solicitações pendentes">
                 <header className="main-panel__pending-header">
                   <h2 className="main-panel__pending-title">Pendentes</h2>
-                  <p className="main-panel__pending-subtitle">
-                    {incomingCount} recebidas - {outgoingCount} enviadas
-                  </p>
                 </header>
 
-                {isPendingLoading ? <p className="main-panel__pending-empty">Carregando solicitacoes...</p> : null}
-                {!isPendingLoading && pendingError ? <p className="main-panel__pending-error">{pendingError}</p> : null}
-                {!isPendingLoading && !pendingError && pendingCards.length === 0 ? (
-                  <p className="main-panel__pending-empty">Nenhuma solicitacao pendente no momento.</p>
+                {isPendingLoading ? <p className="main-panel__pending-empty">Carregando solicitações...</p> : null}
+                {!isPendingLoading && pendingCards.length === 0 ? (
+                  <p className="main-panel__pending-empty">Nenhuma solicitação pendente.</p>
                 ) : null}
 
-                {!isPendingLoading && !pendingError && pendingCards.length > 0 ? (
+                {!isPendingLoading && pendingCards.length > 0 ? (
                   <div className="main-panel__pending-list">
                     {pendingCards.map((card) => (
                       <article key={card.requestId} className="main-panel__pending-item">
-                        <img
-                          className="main-panel__pending-avatar"
-                          src={card.avatarSrc}
-                          alt={`Avatar de ${card.displayName}`}
-                          loading="lazy"
-                          onError={(event) => {
-                            event.currentTarget.onerror = null;
-                            event.currentTarget.src = getPendingDisplayAvatar(card.displayName, card.username);
+                        <button
+                          type="button"
+                          className="main-panel__pending-avatar-button"
+                          onClick={() => {
+                            void handleOpenPendingProfile(card);
                           }}
-                        />
+                          aria-label={`Abrir perfil de ${card.displayName}`}
+                          title={`Abrir perfil de ${card.displayName}`}
+                        >
+                          <AvatarImage
+                            className="main-panel__pending-avatar"
+                            src={card.avatarSrc}
+                            name={card.displayName || card.username}
+                            alt={`Avatar de ${card.displayName}`}
+                            loading="lazy"
+                          />
+                        </button>
 
                         <div className="main-panel__pending-meta">
                           <p className="main-panel__pending-name">{card.displayName}</p>
                           <p className="main-panel__pending-username">@{card.username}</p>
-                          <p className="main-panel__pending-direction">
-                            {card.direction === "incoming" ? "Solicitacao recebida" : "Solicitacao enviada"}
-                          </p>
                         </div>
 
                         <div className="main-panel__pending-actions">
@@ -2483,34 +3455,225 @@ export default function AppShell() {
             <aside className="main-panel__right-sidebar" aria-label="Agora no Messly">
               <h2 className="main-panel__right-title">Agora no Messly</h2>
 
-              <div className="main-panel__right-card">
-                <h3 className="main-panel__right-card-title">Nada por aqui ainda</h3>
-                <p className="main-panel__right-card-text">
-                  Assim que alguem iniciar uma atividade no Messly, esse painel mostra as novidades para voce.
-                </p>
-              </div>
+              {rightSidebarSpotifyFriends.length === 0 ? (
+                <div className="main-panel__right-card">
+                  <h3 className="main-panel__right-card-title">Nenhuma atividade</h3>
+                  <p className="main-panel__right-card-text">As atividades dos seus amigos aparecerão aqui.</p>
+                </div>
+              ) : (
+                <div className="main-panel__right-now-list">
+                  {rightSidebarSpotifyFriends.map((friend) => {
+                    const spotifyActivity = friend.spotifyActivity;
+                    if (!spotifyActivity) {
+                      return null;
+                    }
+
+                    const friendName = friend.displayName || friend.username;
+                    const listenAlongSession =
+                      listenAlongSessionsByFriendId[friend.userId] ??
+                      createDefaultSpotifyListenAlongSession(currentUserId ?? "", friend.userId);
+                    const isListeningTogether =
+                      Boolean(currentUserId) &&
+                      listenAlongSession.active &&
+                      listenAlongSession.listenerUserId === (currentUserId ?? "") &&
+                      listenAlongSession.hostUserId === friend.userId &&
+                      listenAlongSession.trackId === spotifyActivity.trackId;
+
+                    return (
+                      <article key={friend.userId} className="main-panel__right-now-card">
+                        <div className="main-panel__right-now-top">
+                          <div className="main-panel__right-now-header">
+                            <div className="main-panel__right-now-avatar-wrap">
+                              <AvatarImage
+                                className="main-panel__right-now-avatar"
+                                src={friend.avatarSrc}
+                                name={friendName}
+                                alt={`Avatar de ${friendName}`}
+                                loading="lazy"
+                              />
+                              <span
+                                className={`main-panel__right-now-presence main-panel__right-now-presence--${friend.presenceState}`}
+                                aria-hidden="true"
+                              />
+                            </div>
+                            <div className="main-panel__right-now-header-meta">
+                              <p className="main-panel__right-now-name">{friendName}</p>
+                              <p className="main-panel__right-now-label">Ouvindo Spotify</p>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            className="main-panel__right-now-spotify-button"
+                            onClick={() => {
+                              handleOpenSpotifyExternal(spotifyActivity.trackUrl);
+                            }}
+                            aria-label={`Abrir ${spotifyActivity.trackTitle} no Spotify`}
+                            title="Abrir no Spotify"
+                          >
+                            <img
+                              className="main-panel__right-now-spotify-logo"
+                              src={spotifyLogo}
+                              alt=""
+                              aria-hidden="true"
+                            />
+                          </button>
+                        </div>
+
+                        <div className="main-panel__right-now-content">
+                          <button
+                            type="button"
+                            className="main-panel__right-now-cover-button"
+                            onClick={() => {
+                              handleOpenSpotifyExternal(spotifyActivity.trackUrl);
+                            }}
+                            aria-label={`Abrir ${spotifyActivity.trackTitle} no Spotify`}
+                            title="Abrir no Spotify"
+                          >
+                            {spotifyActivity.coverUrl ? (
+                              <img
+                                className="main-panel__right-now-cover-image"
+                                src={spotifyActivity.coverUrl}
+                                alt={`Capa de ${spotifyActivity.trackTitle}`}
+                                loading="lazy"
+                              />
+                            ) : (
+                              <span className="main-panel__right-now-cover-fallback" aria-hidden="true" />
+                            )}
+                          </button>
+
+                          <div className="main-panel__right-now-track-meta">
+                            <button
+                              type="button"
+                              className="main-panel__right-now-track main-panel__right-now-link"
+                              onClick={() => {
+                                handleOpenSpotifyExternal(spotifyActivity.trackUrl);
+                              }}
+                              aria-label={`Abrir ${spotifyActivity.trackTitle} no Spotify`}
+                              title="Abrir no Spotify"
+                            >
+                              {spotifyActivity.trackTitle}
+                            </button>
+
+                            <button
+                              type="button"
+                              className="main-panel__right-now-artist main-panel__right-now-link"
+                              onClick={() => {
+                                handleOpenSpotifyExternal(spotifyActivity.trackUrl);
+                              }}
+                              aria-label={`Abrir ${spotifyActivity.artistNames} no Spotify`}
+                              title="Abrir no Spotify"
+                            >
+                              {spotifyActivity.artistNames}
+                            </button>
+                          </div>
+
+                          {isListeningTogether ? (
+                            <div className="main-panel__right-now-listen-along-avatars" aria-label="Ouvindo junto">
+                              <AvatarImage
+                                className="main-panel__right-now-listen-along-avatar"
+                                src={listenAlongSession.hostAvatarSrc || friend.avatarSrc}
+                                name={listenAlongSession.hostDisplayName || friendName}
+                                alt={`Avatar de ${listenAlongSession.hostDisplayName || friendName}`}
+                                loading="lazy"
+                              />
+                              <AvatarImage
+                                className="main-panel__right-now-listen-along-avatar"
+                                src={
+                                  listenAlongSession.listenerAvatarSrc ||
+                                  currentUserChatProfile?.avatarSrc ||
+                                  getNameAvatarUrl(String(user?.displayName ?? "").trim() || "U")
+                                }
+                                name={
+                                  listenAlongSession.listenerDisplayName ||
+                                  currentUserChatProfile?.displayName ||
+                                  String(user?.displayName ?? "").trim() ||
+                                  "Você"
+                                }
+                                alt={`Avatar de ${
+                                  listenAlongSession.listenerDisplayName ||
+                                  currentUserChatProfile?.displayName ||
+                                  String(user?.displayName ?? "").trim() ||
+                                  "Você"
+                                }`}
+                                loading="lazy"
+                              />
+                            </div>
+                          ) : null}
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              )}
             </aside>
           ) : null}
         </section>
       </main>
 
+      {openPendingProfile ? (
+        <div className="main-panel__pending-profile-overlay" role="presentation" onClick={handleClosePendingProfile}>
+          <div
+            className="main-panel__pending-profile-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Perfil de ${openPendingProfile.displayName}`}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <Suspense fallback={<PendingProfileFallback />}>
+              <UserProfilePopover
+                avatarSrc={openPendingProfile.avatarSrc}
+                bannerSrc={openPendingProfile.bannerSrc}
+                bannerColor={openPendingProfile.bannerColor}
+                themePrimaryColor={openPendingProfile.themePrimaryColor}
+                themeAccentColor={openPendingProfile.themeAccentColor}
+                displayName={openPendingProfile.displayName}
+                username={openPendingProfile.username}
+                profileUserId={openPendingProfile.userId}
+                aboutText={openPendingProfile.aboutText}
+                spotifyActivity={openPendingProfile.spotifyActivity ?? null}
+                presenceState={openPendingProfile.presenceState}
+                presenceLabel={getPresenceLabel(openPendingProfile.presenceState)}
+                memberSinceLabel={openPendingProfile.memberSinceLabel}
+                viewMode="full"
+                showActions={false}
+                showEditProfileButton={isOpenPendingProfileCurrentUser}
+                onMessageComposerSubmit={handleOpenPendingProfileConversation}
+                onEditProfile={() => {
+                  handleClosePendingProfile();
+                  handleOpenSettings("profile");
+                }}
+                onCloseFullProfile={handleClosePendingProfile}
+                onOpenSettings={handleOpenSettings}
+              />
+            </Suspense>
+          </div>
+        </div>
+      ) : null}
+
       {isSettingsOpen ? (
         <div
           className="app-settings-float"
           role="presentation"
-          onClick={() => setIsSettingsOpen(false)}
+          onClick={handleCloseSettings}
         >
           <div
             className="app-settings-modal"
             role="dialog"
             aria-modal="true"
-            aria-label="Configuracoes do aplicativo"
+            aria-label="Configurações do aplicativo"
             onClick={(event) => event.stopPropagation()}
           >
-            <AppSettingsView onClose={() => setIsSettingsOpen(false)} currentUserId={currentUserId} />
+            <Suspense fallback={<SettingsModalFallback />}>
+              <AppSettingsView
+                onClose={handleCloseSettings}
+                currentUserId={currentUserId}
+                initialSection={settingsInitialSection}
+              />
+            </Suspense>
           </div>
         </div>
       ) : null}
     </div>
   );
 }
+

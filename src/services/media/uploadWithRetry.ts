@@ -2,6 +2,7 @@ export interface UploadWithRetryOptions {
   url: string;
   file: Blob;
   contentType: string;
+  headers?: Record<string, string>;
   signal?: AbortSignal;
   timeoutMs?: number;
   retries?: number;
@@ -54,6 +55,12 @@ function uploadOnce(options: UploadWithRetryOptions, attempt: number): Promise<v
     xhr.open("PUT", options.url, true);
     xhr.timeout = timeoutMs;
     xhr.setRequestHeader("content-type", options.contentType);
+    Object.entries(options.headers ?? {}).forEach(([key, value]) => {
+      if (key.toLowerCase() === "content-type") {
+        return;
+      }
+      xhr.setRequestHeader(key, value);
+    });
 
     xhr.upload.onprogress = (event) => {
       if (!options.onProgress) {

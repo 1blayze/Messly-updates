@@ -1,14 +1,15 @@
 import { HttpError } from "./http.ts";
 import { getSupabaseAdminClient } from "./supabaseAdmin.ts";
 
-interface UserRow {
-  id: string;
-  firebase_uid?: string | null;
-  email?: string | null;
+interface ConversationRow {
+  id?: string | null;
+  user1_id?: string | null;
+  user2_id?: string | null;
 }
 
-interface ConversationRow {
-  id: string;
+interface ConversationParticipants {
+  user1Id: string;
+  user2Id: string;
 }
 
 interface CachedValue<T> {
@@ -16,133 +17,132 @@ interface CachedValue<T> {
   expiresAtMs: number;
 }
 
-const USER_ID_CACHE_TTL_MS = 5 * 60_000;
 const MEMBERSHIP_CACHE_TTL_MS = 45_000;
-const userIdByFirebaseUidCache = new Map<string, CachedValue<string>>();
 const conversationMembershipCache = new Map<string, CachedValue<true>>();
-
-function normalizeEmail(email: string | null | undefined): string {
-  return String(email ?? "").trim().toLowerCase();
-}
+const conversationParticipantsCache = new Map<string, CachedValue<ConversationParticipants>>();
 
 function getCachedValue<T>(map: Map<string, CachedValue<T>>, key: string): T | null {
   const now = Date.now();
   const cached = map.get(key);
-  if (!cached) {
-    return null;
-  }
-
+  if (!cached) return null;
   if (cached.expiresAtMs <= now) {
     map.delete(key);
     return null;
   }
-
   return cached.value;
 }
 
 function setCachedValue<T>(map: Map<string, CachedValue<T>>, key: string, value: T, ttlMs: number): void {
-  map.set(key, {
-    value,
-    expiresAtMs: Date.now() + ttlMs,
-  });
+  map.set(key, { value, expiresAtMs: Date.now() + ttlMs });
 }
 
-export async function resolveUserIdByFirebaseUid(firebaseUid: string, email?: string | null): Promise<string> {
-  const cachedUserId = getCachedValue(userIdByFirebaseUidCache, firebaseUid);
-  if (cachedUserId) {
-    return cachedUserId;
+function normalizeConversationParticipants(row: ConversationRow | null): ConversationParticipants | null {
+  const user1Id = String(row?.user1_id ?? "").trim();
+  const user2Id = String(row?.user2_id ?? "").trim();
+  if (!user1Id || !user2Id || user1Id === user2Id) {
+    return null;
   }
-
-  const supabase = getSupabaseAdminClient();
-  const { data: uidData, error: uidError } = await supabase
-    .from("users")
-    .select("id")
-    .eq("firebase_uid", firebaseUid)
-    .limit(1)
-    .maybeSingle();
-
-  if (uidError) {
-    throw new HttpError(500, "USER_RESOLUTION_FAILED", "Falha ao resolver usuario autenticado.");
-  }
-
-  const uidRow = uidData as UserRow | null;
-  if (uidRow?.id) {
-    setCachedValue(userIdByFirebaseUidCache, firebaseUid, uidRow.id, USER_ID_CACHE_TTL_MS);
-    return uidRow.id;
-  }
-
-  const normalizedEmail = normalizeEmail(email);
-  if (!normalizedEmail) {
-    throw new HttpError(403, "USER_NOT_MAPPED", "Usuario Firebase nao vinculado na tabela users.");
-  }
-
-  const { data: emailData, error: emailError } = await supabase
-    .from("users")
-    .select("id,firebase_uid")
-    .eq("email", normalizedEmail)
-    .limit(1)
-    .maybeSingle();
-
-  if (emailError) {
-    throw new HttpError(500, "USER_RESOLUTION_FAILED", "Falha ao resolver usuario autenticado.");
-  }
-
-  const emailRow = emailData as UserRow | null;
-  if (!emailRow?.id) {
-    throw new HttpError(403, "USER_NOT_MAPPED", "Usuario Firebase nao vinculado na tabela users.");
-  }
-
-  const mappedFirebaseUid = String(emailRow.firebase_uid ?? "").trim();
-  if (mappedFirebaseUid && mappedFirebaseUid !== firebaseUid) {
-    throw new HttpError(403, "USER_LINK_CONFLICT", "Este e-mail ja esta vinculado a outra conta.");
-  }
-
-  if (!mappedFirebaseUid) {
-    const { error: linkError } = await supabase
-      .from("users")
-      .update({
-        firebase_uid: firebaseUid,
-      })
-      .eq("id", emailRow.id);
-
-    if (linkError) {
-      const message = String(linkError.message ?? "").toLowerCase();
-      const code = String((linkError as { code?: string }).code ?? "").trim();
-      if (code === "23505" || message.includes("duplicate key") || message.includes("firebase_uid")) {
-        throw new HttpError(403, "USER_LINK_CONFLICT", "Este e-mail ja esta vinculado a outra conta.");
-      }
-      throw new HttpError(500, "USER_LINK_FAILED", "Falha ao vincular usuario Firebase.");
-    }
-  }
-
-  setCachedValue(userIdByFirebaseUidCache, firebaseUid, emailRow.id, USER_ID_CACHE_TTL_MS);
-  return emailRow.id;
+  return { user1Id, user2Id };
 }
 
-export async function assertConversationMembership(conversationId: string, userId: string): Promise<void> {
-  const cacheKey = `${conversationId}:${userId}`;
-  const cachedMembership = getCachedValue(conversationMembershipCache, cacheKey);
-  if (cachedMembership) {
-    return;
+export async function resolveUserId(authUid: string | null | undefined): Promise<string> {
+  const userId = String(authUid ?? "").trim();
+  if (!userId) {
+    throw new HttpError(401, "UNAUTHENTICATED", "Sessão não identificada.");
+  }
+  return userId;
+}
+
+async function loadConversationParticipantsForMember(
+  conversationId: string,
+  userId: string,
+): Promise<ConversationParticipants> {
+  const membershipCacheKey = `${conversationId}:${userId}`;
+  const cachedMembership = getCachedValue(conversationMembershipCache, membershipCacheKey);
+  const cachedParticipants = getCachedValue(conversationParticipantsCache, conversationId);
+  if (cachedMembership && cachedParticipants) {
+    return cachedParticipants;
   }
 
   const supabase = getSupabaseAdminClient();
   const { data, error } = await supabase
     .from("conversations")
-    .select("id")
+    .select("id,user1_id,user2_id")
     .eq("id", conversationId)
     .or(`user1_id.eq.${userId},user2_id.eq.${userId}`)
     .limit(1)
     .maybeSingle();
 
   if (error) {
-    throw new HttpError(500, "CONVERSATION_AUTH_FAILED", "Falha ao validar permissao da conversa.");
+    throw new HttpError(500, "CONVERSATION_AUTH_FAILED", "Falha ao validar permissão da conversa.");
   }
 
-  const row = data as ConversationRow | null;
-  if (!row?.id) {
-    throw new HttpError(403, "FORBIDDEN", "Usuario sem permissao para esta conversa.");
+  const participants = normalizeConversationParticipants(data as ConversationRow | null);
+  if (!participants) {
+    throw new HttpError(403, "FORBIDDEN", "Usuário sem permissão para esta conversa.");
   }
 
-  setCachedValue(conversationMembershipCache, cacheKey, true, MEMBERSHIP_CACHE_TTL_MS);
+  setCachedValue(conversationMembershipCache, membershipCacheKey, true, MEMBERSHIP_CACHE_TTL_MS);
+  setCachedValue(conversationParticipantsCache, conversationId, participants, MEMBERSHIP_CACHE_TTL_MS);
+  return participants;
 }
+
+export async function assertConversationMembership(conversationId: string, userId: string): Promise<void> {
+  await loadConversationParticipantsForMember(conversationId, userId);
+}
+
+function toBoolean(value: unknown): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    return normalized === "true" || normalized === "t" || normalized === "1";
+  }
+  if (typeof value === "number") {
+    return value === 1;
+  }
+  return false;
+}
+
+async function areUserIdsBlocked(user1Id: string, user2Id: string): Promise<boolean> {
+  const supabase = getSupabaseAdminClient();
+  const rpcResult = await supabase.rpc("user_ids_are_blocked", {
+    user_a: user1Id,
+    user_b: user2Id,
+  });
+
+  if (!rpcResult.error) {
+    return toBoolean(rpcResult.data);
+  }
+
+  const { data, error } = await supabase
+    .from("user_blocks")
+    .select("blocker_id,blocked_id")
+    .or(
+      `and(blocker_id.eq.${user1Id},blocked_id.eq.${user2Id}),and(blocker_id.eq.${user2Id},blocked_id.eq.${user1Id})`,
+    )
+    .limit(1);
+
+  if (error) {
+    throw new HttpError(500, "CONVERSATION_BLOCK_CHECK_FAILED", "Falha ao validar bloqueio da conversa.", {
+      rpcCode: rpcResult.error.code ?? null,
+      queryCode: error.code ?? null,
+    });
+  }
+
+  return Array.isArray(data) && data.length > 0;
+}
+
+export async function assertConversationCanSendMessages(conversationId: string, userId: string): Promise<void> {
+  const participants = await loadConversationParticipantsForMember(conversationId, userId);
+
+  if (await areUserIdsBlocked(participants.user1Id, participants.user2Id)) {
+    throw new HttpError(403, "CONVERSATION_BLOCKED", "Não é possível enviar mensagem para este usuário.");
+  }
+}
+
+// Legacy no-op; kept for compatibility with callers expecting existence.
+export async function upsertUserIdentity(): Promise<void> {
+  return;
+}
+
+

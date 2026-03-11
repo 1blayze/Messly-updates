@@ -1,480 +1,766 @@
-import { get, onDisconnect, onValue, set, type DatabaseReference, type OnDisconnect } from "firebase/database";
+import { supabase, supabaseAnonKey, supabaseUrl } from "../../lib/supabaseClient";
+import { authService } from "../auth";
 import {
-  createPresencePayload,
-  getPresenceConnectionRef,
-  getPresenceDeviceRef,
-  loadPreferredPresenceState,
-  savePreferredPresenceState,
-} from "./presenceClient";
-import { firebaseDatabaseUrl, firebasePresenceEnabled } from "../firebase";
-import type { PresenceState } from "./presenceTypes";
-
-const IDLE_TIMEOUT_MS = 5 * 60 * 1000;
-const HEARTBEAT_INTERVAL_MS = 30 * 1000;
-const MIN_STATE_UPDATE_INTERVAL_MS = 10 * 1000;
-const USER_DND = false;
-const PINNED_STATE_KEY = "messly:presence:pinned-state";
+  createDefaultSpotifyConnection,
+  readSpotifyConnection,
+  resolveSpotifyPlaybackProgressSeconds,
+  subscribeSpotifyConnection,
+  syncSpotifyConnection,
+  type SpotifyConnectionState,
+} from "../connections/spotifyConnection";
+import {
+  disconnectPresenceGateway,
+  ensurePresenceGatewayConnected,
+  sendPresenceGatewayEvent,
+  setPresenceGatewayCurrentUser,
+  subscribePresenceGatewayState,
+} from "./presenceGateway";
+import {
+  PRESENCE_STALE_AFTER_MS,
+  toPersistedPresenceStatus,
+  type PresenceGatewayEventType,
+  type PresenceSpotifyActivity,
+  type PresenceState,
+} from "./presenceTypes";
+import { getPresenceTableColumnCapabilities, getPresenceTableName } from "./presenceTable";
+import { readPresencePreference, writePresencePreference } from "./presencePreference";
 
 type PresenceSubscriber = (state: PresenceState) => void;
 
-let currentUid: string | null = null;
-let preferredStateUid: string | null = null;
-let deviceRef: DatabaseReference | null = null;
-let disconnectRegistration: OnDisconnect | null = null;
-let unsubscribeConnected: (() => void) | null = null;
+const IDLE_AFTER_MS = 5 * 60 * 1000;
+const HEARTBEAT_INTERVAL_FOREGROUND_MS = 25_000;
+const HEARTBEAT_INTERVAL_BACKGROUND_MS = Math.min(
+  45_000,
+  Math.max(30_000, PRESENCE_STALE_AFTER_MS - 25_000),
+);
+const LOCAL_ACTIVITY_SYNC_MIN_INTERVAL_MS = 8_000;
+const PRESENCE_CONTROLLER_DEBUG_ENABLED = import.meta.env.DEV;
 
-let idleTimeoutId: number | null = null;
-let heartbeatIntervalId: number | null = null;
-let pendingWriteTimeoutId: number | null = null;
+interface PersistedPresencePayload {
+  user_id: string;
+  status: ReturnType<typeof toPersistedPresenceStatus>;
+  activities?: PresenceSpotifyActivity[];
+  last_seen: string;
+  updated_at: string;
+}
 
-let pendingState: PresenceState | null = null;
-let pendingTouchLastActive = false;
-let currentState: PresenceState = "online";
-let lastWriteDispatchedAt = 0;
-let lastActivityAt = Date.now();
-let startInvocationId = 0;
-let presenceDbValidationPromise: Promise<boolean> | null = null;
+interface PresenceSemanticSnapshot {
+  state: PresenceState;
+  activity: PresenceSpotifyActivity | null;
+}
+
+let currentUserId: string | null = null;
+let currentState: PresenceState = "invisivel";
+let preferredState: PresenceState = "online";
+let lastActivityAtMs = Date.now();
+let heartbeatTimerId: number | null = null;
+let idleTimerId: number | null = null;
+let spotifyConnectionScope: string | null = null;
+let currentAccessToken: string | null = null;
+let startSequence = 0;
+let spotifyUnsubscribe: (() => void) | null = null;
+let gatewayStateUnsubscribe: (() => void) | null = null;
+let currentSpotifyConnection: SpotifyConnectionState = createDefaultSpotifyConnection();
+let lastPersistedSnapshot: PresenceSemanticSnapshot | null = null;
+let lastBroadcastSnapshot: PresenceSemanticSnapshot | null = null;
+let lastGatewayStatus = "idle";
+let lastLocalActivitySyncAtMs = 0;
 
 const subscribers = new Set<PresenceSubscriber>();
-const activityEvents: Array<keyof WindowEventMap> = ["mousemove", "keydown", "mousedown", "touchstart"];
 
-function notifySubscribers(): void {
+function logPresenceControllerDebug(event: string, details: Record<string, unknown> = {}): void {
+  if (!PRESENCE_CONTROLLER_DEBUG_ENABLED) {
+    return;
+  }
+  console.debug(`[presence:controller] ${event}`, details);
+}
+
+void authService.getCurrentAccessToken().then((token) => {
+  currentAccessToken = token;
+});
+
+supabase.auth.onAuthStateChange((_event, session) => {
+  currentAccessToken = session?.access_token ?? null;
+});
+
+function notify(): void {
   subscribers.forEach((subscriber) => subscriber(currentState));
 }
 
-function isValidPresenceState(value: unknown): value is PresenceState {
-  return value === "online" || value === "idle" || value === "dnd" || value === "offline";
-}
-
-function getPinnedPresenceState(): PresenceState | null {
-  const raw = localStorage.getItem(PINNED_STATE_KEY);
-  if (!raw) {
-    return null;
+function clearHeartbeatTimer(): void {
+  if (heartbeatTimerId !== null && typeof window !== "undefined") {
+    window.clearInterval(heartbeatTimerId);
+    heartbeatTimerId = null;
   }
-  return isValidPresenceState(raw) ? raw : null;
-}
-
-function setPinnedPresenceState(state: PresenceState | null): void {
-  if (!state) {
-    localStorage.removeItem(PINNED_STATE_KEY);
-    return;
-  }
-
-  localStorage.setItem(PINNED_STATE_KEY, state);
-}
-
-function setCurrentState(nextState: PresenceState): void {
-  if (currentState === nextState) {
-    return;
-  }
-
-  currentState = nextState;
-  notifySubscribers();
-}
-
-function getDesiredState(): PresenceState {
-  if (USER_DND) {
-    return "dnd";
-  }
-
-  const pinnedState = getPinnedPresenceState();
-  if (pinnedState) {
-    return pinnedState;
-  }
-
-  const idleForMs = Date.now() - lastActivityAt;
-  return idleForMs >= IDLE_TIMEOUT_MS ? "idle" : "online";
-}
-
-async function syncPreferredPresenceStateFromFirebase(firebaseUid: string): Promise<void> {
-  const preferredState = await loadPreferredPresenceState(firebaseUid);
-  if (preferredState) {
-    setPinnedPresenceState(preferredState);
-    setCurrentState(preferredState);
-  }
-}
-
-function normalizeFirebaseDatabaseUrl(url: string): string {
-  return url.trim().replace(/\/+$/g, "");
-}
-
-async function validatePresenceDatabaseEndpoint(): Promise<boolean> {
-  if (presenceDbValidationPromise) {
-    return presenceDbValidationPromise;
-  }
-
-  presenceDbValidationPromise = (async () => {
-    const normalizedBaseUrl = normalizeFirebaseDatabaseUrl(firebaseDatabaseUrl);
-    return Boolean(normalizedBaseUrl);
-  })();
-
-  return presenceDbValidationPromise;
-}
-
-async function writePresence(state: PresenceState, touchLastActive: boolean): Promise<void> {
-  if (!deviceRef) {
-    return;
-  }
-
-  if (currentState === state && !touchLastActive) {
-    return;
-  }
-
-  try {
-    await set(
-      deviceRef,
-      createPresencePayload(state, {
-        includeLastActive: touchLastActive,
-      }),
-    );
-    setCurrentState(state);
-  } catch {}
-}
-
-function flushPresenceQueue(force: boolean): void {
-  if (force && pendingWriteTimeoutId !== null) {
-    window.clearTimeout(pendingWriteTimeoutId);
-    pendingWriteTimeoutId = null;
-  }
-
-  const nextState = pendingState;
-  const touchLastActive = pendingTouchLastActive;
-
-  if (!nextState) {
-    return;
-  }
-
-  const elapsed = Date.now() - lastWriteDispatchedAt;
-  if (!force && elapsed < MIN_STATE_UPDATE_INTERVAL_MS) {
-    if (pendingWriteTimeoutId === null) {
-      pendingWriteTimeoutId = window.setTimeout(() => {
-        pendingWriteTimeoutId = null;
-        flushPresenceQueue(false);
-      }, MIN_STATE_UPDATE_INTERVAL_MS - elapsed);
-    }
-    return;
-  }
-
-  pendingState = null;
-  pendingTouchLastActive = false;
-  lastWriteDispatchedAt = Date.now();
-  void writePresence(nextState, touchLastActive);
-}
-
-function queuePresenceWrite(
-  nextState: PresenceState,
-  options: {
-    touchLastActive?: boolean;
-    force?: boolean;
-  } = {},
-): void {
-  const touchLastActive = options.touchLastActive ?? true;
-  const force = options.force ?? false;
-  const hadPendingState = pendingState !== null;
-
-  pendingState = nextState;
-  pendingTouchLastActive = hadPendingState ? pendingTouchLastActive || touchLastActive : touchLastActive;
-
-  if (force) {
-    flushPresenceQueue(true);
-    return;
-  }
-
-  const elapsed = Date.now() - lastWriteDispatchedAt;
-  if (elapsed >= MIN_STATE_UPDATE_INTERVAL_MS && pendingWriteTimeoutId === null) {
-    flushPresenceQueue(false);
-    return;
-  }
-
-  if (pendingWriteTimeoutId !== null) {
-    return;
-  }
-
-  pendingWriteTimeoutId = window.setTimeout(() => {
-    pendingWriteTimeoutId = null;
-    flushPresenceQueue(false);
-  }, Math.max(0, MIN_STATE_UPDATE_INTERVAL_MS - elapsed));
 }
 
 function clearIdleTimer(): void {
-  if (idleTimeoutId !== null) {
-    window.clearTimeout(idleTimeoutId);
-    idleTimeoutId = null;
+  if (idleTimerId !== null && typeof window !== "undefined") {
+    window.clearTimeout(idleTimerId);
+    idleTimerId = null;
   }
 }
 
-function scheduleIdleTimer(): void {
+function clearSpotifySubscription(): void {
+  if (!spotifyUnsubscribe) {
+    return;
+  }
+  spotifyUnsubscribe();
+  spotifyUnsubscribe = null;
+}
+
+function clearGatewaySubscription(): void {
+  if (!gatewayStateUnsubscribe) {
+    return;
+  }
+  gatewayStateUnsubscribe();
+  gatewayStateUnsubscribe = null;
+}
+
+function buildPresencePayload(
+  state: PresenceState,
+  activity: PresenceSpotifyActivity | null,
+  userIdOverride?: string | null,
+): PersistedPresencePayload | null {
+  const userId = String(userIdOverride ?? currentUserId ?? "").trim();
+  if (!userId) {
+    return null;
+  }
+
+  const nowIso = new Date().toISOString();
+  return {
+    user_id: userId,
+    status: toPersistedPresenceStatus(state),
+    activities: activity ? [activity] : [],
+    last_seen: nowIso,
+    updated_at: nowIso,
+  };
+}
+
+function parseTimestampMs(value: string | number | null | undefined): number | null {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+
+  const raw = String(value ?? "").trim();
+  if (!raw) {
+    return null;
+  }
+
+  const parsed = Date.parse(raw);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function clampProgressSeconds(value: number, durationSeconds: number): number {
+  return Math.max(0, Math.min(durationSeconds, Math.round(value)));
+}
+
+function buildSpotifyPresenceActivity(
+  connection: SpotifyConnectionState,
+  nowMs: number = Date.now(),
+): PresenceSpotifyActivity | null {
+  if (!connection.connected || !connection.showAsStatus || !connection.playback) {
+    return null;
+  }
+
+  const playback = connection.playback;
+  const durationSeconds = Math.max(0, Math.round(Number(playback.durationSeconds ?? 0)));
+  if (!durationSeconds) {
+    return null;
+  }
+
+  const isPlaying = playback.isPlaying !== false;
+  const connectionUpdatedAtMs = parseTimestampMs(connection.updatedAt) ?? nowMs;
+  const baseProgressSeconds = clampProgressSeconds(Number(playback.progressSeconds ?? 0), durationSeconds);
+  const startedAt = Math.max(0, connectionUpdatedAtMs - baseProgressSeconds * 1000);
+  const progressSeconds = isPlaying
+    ? clampProgressSeconds(resolveSpotifyPlaybackProgressSeconds(playback, connection.updatedAt, nowMs), durationSeconds)
+    : baseProgressSeconds;
+
+  return {
+    type: "spotify",
+    provider: "spotify",
+    showOnProfile: connection.showOnProfile,
+    trackId: String(playback.trackId ?? "").trim(),
+    trackTitle: String(playback.trackTitle ?? "").trim(),
+    artistNames: String(playback.artistNames ?? "").trim(),
+    trackUrl: String(playback.trackUrl ?? "").trim(),
+    coverUrl: String(playback.coverUrl ?? "").trim(),
+    progressSeconds,
+    durationSeconds,
+    isPlaying,
+    ...(isPlaying ? { startedAt } : {}),
+    updatedAt: nowMs,
+  };
+}
+
+function getCurrentSemanticSnapshot(nowMs: number = Date.now()): PresenceSemanticSnapshot {
+  return {
+    state: resolveEffectiveState(nowMs),
+    activity: buildSpotifyPresenceActivity(currentSpotifyConnection, nowMs),
+  };
+}
+
+function areSpotifyActivitiesMeaningfullyEqual(
+  left: PresenceSpotifyActivity | null | undefined,
+  right: PresenceSpotifyActivity | null | undefined,
+): boolean {
+  const safeLeft = left ?? null;
+  const safeRight = right ?? null;
+  if (!safeLeft && !safeRight) {
+    return true;
+  }
+  if (!safeLeft || !safeRight) {
+    return false;
+  }
+
+  if (
+    safeLeft.provider !== safeRight.provider ||
+    (safeLeft.showOnProfile ?? true) !== (safeRight.showOnProfile ?? true) ||
+    safeLeft.trackId !== safeRight.trackId ||
+    safeLeft.trackTitle !== safeRight.trackTitle ||
+    safeLeft.artistNames !== safeRight.artistNames ||
+    safeLeft.trackUrl !== safeRight.trackUrl ||
+    safeLeft.coverUrl !== safeRight.coverUrl ||
+    safeLeft.durationSeconds !== safeRight.durationSeconds ||
+    (safeLeft.isPlaying ?? true) !== (safeRight.isPlaying ?? true)
+  ) {
+    return false;
+  }
+
+  if (safeLeft.isPlaying === false || safeRight.isPlaying === false) {
+    return Math.abs(safeLeft.progressSeconds - safeRight.progressSeconds) <= 1;
+  }
+
+  const leftStartedAt = Number(safeLeft.startedAt ?? 0);
+  const rightStartedAt = Number(safeRight.startedAt ?? 0);
+  return Math.abs(leftStartedAt - rightStartedAt) <= 2_500;
+}
+
+function areSemanticSnapshotsEqual(
+  left: PresenceSemanticSnapshot | null | undefined,
+  right: PresenceSemanticSnapshot | null | undefined,
+): boolean {
+  const safeLeft = left ?? null;
+  const safeRight = right ?? null;
+  if (!safeLeft && !safeRight) {
+    return true;
+  }
+  if (!safeLeft || !safeRight) {
+    return false;
+  }
+
+  return safeLeft.state === safeRight.state && areSpotifyActivitiesMeaningfullyEqual(safeLeft.activity, safeRight.activity);
+}
+
+async function persistPresencePayload(payload: PersistedPresencePayload): Promise<void> {
+  const tableName = await getPresenceTableName();
+  const { hasActivitiesColumn } = await getPresenceTableColumnCapabilities();
+  const rowPayload: Record<string, unknown> = {
+    user_id: payload.user_id,
+    status: payload.status,
+    last_seen: payload.last_seen,
+    updated_at: payload.updated_at,
+  };
+
+  if (hasActivitiesColumn && payload.activities) {
+    rowPayload.activities = payload.activities;
+  }
+
+  await supabase.from(tableName).upsert(rowPayload, { onConflict: "user_id" });
+}
+
+function persistPresenceWithKeepalive(
+  state: PresenceState,
+  activity: PresenceSpotifyActivity | null,
+  userIdOverride?: string | null,
+): void {
+  const payload = buildPresencePayload(state, activity, userIdOverride);
+  if (!payload || typeof fetch !== "function" || !supabaseUrl || !supabaseAnonKey) {
+    return;
+  }
+
+  const sendKeepalive = async (): Promise<void> => {
+    const tableName = await getPresenceTableName();
+    const { hasActivitiesColumn } = await getPresenceTableColumnCapabilities();
+    const accessToken = String(await authService.getValidatedEdgeAccessToken() ?? "").trim();
+    if (!accessToken) {
+      return;
+    }
+
+    const keepalivePayload: Record<string, unknown> = {
+      user_id: payload.user_id,
+      status: payload.status,
+      last_seen: payload.last_seen,
+      updated_at: payload.updated_at,
+    };
+    if (hasActivitiesColumn && payload.activities) {
+      keepalivePayload.activities = payload.activities;
+    }
+
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      apikey: supabaseAnonKey,
+      Prefer: "resolution=merge-duplicates,return=minimal",
+      authorization: `Bearer ${accessToken}`,
+    };
+
+    await fetch(`${supabaseUrl}/rest/v1/${tableName}?on_conflict=user_id`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(keepalivePayload),
+      keepalive: true,
+    });
+  };
+
+  void sendKeepalive().catch(() => undefined);
+}
+
+function resolveEffectiveState(nowMs: number = Date.now()): PresenceState {
+  if (!currentUserId) {
+    return "invisivel";
+  }
+
+  if (preferredState === "dnd" || preferredState === "invisivel" || preferredState === "idle") {
+    return preferredState;
+  }
+
+  const isDocumentHidden = typeof document !== "undefined" ? document.hidden : false;
+  if (isDocumentHidden) {
+    return "idle";
+  }
+
+  return nowMs - lastActivityAtMs >= IDLE_AFTER_MS ? "idle" : "online";
+}
+
+function scheduleIdleTransition(): void {
   clearIdleTimer();
-  if (USER_DND || getPinnedPresenceState() !== null) {
+
+  if (
+    typeof window === "undefined" ||
+    !currentUserId ||
+    preferredState === "dnd" ||
+    preferredState === "invisivel" ||
+    preferredState === "idle"
+  ) {
     return;
   }
 
-  idleTimeoutId = window.setTimeout(() => {
-    queuePresenceWrite("idle", { touchLastActive: true });
-  }, IDLE_TIMEOUT_MS);
+  const remainingMs = Math.max(1_000, IDLE_AFTER_MS - (Date.now() - lastActivityAtMs));
+  idleTimerId = window.setTimeout(() => {
+    void syncPresenceState({
+      forcePersist: true,
+      reason: "idle-transition",
+    });
+  }, remainingMs);
 }
 
-function handleUserActivity(): void {
-  lastActivityAt = Date.now();
-  queuePresenceWrite(getDesiredState(), { touchLastActive: true });
-  scheduleIdleTimer();
-}
-
-function handleVisibilityChange(): void {
-  if (document.hidden) {
-    queuePresenceWrite(getPinnedPresenceState() === "dnd" || USER_DND ? "dnd" : "idle", { touchLastActive: true });
+function ensureHeartbeat(): void {
+  clearHeartbeatTimer();
+  if (typeof window === "undefined" || !currentUserId) {
     return;
   }
 
-  handleUserActivity();
+  const intervalMs =
+    typeof document !== "undefined" && document.hidden
+      ? HEARTBEAT_INTERVAL_BACKGROUND_MS
+      : HEARTBEAT_INTERVAL_FOREGROUND_MS;
+
+  heartbeatTimerId = window.setInterval(() => {
+    void syncPresenceState({
+      forcePersist: true,
+      reason: "heartbeat",
+    });
+  }, intervalMs);
 }
 
-function bindActivityListeners(): void {
-  activityEvents.forEach((eventName) => {
-    window.addEventListener(eventName, handleUserActivity, { passive: true });
-  });
-  document.addEventListener("visibilitychange", handleVisibilityChange);
-}
+async function broadcastPresenceEvents(
+  previousSnapshot: PresenceSemanticSnapshot | null,
+  nextSnapshot: PresenceSemanticSnapshot,
+  payload: PersistedPresencePayload,
+): Promise<void> {
+  await ensurePresenceGatewayConnected();
 
-function unbindActivityListeners(): void {
-  activityEvents.forEach((eventName) => {
-    window.removeEventListener(eventName, handleUserActivity);
-  });
-  document.removeEventListener("visibilitychange", handleVisibilityChange);
-}
+  const events = new Set<PresenceGatewayEventType>(["PRESENCE_UPDATE"]);
+  const nextIsInvisible = nextSnapshot.state === "invisivel";
+  const previousWasInvisible = previousSnapshot?.state === "invisivel" || !previousSnapshot;
 
-function clearHeartbeat(): void {
-  if (heartbeatIntervalId !== null) {
-    window.clearInterval(heartbeatIntervalId);
-    heartbeatIntervalId = null;
+  if (!nextIsInvisible && previousWasInvisible) {
+    events.add("USER_ONLINE");
   }
-}
-
-function startHeartbeat(): void {
-  clearHeartbeat();
-  heartbeatIntervalId = window.setInterval(() => {
-    queuePresenceWrite(getDesiredState(), { touchLastActive: true });
-  }, HEARTBEAT_INTERVAL_MS);
-}
-
-function setOfflineNow(): void {
-  if (!deviceRef) {
-    return;
+  if (nextIsInvisible && previousSnapshot && previousSnapshot.state !== "invisivel") {
+    events.add("USER_OFFLINE");
+  }
+  if (!areSpotifyActivitiesMeaningfullyEqual(previousSnapshot?.activity ?? null, nextSnapshot.activity)) {
+    events.add("ACTIVITY_UPDATE");
+    events.add("SPOTIFY_UPDATE");
   }
 
-  void set(
-    deviceRef,
-    createPresencePayload("offline", {
-      includeLastActive: true,
-    }),
+  const timestamp = payload.updated_at;
+  const activities = payload.activities;
+  await Promise.all(
+    Array.from(events).map((event) =>
+      sendPresenceGatewayEvent({
+        event,
+        user_id: payload.user_id,
+        status: payload.status,
+        activities,
+        timestamp,
+      }),
+    ),
   );
 }
 
-function handleBeforeUnload(): void {
-  setOfflineNow();
-}
+async function syncPresenceState(
+  options: {
+    forcePersist?: boolean;
+    forceBroadcast?: boolean;
+    reason?: string;
+  } = {},
+): Promise<void> {
+  const nowMs = Date.now();
+  const nextSnapshot = getCurrentSemanticSnapshot(nowMs);
+  const nextState = nextSnapshot.state;
+  const stateChanged = currentState !== nextState;
 
-function bindLifecycleListeners(): void {
-  window.addEventListener("beforeunload", handleBeforeUnload);
-}
+  if (stateChanged) {
+    currentState = nextState;
+    notify();
+  }
 
-function unbindLifecycleListeners(): void {
-  window.removeEventListener("beforeunload", handleBeforeUnload);
-}
+  scheduleIdleTransition();
 
-function watchConnectionState(): void {
-  const connectedRef = getPresenceConnectionRef();
+  const payload = buildPresencePayload(nextSnapshot.state, nextSnapshot.activity);
+  if (!payload) {
+    return;
+  }
 
-  unsubscribeConnected = onValue(connectedRef, (snapshot) => {
-    if (!deviceRef || snapshot.val() !== true) {
-      return;
+  const shouldPersist =
+    options.forcePersist === true ||
+    options.reason === "heartbeat" ||
+    !areSemanticSnapshotsEqual(lastPersistedSnapshot, nextSnapshot);
+
+  if (shouldPersist) {
+    try {
+      await persistPresencePayload(payload);
+      lastPersistedSnapshot = nextSnapshot;
+    } catch {
+      // Keep trying on the next heartbeat or semantic change.
     }
+  }
 
-    if (disconnectRegistration) {
-      void disconnectRegistration.cancel();
-    }
+  const shouldBroadcast =
+    options.forceBroadcast === true ||
+    !areSemanticSnapshotsEqual(lastBroadcastSnapshot, nextSnapshot);
 
-    disconnectRegistration = onDisconnect(deviceRef);
-    void disconnectRegistration.set(
-      createPresencePayload("offline", {
-        includeLastActive: true,
-      }),
-    );
+  if (!shouldBroadcast) {
+    return;
+  }
 
-    queuePresenceWrite(getDesiredState(), {
-      touchLastActive: true,
-      force: true,
+  const previousSnapshot = lastBroadcastSnapshot;
+  try {
+    await broadcastPresenceEvents(previousSnapshot, nextSnapshot, payload);
+    lastBroadcastSnapshot = nextSnapshot;
+  } catch {
+    // Gateway reconnect logic will re-publish the latest snapshot when connected again.
+  }
+}
+
+function handleLocalActivity(): void {
+  if (!currentUserId || preferredState === "dnd" || preferredState === "invisivel" || preferredState === "idle") {
+    return;
+  }
+
+  const nowMs = Date.now();
+  lastActivityAtMs = nowMs;
+
+  // Reduce high-frequency mouse/keyboard churn while keeping quick idle->online recovery.
+  if (currentState === "idle") {
+    lastLocalActivitySyncAtMs = nowMs;
+    void syncPresenceState({
+      forcePersist: true,
+      forceBroadcast: true,
+      reason: "local-activity-idle-exit",
     });
+    return;
+  }
+
+  if (nowMs - lastLocalActivitySyncAtMs < LOCAL_ACTIVITY_SYNC_MIN_INTERVAL_MS) {
+    return;
+  }
+
+  lastLocalActivitySyncAtMs = nowMs;
+  void syncPresenceState({
+    reason: "local-activity",
   });
 }
 
-function stopConnectionWatch(): void {
-  if (unsubscribeConnected) {
-    unsubscribeConnected();
-    unsubscribeConnected = null;
+function handleVisibilityChange(): void {
+  if (!currentUserId) {
+    return;
   }
+
+  ensureHeartbeat();
+  if (typeof document !== "undefined" && !document.hidden) {
+    lastActivityAtMs = Date.now();
+  }
+
+  void syncPresenceState({
+    forcePersist: true,
+    reason: "visibility-change",
+  });
 }
 
-async function syncInitialPresenceStateFromDatabase(): Promise<void> {
-  if (!deviceRef) {
+function handleBrowserOnline(): void {
+  if (!currentUserId) {
     return;
   }
 
-  try {
-    const snapshot = await get(deviceRef);
-    if (!snapshot.exists()) {
-      return;
-    }
-
-    const stateValue = snapshot.child("state").val();
-    if (stateValue === "dnd") {
-      setCurrentState(stateValue);
-    }
-  } catch {}
+  lastActivityAtMs = Date.now();
+  void syncPresenceState({
+    forcePersist: true,
+    forceBroadcast: true,
+    reason: "browser-online",
+  });
 }
 
-function resetQueuesAndTimers(): void {
-  clearIdleTimer();
-  clearHeartbeat();
-
-  if (pendingWriteTimeoutId !== null) {
-    window.clearTimeout(pendingWriteTimeoutId);
-    pendingWriteTimeoutId = null;
+function handleBrowserOffline(): void {
+  if (currentState === "invisivel") {
+    return;
   }
 
-  pendingState = null;
-  pendingTouchLastActive = false;
+  currentState = "invisivel";
+  notify();
 }
 
-function start(firebaseUid: string): void {
-  if (!firebaseUid) {
+function bindLifecycleListeners(): void {
+  if (typeof window === "undefined") {
     return;
   }
 
-  preferredStateUid = firebaseUid;
+  window.addEventListener("pointerdown", handleLocalActivity, true);
+  window.addEventListener("keydown", handleLocalActivity, true);
+  window.addEventListener("mousemove", handleLocalActivity, true);
+  window.addEventListener("focus", handleLocalActivity, true);
+  window.addEventListener("online", handleBrowserOnline);
+  window.addEventListener("offline", handleBrowserOffline);
+  window.addEventListener("pagehide", handlePageHide, true);
+  window.addEventListener("beforeunload", handlePageHide, true);
+  document.addEventListener("visibilitychange", handleVisibilityChange, true);
+}
 
-  if (!firebasePresenceEnabled) {
-    setCurrentState("offline");
+function unbindLifecycleListeners(): void {
+  if (typeof window === "undefined") {
     return;
   }
 
-  if (currentUid === firebaseUid && deviceRef) {
+  window.removeEventListener("pointerdown", handleLocalActivity, true);
+  window.removeEventListener("keydown", handleLocalActivity, true);
+  window.removeEventListener("mousemove", handleLocalActivity, true);
+  window.removeEventListener("focus", handleLocalActivity, true);
+  window.removeEventListener("online", handleBrowserOnline);
+  window.removeEventListener("offline", handleBrowserOffline);
+  window.removeEventListener("pagehide", handlePageHide, true);
+  window.removeEventListener("beforeunload", handlePageHide, true);
+  document.removeEventListener("visibilitychange", handleVisibilityChange, true);
+}
+
+function handlePageHide(): void {
+  if (!currentUserId) {
     return;
   }
 
-  const invocationId = ++startInvocationId;
-  stopInternal(false);
+  const snapshot = getCurrentSemanticSnapshot();
+  persistPresenceWithKeepalive(snapshot.state, snapshot.activity, currentUserId);
+}
 
-  void (async () => {
-    const isPresenceDatabaseAvailable = await validatePresenceDatabaseEndpoint();
-    if (invocationId !== startInvocationId) {
-      return;
-    }
+function getEffectiveSpotifyScope(): string | null {
+  const normalizedScope = String(spotifyConnectionScope ?? "").trim();
+  if (normalizedScope) {
+    return normalizedScope;
+  }
 
-    if (!isPresenceDatabaseAvailable) {
-      setCurrentState("offline");
-      return;
-    }
+  const normalizedUserId = String(currentUserId ?? "").trim();
+  return normalizedUserId || null;
+}
 
-    currentUid = firebaseUid;
-    deviceRef = getPresenceDeviceRef(firebaseUid);
-    lastActivityAt = Date.now();
-    lastWriteDispatchedAt = 0;
-    const desiredState = getDesiredState();
-    const initialState = desiredState;
-    setCurrentState(initialState);
+function bindSpotifyPresence(): void {
+  clearSpotifySubscription();
+  currentSpotifyConnection = createDefaultSpotifyConnection();
 
-    disconnectRegistration = onDisconnect(deviceRef);
-    void disconnectRegistration.set(
-      createPresencePayload("offline", {
-        includeLastActive: true,
-      }),
-    );
-
-    bindActivityListeners();
-    bindLifecycleListeners();
-    watchConnectionState();
-    startHeartbeat();
-    void syncInitialPresenceStateFromDatabase();
-    void syncPreferredPresenceStateFromFirebase(firebaseUid);
-
-    queuePresenceWrite(initialState, {
-      touchLastActive: true,
-      force: true,
+  const scope = getEffectiveSpotifyScope();
+  if (!currentUserId || !scope) {
+    void syncPresenceState({
+      forcePersist: true,
+      forceBroadcast: true,
+      reason: "spotify-scope-cleared",
     });
-    scheduleIdleTimer();
-  })();
-}
-
-function stopInternal(invalidatePendingStart: boolean): void {
-  if (invalidatePendingStart) {
-    startInvocationId += 1;
+    return;
   }
 
-  unbindActivityListeners();
-  unbindLifecycleListeners();
-  stopConnectionWatch();
-  resetQueuesAndTimers();
+  currentSpotifyConnection = readSpotifyConnection(scope);
+  spotifyUnsubscribe = subscribeSpotifyConnection(
+    scope,
+    (connection) => {
+      currentSpotifyConnection = connection;
+      void syncPresenceState({
+        reason: "spotify-update",
+      });
+    },
+    {
+      enablePolling: true,
+    },
+  );
 
-  if (disconnectRegistration) {
-    void disconnectRegistration.cancel();
-    disconnectRegistration = null;
-  }
-
-  setOfflineNow();
-
-  currentUid = null;
-  deviceRef = null;
-  preferredStateUid = null;
-  lastWriteDispatchedAt = 0;
-  setCurrentState("offline");
+  void syncSpotifyConnection(scope)
+    .then((result) => {
+      currentSpotifyConnection = result.connection;
+      return syncPresenceState({
+        forcePersist: true,
+        forceBroadcast: true,
+        reason: "spotify-prime",
+      });
+    })
+    .catch(() => {
+      void syncPresenceState({
+        forcePersist: true,
+        forceBroadcast: true,
+        reason: "spotify-prime-failed",
+      });
+    });
 }
 
-function stop(): void {
-  stopInternal(true);
-}
-
-function subscribe(subscriber: PresenceSubscriber): () => void {
+export function subscribe(subscriber: PresenceSubscriber): () => void {
   subscribers.add(subscriber);
   subscriber(currentState);
-
   return () => {
     subscribers.delete(subscriber);
   };
 }
 
-function getState(): PresenceState {
+export function getState(): PresenceState {
   return currentState;
 }
 
-function setPreferredState(nextState: PresenceState): void {
-  setPinnedPresenceState(nextState);
-  setCurrentState(nextState);
+export function stop(): void {
+  clearHeartbeatTimer();
+  clearIdleTimer();
+  clearSpotifySubscription();
+  clearGatewaySubscription();
+  unbindLifecycleListeners();
 
-  const uidToUse = currentUid || preferredStateUid;
-  if (uidToUse) {
-    void savePreferredPresenceState(uidToUse, nextState);
+  if (currentUserId) {
+    const snapshot = getCurrentSemanticSnapshot();
+    persistPresenceWithKeepalive(snapshot.state, snapshot.activity, currentUserId);
   }
 
-  if (!deviceRef || !currentUid) {
+  currentUserId = null;
+  currentState = "invisivel";
+  preferredState = "online";
+  lastActivityAtMs = Date.now();
+  currentSpotifyConnection = createDefaultSpotifyConnection();
+  lastPersistedSnapshot = null;
+  lastBroadcastSnapshot = null;
+  lastGatewayStatus = "idle";
+  lastLocalActivitySyncAtMs = 0;
+  setPresenceGatewayCurrentUser(null);
+  disconnectPresenceGateway();
+  notify();
+}
+
+export function setPreferredState(state: PresenceState): void {
+  preferredState = state;
+  if (state === "online") {
+    lastActivityAtMs = Date.now();
+  }
+  void writePresencePreference(currentUserId, state);
+  if (!currentUserId) {
+    currentState = state;
+    notify();
     return;
   }
 
-  lastActivityAt = Date.now();
-  queuePresenceWrite(nextState, {
-    touchLastActive: true,
-    force: true,
+  void syncPresenceState({
+    forcePersist: true,
+    forceBroadcast: true,
+    reason: "preferred-state",
   });
-
-  if (nextState === "online") {
-    scheduleIdleTimer();
-  } else {
-    clearIdleTimer();
-  }
 }
 
-function getPreferredState(): PresenceState | null {
-  return getPinnedPresenceState();
+export function setSpotifyConnectionScope(scope: string | null): void {
+  const normalizedScope = String(scope ?? "").trim() || null;
+  if (spotifyConnectionScope === normalizedScope) {
+    return;
+  }
+
+  spotifyConnectionScope = normalizedScope;
+  if (!currentUserId) {
+    return;
+  }
+
+  bindSpotifyPresence();
+}
+
+export function start(userId: string | null | undefined): void {
+  const normalizedUserId = String(userId ?? "").trim();
+  if (!normalizedUserId) {
+    stop();
+    return;
+  }
+
+  stop();
+
+  currentUserId = normalizedUserId;
+  preferredState = "online";
+  lastActivityAtMs = Date.now();
+  lastLocalActivitySyncAtMs = 0;
+  currentState = resolveEffectiveState();
+  setPresenceGatewayCurrentUser(normalizedUserId);
+  notify();
+
+  bindLifecycleListeners();
+  ensureHeartbeat();
+  scheduleIdleTransition();
+  bindSpotifyPresence();
+
+  gatewayStateUnsubscribe = subscribePresenceGatewayState((gatewayState) => {
+    const nextStatus = gatewayState.status;
+    if (lastGatewayStatus !== "connected" && nextStatus === "connected" && currentUserId) {
+      void syncPresenceState({
+        forcePersist: true,
+        forceBroadcast: true,
+        reason: "gateway-reconnected",
+      });
+    }
+    lastGatewayStatus = nextStatus;
+  });
+
+  const currentStartSequence = ++startSequence;
+  void (async () => {
+    const storedPreference = await readPresencePreference(normalizedUserId);
+    if (!currentUserId || currentUserId !== normalizedUserId || currentStartSequence !== startSequence) {
+      return;
+    }
+
+    if (storedPreference) {
+      preferredState = storedPreference;
+    }
+
+    await ensurePresenceGatewayConnected();
+    await syncPresenceState({
+      forcePersist: true,
+      forceBroadcast: lastBroadcastSnapshot == null,
+      reason: "startup",
+    });
+  })().catch((error) => {
+    logPresenceControllerDebug("startup_sync_failed", {
+      reason: error instanceof Error ? error.message : String(error),
+    });
+  });
+}
+
+export function sendTyping(_userId: string): void {
+  void currentSpotifyConnection;
 }
 
 export const presenceController = {
@@ -483,5 +769,6 @@ export const presenceController = {
   subscribe,
   getState,
   setPreferredState,
-  getPreferredState,
+  setSpotifyConnectionScope,
+  sendTyping,
 };

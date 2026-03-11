@@ -5,12 +5,32 @@ import { ScrollToPlugin } from "gsap/ScrollToPlugin";
 import twemoji from "twemoji";
 import MaterialSymbolIcon from "../ui/MaterialSymbolIcon";
 import Modal from "../ui/Modal";
-import UserProfilePopover from "../UserProfilePopover/UserProfilePopover";
+import SpotifyIcon from "../ui/SpotifyIcon";
+import Tooltip from "../ui/Tooltip";
+import UserProfilePopover, { type UserProfileMutualFriendItem } from "../UserProfilePopover/UserProfilePopover";
 import EmojiButton from "./EmojiButton";
 import EmojiPopover from "./EmojiPopover";
 import { getAttachmentUrl, getBannerUrl, getDefaultBannerUrl, getNameAvatarUrl, isDefaultBannerUrl } from "../../services/cdn/mediaUrls";
-import { PRESENCE_LABELS, type PresenceState } from "../../services/presence/presenceTypes";
+import {
+  PRESENCE_LABELS,
+  type PresenceSpotifyActivity,
+  type PresenceState,
+} from "../../services/presence/presenceTypes";
 import { normalizeBannerColor } from "../../services/profile/bannerColor";
+import { createProfileTheme } from "../../services/profile/profileTheme";
+import {
+  formatSpotifyPlaybackTime,
+  isSpotifyPlaybackStillActive,
+} from "../../services/connections/spotifyConnection";
+import {
+  createDefaultSpotifyListenAlongSession,
+  joinSpotifyListenAlongSession,
+  leaveSpotifyListenAlongSession,
+  readSpotifyListenAlongSession,
+  resolveSpotifyListenAlongFailureMessage,
+  subscribeSpotifyListenAlongSession,
+  type SpotifyListenAlongSession,
+} from "../../services/connections/spotifyListenAlong";
 import {
   deleteChatMessage,
   editChatMessage,
@@ -58,6 +78,11 @@ const MEDIA_GROUP_WINDOW_MS = 15 * 1000;
 const MAX_VISIBLE_MEDIA_ATTACHMENTS = 5;
 const INITIAL_PAGE_SIZE = 24;
 const LOAD_OLDER_THRESHOLD_PX = 120;
+const ACTIVE_MESSAGE_WINDOW_MAX = 96;
+const ACTIVE_MESSAGE_WINDOW_TARGET = 84;
+const MESSAGE_VIRTUAL_OVERSCAN = 16;
+const MESSAGE_VIRTUAL_MIN_ROWS = 36;
+const MESSAGE_VIRTUAL_ESTIMATED_ROW_HEIGHT = 76;
 const TWEMOJI_BASE_URL = "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/";
 const TWEMOJI_CACHE_LIMIT = 400;
 const INITIAL_MESSAGE_CACHE_TTL_MS = 5 * 60_000;
@@ -73,6 +98,9 @@ const CHAT_PERF_DEDUPE_WINDOW_MS = 900;
 const CALL_RING_TIMEOUT_MS = 3 * 60 * 1000;
 const CALL_SOLO_TIMEOUT_MS = 3 * 60 * 1000;
 const CALL_REALTIME_CHANNEL_NAME = "dm-call";
+const CALL_RINGING_SOUND_URL = new URL("../../assets/sounds/call_ringing.mp3", import.meta.url).href;
+const CALL_JOIN_SOUND_URL = new URL("../../assets/sounds/call_join.mp3", import.meta.url).href;
+const CALL_LEAVE_SOUND_URL = new URL("../../assets/sounds/call_leave.mp3", import.meta.url).href;
 const MESSAGES_SKELETON_LAYOUT: Array<{ lineWidths: Array<40 | 55 | 70>; hasAttachment?: boolean }> = [
   { lineWidths: [40, 70, 55] },
   { lineWidths: [55, 70] },
@@ -123,29 +151,6 @@ function clampColorByte(value: number): number {
 function rgbToHexThemeColor(rgb: ParsedHexRgb): string {
   const toHex = (value: number): string => clampColorByte(value).toString(16).padStart(2, "0");
   return `#${toHex(rgb.red)}${toHex(rgb.green)}${toHex(rgb.blue)}`;
-}
-
-function hexToRgbaThemeColor(hexColor: string | null | undefined, alpha: number): string | null {
-  const rgb = parseHexThemeColor(hexColor);
-  if (!rgb) {
-    return null;
-  }
-
-  const safeAlpha = Math.max(0, Math.min(1, alpha));
-  return `rgba(${rgb.red}, ${rgb.green}, ${rgb.blue}, ${safeAlpha})`;
-}
-
-function shadeHexThemeColor(hexColor: string | null | undefined, multiplier: number): string | null {
-  const rgb = parseHexThemeColor(hexColor);
-  if (!rgb) {
-    return null;
-  }
-  const safeMultiplier = Math.max(0, multiplier);
-  return rgbToHexThemeColor({
-    red: rgb.red * safeMultiplier,
-    green: rgb.green * safeMultiplier,
-    blue: rgb.blue * safeMultiplier,
-  });
 }
 
 function mixHexThemeColors(hexA: string | null | undefined, hexB: string | null | undefined, ratioB: number): string | null {
@@ -322,6 +327,7 @@ export interface DirectMessageChatParticipant {
   username: string;
   avatarSrc: string;
   presenceState?: PresenceState;
+  spotifyActivity?: PresenceSpotifyActivity | null;
   firebaseUid?: string;
   aboutText?: string;
   bannerColor?: string | null;
@@ -366,7 +372,7 @@ interface DirectMessageChatViewProps {
   currentUserId: string;
   currentUser: DirectMessageChatParticipant;
   targetUser: DirectMessageChatParticipant;
-  onOpenSettings?: () => void;
+  onOpenSettings?: (section?: "account" | "profile" | "connections" | "social" | "devices" | "audio" | "windows") => void;
   onStartVoiceCall?: (conversationId: string, targetUserId: string) => void;
   onStartVideoCall?: (conversationId: string, targetUserId: string) => void;
   isTargetFriend?: boolean;
@@ -374,6 +380,7 @@ interface DirectMessageChatViewProps {
   onUnfriendTarget?: () => void | Promise<void>;
   onAddFriendTarget?: () => void | Promise<void>;
   onBlockTarget?: () => void | Promise<void>;
+  mutualFriends?: UserProfileMutualFriendItem[];
 }
 
 interface CallEventPayload {
@@ -420,6 +427,7 @@ interface ConversationMessagesCacheEntry {
 
 const CONVERSATION_CACHE_TTL_MS = 120_000;
 const CONVERSATION_CACHE_MAX_ENTRIES = 24;
+const CONVERSATION_CACHE_MAX_MESSAGES = 120;
 const CONVERSATION_CACHE_PERSIST_KEY = "messly:dm-cache:v1";
 const CONVERSATION_CACHE_PERSIST_MAX_ENTRIES = 12;
 const CONVERSATION_CACHE_PERSIST_MAX_MESSAGES = 36;
@@ -481,9 +489,9 @@ function logChatPerf(eventName: string, payload: Record<string, unknown>): void 
   console.info(`[messly-chat-perf] ${eventName}`, payload);
 }
 
-function isUsersMissingColumnError(messageRaw: string): boolean {
+function isProfileMissingColumnError(messageRaw: string): boolean {
   const message = String(messageRaw ?? "").toLowerCase();
-  if (!message.includes("users") || !message.includes("column")) {
+  if (!message.includes("column")) {
     return false;
   }
   return (
@@ -517,16 +525,71 @@ function getSafeDraftAttachmentUploadErrorMessage(error: unknown): string {
   return message;
 }
 
+function getOrCreateAudioCue(refObject: { current: HTMLAudioElement | null }, sourceUrl: string): HTMLAudioElement | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  if (!refObject.current) {
+    const audioElement = new Audio(sourceUrl);
+    audioElement.preload = "auto";
+    refObject.current = audioElement;
+  }
+
+  return refObject.current;
+}
+
+function playAudioCue(
+  refObject: { current: HTMLAudioElement | null },
+  sourceUrl: string,
+  options?: { loop?: boolean; restart?: boolean },
+): void {
+  const audioElement = getOrCreateAudioCue(refObject, sourceUrl);
+  if (!audioElement) {
+    return;
+  }
+
+  audioElement.loop = Boolean(options?.loop);
+  if (options?.restart !== false) {
+    try {
+      audioElement.currentTime = 0;
+    } catch {
+      // Ignore seek errors when playback metadata is not ready yet.
+    }
+  }
+
+  void audioElement.play().catch(() => {
+    // Ignore autoplay restrictions.
+  });
+}
+
+function stopAudioCue(refObject: { current: HTMLAudioElement | null }, resetPosition = false): void {
+  const audioElement = refObject.current;
+  if (!audioElement) {
+    return;
+  }
+
+  audioElement.pause();
+  audioElement.loop = false;
+  if (resetPosition) {
+    try {
+      audioElement.currentTime = 0;
+    } catch {
+      // Ignore seek errors when playback metadata is not ready yet.
+    }
+  }
+}
+
 async function queryUserProfileExtras(
   userId: string,
   selectVariants: readonly string[],
 ): Promise<UserProfileExtraRow | null> {
   for (const selectColumns of selectVariants) {
-    const { data, error } = await supabase.from("users").select(selectColumns).eq("id", userId).maybeSingle();
+    const { data, error } = await supabase.from("profiles").select(selectColumns).eq("id", userId).maybeSingle();
     if (!error) {
       return (data as UserProfileExtraRow | null) ?? null;
     }
-    if (!isUsersMissingColumnError(error.message ?? "")) {
+    if (!isProfileMissingColumnError(error.message ?? "")) {
       return null;
     }
   }
@@ -671,14 +734,19 @@ function setConversationMessagesCache(
 ): void {
   hydrateConversationCacheFromStorage();
 
+  const cachedMessages = payload.messages
+    .slice(-CONVERSATION_CACHE_MAX_MESSAGES)
+    .map(cloneMessageForCache);
+  const cachedMessageIds = new Set(cachedMessages.map((message) => message.id));
+
   conversationMessagesCache.delete(conversationId);
   conversationMessagesCache.set(conversationId, {
-    messages: payload.messages.map(cloneMessageForCache),
+    messages: cachedMessages,
     nextCursor: payload.nextCursor ? { ...payload.nextCursor } : null,
     hasMoreBefore: payload.hasMoreBefore,
     deletedMessageIds: payload.deletedMessageIds.slice(-200),
-    attachmentUrlMap: { ...payload.attachmentUrlMap },
-    attachmentThumbUrlMap: { ...payload.attachmentThumbUrlMap },
+    attachmentUrlMap: pruneAttachmentMapByMessageIds(payload.attachmentUrlMap, cachedMessageIds),
+    attachmentThumbUrlMap: pruneAttachmentMapByMessageIds(payload.attachmentThumbUrlMap, cachedMessageIds),
     cachedAt: Date.now(),
   });
 
@@ -825,6 +893,70 @@ function sortMessages(messages: ChatMessageItem[]): ChatMessageItem[] {
   const sorted = [...messages];
   sorted.sort(compareMessagesChronologically);
   return sorted;
+}
+
+type MessageTrimDirection = "drop-older" | "drop-newer";
+
+interface MessageWindowTrimResult {
+  messages: ChatMessageItem[];
+  droppedOlder: ChatMessageItem[];
+  droppedNewer: ChatMessageItem[];
+}
+
+function trimMessagesToActiveWindow(
+  messages: ChatMessageItem[],
+  direction: MessageTrimDirection,
+): MessageWindowTrimResult {
+  if (messages.length <= ACTIVE_MESSAGE_WINDOW_MAX) {
+    return {
+      messages,
+      droppedOlder: [],
+      droppedNewer: [],
+    };
+  }
+
+  const keepCount = Math.max(1, Math.min(ACTIVE_MESSAGE_WINDOW_TARGET, ACTIVE_MESSAGE_WINDOW_MAX));
+  if (direction === "drop-newer") {
+    const kept = messages.slice(0, keepCount);
+    return {
+      messages: kept,
+      droppedOlder: [],
+      droppedNewer: messages.slice(keepCount),
+    };
+  }
+
+  const startIndex = Math.max(messages.length - keepCount, 0);
+  const kept = messages.slice(startIndex);
+  return {
+    messages: kept,
+    droppedOlder: messages.slice(0, startIndex),
+    droppedNewer: [],
+  };
+}
+
+function buildOlderCursorFromMessages(messages: ChatMessageItem[]): MessageListCursor | null {
+  const oldestMessage = messages[0];
+  if (!oldestMessage) {
+    return null;
+  }
+
+  return {
+    createdAt: oldestMessage.createdAt,
+    id: oldestMessage.id,
+  };
+}
+
+function pruneAttachmentMapByMessageIds(
+  map: Record<string, string>,
+  messageIds: ReadonlySet<string>,
+): Record<string, string> {
+  const next: Record<string, string> = {};
+  for (const [messageId, url] of Object.entries(map)) {
+    if (messageIds.has(messageId)) {
+      next[messageId] = url;
+    }
+  }
+  return next;
 }
 
 function upsertMessages(current: ChatMessageItem[], incomingMessages: ChatMessageItem[]): ChatMessageItem[] {
@@ -1884,6 +2016,7 @@ export default function DirectMessageChatView({
   onUnfriendTarget,
   onAddFriendTarget,
   onBlockTarget,
+  mutualFriends = [],
 }: DirectMessageChatViewProps) {
   const [messages, setMessages] = useState<ChatMessageItem[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -1904,9 +2037,13 @@ export default function DirectMessageChatView({
   const [emojiPopoverSource, setEmojiPopoverSource] = useState<"composer" | "profile">("composer");
   const [nextCursor, setNextCursor] = useState<MessageListCursor | null>(null);
   const [hasMoreBefore, setHasMoreBefore] = useState(false);
+  const [hasTrimmedNewerMessages, setHasTrimmedNewerMessages] = useState(false);
   const [isLoadingOlder, setIsLoadingOlder] = useState(false);
   const [showNewMessagesButton, setShowNewMessagesButton] = useState(false);
   const [isInitialConversationLoading, setIsInitialConversationLoading] = useState(true);
+  const [virtualScrollTop, setVirtualScrollTop] = useState(0);
+  const [virtualViewportHeight, setVirtualViewportHeight] = useState(0);
+  const [virtualFocusIndex, setVirtualFocusIndex] = useState<number | null>(null);
   const [deletedMessageIds, setDeletedMessageIds] = useState<Set<string>>(() => new Set());
   const [targetBannerSrc, setTargetBannerSrc] = useState<string>(getDefaultBannerUrl);
   const [targetBannerHasCustomAsset, setTargetBannerHasCustomAsset] = useState(false);
@@ -1917,6 +2054,9 @@ export default function DirectMessageChatView({
   const [targetAboutText, setTargetAboutText] = useState<string>("");
   const [canExpandBiography, setCanExpandBiography] = useState(false);
   const [targetMemberSinceLabel, setTargetMemberSinceLabel] = useState<string>("");
+  const [sidebarListenAlongSession, setSidebarListenAlongSession] = useState<SpotifyListenAlongSession>(() =>
+    createDefaultSpotifyListenAlongSession("", ""),
+  );
   const [openMessageProfileUserId, setOpenMessageProfileUserId] = useState<string | null>(null);
   const [isSidebarFullProfileOpen, setIsSidebarFullProfileOpen] = useState(false);
   const [isUnfriendingTarget, setIsUnfriendingTarget] = useState(false);
@@ -1969,10 +2109,14 @@ export default function DirectMessageChatView({
   const scrollbarRef = useRef<HTMLDivElement | null>(null);
   const scrollbarThumbRef = useRef<HTMLDivElement | null>(null);
   const messageRefs = useRef<Map<string, HTMLElement>>(new Map());
+  const messagesRef = useRef<ChatMessageItem[]>([]);
+  const pendingVirtualScrollMessageIdRef = useRef<string | null>(null);
   const forceNextAutoScrollRef = useRef(false);
   const previousMessageCountRef = useRef(0);
+  const previousTailMessageIdRef = useRef<string | null>(null);
   const initialScrollDoneRef = useRef(false);
   const isNearBottomRef = useRef(true);
+  const isRestoringTrimmedWindowRef = useRef(false);
   const shouldAutoScrollAfterSendRef = useRef(false);
   const draftAttachmentsRef = useRef<DraftAttachmentItem[]>([]);
   const pendingDraftCursorRef = useRef<number | null>(null);
@@ -2010,6 +2154,10 @@ export default function DirectMessageChatView({
   const pendingOfferByCallIdRef = useRef<Map<string, Record<string, unknown>>>(new Map());
   const processedSignalIdsRef = useRef<Set<string>>(new Set());
   const callPopoutWindowRef = useRef<Window | null>(null);
+  const callRingingAudioRef = useRef<HTMLAudioElement | null>(null);
+  const callJoinAudioRef = useRef<HTMLAudioElement | null>(null);
+  const callLeaveAudioRef = useRef<HTMLAudioElement | null>(null);
+  const previousRemoteParticipantInCallRef = useRef(false);
   const openPerfRef = useRef<{ conversationId: string; openedAt: number; firstPaintLogged: boolean }>({
     conversationId,
     openedAt: performance.now(),
@@ -2034,9 +2182,162 @@ export default function DirectMessageChatView({
   const safeTargetUsername = normalizedTargetUsername || "usuario";
   const currentFirebaseUid = String(currentUser.firebaseUid ?? "").trim();
   const targetFirebaseUid = String(targetUser.firebaseUid ?? "").trim();
-  const targetPresenceState: PresenceState = targetUser.presenceState ?? "offline";
+  const normalizedCurrentSidebarUserId = String(currentUserId ?? "").trim();
+  const normalizedTargetSidebarUserId = String(targetUser.userId ?? "").trim();
+  const currentSidebarDisplayName =
+    String(currentUser.displayName ?? "").trim() ||
+    String(currentUser.username ?? "").trim() ||
+    "Voce";
+  const targetPresenceState: PresenceState = targetUser.presenceState ?? "invisivel";
   const targetPresenceLabel = PRESENCE_LABELS[targetPresenceState];
   const isSidebarProfileCurrentUser = targetUser.userId === currentUserId;
+  const targetSidebarSpotifyActivity = useMemo(() => {
+    const activity = targetUser.spotifyActivity ?? null;
+    if (!activity || activity.showOnProfile === false) {
+      return null;
+    }
+    return isSpotifyPlaybackStillActive(
+      {
+        trackTitle: activity.trackTitle,
+        artistNames: activity.artistNames,
+        coverUrl: activity.coverUrl,
+        trackUrl: activity.trackUrl,
+        trackId: activity.trackId,
+        progressSeconds: activity.progressSeconds,
+        durationSeconds: activity.durationSeconds,
+        ...(typeof activity.isPlaying === "boolean" ? { isPlaying: activity.isPlaying } : {}),
+      },
+      new Date(activity.updatedAt).toISOString(),
+    )
+      ? activity
+      : null;
+  }, [targetUser.spotifyActivity]);
+  const handleOpenSidebarSpotifyTrack = useCallback((): void => {
+    const trackUrl = String(targetSidebarSpotifyActivity?.trackUrl ?? "").trim();
+    if (!trackUrl) {
+      return;
+    }
+    const openExternalUrl = window.electronAPI?.openExternalUrl;
+    if (openExternalUrl) {
+      void openExternalUrl({ url: trackUrl });
+      return;
+    }
+    window.open(trackUrl, "_blank", "noopener,noreferrer");
+  }, [targetSidebarSpotifyActivity?.trackUrl]);
+  const sidebarListenAlongTrackKey = useMemo(
+    () =>
+      String(targetSidebarSpotifyActivity?.trackId ?? "").trim() ||
+      `${targetSidebarSpotifyActivity?.trackTitle ?? ""}:${targetSidebarSpotifyActivity?.artistNames ?? ""}`,
+    [targetSidebarSpotifyActivity?.artistNames, targetSidebarSpotifyActivity?.trackId, targetSidebarSpotifyActivity?.trackTitle],
+  );
+  const canSidebarListenAlong = Boolean(
+    targetSidebarSpotifyActivity &&
+      normalizedCurrentSidebarUserId &&
+      normalizedTargetSidebarUserId &&
+      normalizedCurrentSidebarUserId !== normalizedTargetSidebarUserId,
+  );
+  const isSidebarListenAlongActive = Boolean(
+    canSidebarListenAlong &&
+      sidebarListenAlongSession.active &&
+      sidebarListenAlongSession.listenerUserId === normalizedCurrentSidebarUserId &&
+      sidebarListenAlongSession.hostUserId === normalizedTargetSidebarUserId &&
+      sidebarListenAlongSession.trackId === sidebarListenAlongTrackKey,
+  );
+  const handleToggleSidebarListenAlong = useCallback((): void => {
+    if (!targetSidebarSpotifyActivity || !canSidebarListenAlong) {
+      return;
+    }
+
+    if (isSidebarListenAlongActive) {
+      void leaveSpotifyListenAlongSession(normalizedCurrentSidebarUserId, normalizedTargetSidebarUserId, {
+        reason: "listener_left",
+      }).then((nextSession) => {
+        setSidebarListenAlongSession(nextSession);
+      });
+      return;
+    }
+
+    void joinSpotifyListenAlongSession({
+      listenerUserId: normalizedCurrentSidebarUserId,
+      hostUserId: normalizedTargetSidebarUserId,
+      listenerDisplayName: currentSidebarDisplayName,
+      listenerAvatarSrc: currentAvatarSrc,
+      hostDisplayName: safeTargetDisplayName,
+      hostAvatarSrc: targetAvatarSrc,
+      trackId: sidebarListenAlongTrackKey,
+      trackTitle: targetSidebarSpotifyActivity.trackTitle,
+      trackUrl: targetSidebarSpotifyActivity.trackUrl,
+    }).then((result) => {
+      if (!result.ok) {
+        if (result.reason === "spotify_not_connected" && onOpenSettings) {
+          onOpenSettings("connections");
+          return;
+        }
+        window.alert(resolveSpotifyListenAlongFailureMessage(result.reason));
+        return;
+      }
+      setSidebarListenAlongSession(result.session);
+    });
+  }, [
+    canSidebarListenAlong,
+    currentAvatarSrc,
+    currentSidebarDisplayName,
+    isSidebarListenAlongActive,
+    normalizedCurrentSidebarUserId,
+    normalizedTargetSidebarUserId,
+    safeTargetDisplayName,
+    sidebarListenAlongTrackKey,
+    targetAvatarSrc,
+    targetSidebarSpotifyActivity,
+    onOpenSettings,
+  ]);
+  useEffect(() => {
+    if (
+      !normalizedCurrentSidebarUserId ||
+      !normalizedTargetSidebarUserId ||
+      normalizedCurrentSidebarUserId === normalizedTargetSidebarUserId
+    ) {
+      setSidebarListenAlongSession(
+        createDefaultSpotifyListenAlongSession(normalizedCurrentSidebarUserId, normalizedTargetSidebarUserId),
+      );
+      return;
+    }
+
+    setSidebarListenAlongSession(
+      readSpotifyListenAlongSession(normalizedCurrentSidebarUserId, normalizedTargetSidebarUserId),
+    );
+    return subscribeSpotifyListenAlongSession(
+      normalizedCurrentSidebarUserId,
+      normalizedTargetSidebarUserId,
+      setSidebarListenAlongSession,
+    );
+  }, [normalizedCurrentSidebarUserId, normalizedTargetSidebarUserId]);
+  useEffect(() => {
+    if (
+      !sidebarListenAlongSession.active ||
+      !normalizedCurrentSidebarUserId ||
+      !normalizedTargetSidebarUserId ||
+      sidebarListenAlongSession.listenerUserId !== normalizedCurrentSidebarUserId ||
+      sidebarListenAlongSession.hostUserId !== normalizedTargetSidebarUserId
+    ) {
+      return;
+    }
+
+    if (targetSidebarSpotifyActivity) {
+      return;
+    }
+
+    void leaveSpotifyListenAlongSession(normalizedCurrentSidebarUserId, normalizedTargetSidebarUserId, {
+      reason: "host_stopped",
+    }).then((nextSession) => {
+      setSidebarListenAlongSession(nextSession);
+    });
+  }, [
+    normalizedCurrentSidebarUserId,
+    normalizedTargetSidebarUserId,
+    sidebarListenAlongSession,
+    targetSidebarSpotifyActivity,
+  ]);
   const targetBannerInlineStyle = useMemo<CSSProperties | undefined>(() => {
     if (!isTargetProfileResolved) {
       return undefined;
@@ -2082,23 +2383,38 @@ export default function DirectMessageChatView({
     const isLightTheme = (averageLuminance ?? 0) >= 0.62;
     const isNearBlackTheme = (maxLuminance ?? 1) <= 0.022;
 
-    let panelBg = effectiveAccent ?? "#262626";
-    let sidebarBg = panelBg;
-    let textColor = isLightTheme ? "#171b23" : "#ffffff";
-    let mutedTextColor = isLightTheme ? "rgba(23, 27, 35, 0.76)" : "rgba(228, 234, 242, 0.86)";
-    let subtleTextColor = isLightTheme ? "rgba(23, 27, 35, 0.68)" : "rgba(209, 217, 230, 0.9)";
-    let linkHoverColor = isLightTheme ? "rgba(14, 17, 23, 0.92)" : "rgba(235, 241, 250, 0.96)";
-    let metaBg = isLightTheme
-      ? shadeHexThemeColor(mixHexThemeColors(effectiveAccent, effectivePrimary, 0.05), 0.93) ?? "#ededf0"
-      : shadeHexThemeColor(mixHexThemeColors(effectiveAccent, effectivePrimary, 0.12), 0.6) ?? "#1d2026";
-    let metaBorder = isLightTheme
-      ? hexToRgbaThemeColor(effectiveAccent, 0.14) ?? "rgba(17, 20, 28, 0.08)"
-      : hexToRgbaThemeColor(effectiveAccent, 0.22) ?? "rgba(255, 255, 255, 0.06)";
-    let footerBorder = isLightTheme ? "rgba(23, 27, 35, 0.08)" : "rgba(255, 255, 255, 0.06)";
-    let footerBg = panelBg;
+    const fallbackThemeColor = effectivePrimary ?? effectiveAccent ?? "#262626";
+    const harmonizedTheme = createProfileTheme({
+      primaryColor: fallbackThemeColor,
+      accentColor: effectiveAccent ?? fallbackThemeColor,
+      mode: isLightTheme ? "light" : "dark",
+    });
+
+    const resolvedAccent = harmonizedTheme.tokens["--profile-accent"] ?? effectiveAccent ?? fallbackThemeColor;
+    const softPanelBase = mixHexThemeColors(resolvedAccent, "#ffffff", 0.82) ?? (effectiveAccent ?? "#262626");
+    const softPanelTop = mixHexThemeColors(resolvedAccent, "#ffffff", 0.9) ?? softPanelBase;
+    const softPanelMid = mixHexThemeColors(resolvedAccent, "#ffffff", 0.86) ?? softPanelBase;
+    const softPanelBottom = mixHexThemeColors(resolvedAccent, "#ffffff", 0.72) ?? softPanelBase;
+    const softCardTop = mixHexThemeColors(resolvedAccent, "#ffffff", 0.86) ?? softPanelBase;
+    const softCardBottom = mixHexThemeColors(resolvedAccent, "#ffffff", 0.8) ?? softPanelBase;
+    const ringColor = mixHexThemeColors(resolvedAccent, "#ffffff", 0.82) ?? softPanelBase;
+
+    let panelBg = softPanelBase;
+    let panelGradient = `linear-gradient(180deg, ${softPanelTop} 0%, ${softPanelMid} 46%, ${softPanelBottom} 100%)`;
+    let sidebarBg = softPanelBase;
+    let textColor = "#252a31";
+    let mutedTextColor = "#6f7782";
+    let subtleTextColor = "#6f7782";
+    let linkHoverColor = "#252a31";
+    let metaAccentColor = mixHexThemeColors(resolvedAccent, "#ffffff", 0.78) ?? resolvedAccent;
+    let metaBg = `linear-gradient(180deg, ${softCardTop} 0%, ${softCardBottom} 100%)`;
+    let metaBorder = "rgba(60, 67, 74, 0.12)";
+    let footerBorder = "rgba(60, 67, 74, 0.12)";
+    let footerBg = "transparent";
 
     if (isNearBlackTheme) {
       panelBg = "#000000";
+      panelGradient = "#000000";
       sidebarBg = "#000000";
       textColor = "#ffffff";
       mutedTextColor = "rgba(231, 236, 245, 0.86)";
@@ -2107,14 +2423,20 @@ export default function DirectMessageChatView({
       metaBg = "#1b1d22";
       metaBorder = "rgba(255, 255, 255, 0.07)";
       footerBorder = "rgba(255, 255, 255, 0.07)";
-      footerBg = "#000000";
+      footerBg = "transparent";
     }
 
     return {
       ["--dm-chat-profile-sidebar-bg" as const]: sidebarBg,
       ["--dm-chat-profile-panel-bg" as const]: panelBg,
-      ["--dm-chat-profile-avatar-ring" as const]: panelBg,
-      ["--dm-chat-profile-presence-ring" as const]: panelBg,
+      ["--dm-chat-profile-panel-gradient" as const]: panelGradient,
+      ["--dm-chat-profile-accent" as const]:
+        resolvedAccent,
+      ["--dm-chat-profile-meta-accent" as const]: metaAccentColor,
+      ["--dm-chat-profile-avatar-ring" as const]: ringColor,
+      ["--dm-chat-profile-avatar-ring-color" as const]: ringColor,
+      ["--dm-chat-profile-presence-ring" as const]: ringColor,
+      ["--dm-chat-profile-presence-ring-color" as const]: ringColor,
       ["--dm-chat-profile-text" as const]: textColor,
       ["--dm-chat-profile-muted" as const]: mutedTextColor,
       ["--dm-chat-profile-link" as const]: subtleTextColor,
@@ -2123,6 +2445,21 @@ export default function DirectMessageChatView({
       ["--dm-chat-profile-meta-border" as const]: metaBorder,
       ["--dm-chat-profile-footer-bg" as const]: footerBg,
       ["--dm-chat-profile-footer-border" as const]: footerBorder,
+      ["--profile-divider" as const]: footerBorder,
+      ["--profile-full-title" as const]: textColor,
+      ["--profile-full-text" as const]: textColor,
+      ["--profile-full-muted" as const]: mutedTextColor,
+      ["--profile-full-activity-time" as const]: mutedTextColor,
+      ["--profile-full-activity-card-bg" as const]: metaBg,
+      ["--profile-full-activity-card-border" as const]: metaBorder,
+      ["--profile-full-activity-cover-bg" as const]: softCardTop,
+      ["--profile-full-secondary-btn-bg" as const]: metaBg,
+      ["--profile-full-secondary-btn-bg-hover" as const]: `linear-gradient(180deg, ${softCardBottom} 0%, ${mixHexThemeColors(resolvedAccent, "#ffffff", 0.74) ?? softCardBottom} 100%)`,
+      ["--profile-full-secondary-btn-fg" as const]: textColor,
+      ["--profile-spotify-progress" as const]: harmonizedTheme.tokens["--profile-spotify-progress"],
+      ["--profile-focus-ring" as const]: harmonizedTheme.tokens["--profile-focus-ring"],
+      ["--profile-transition-fast" as const]: harmonizedTheme.tokens["--profile-transition-fast"],
+      ["--profile-transition-standard" as const]: harmonizedTheme.tokens["--profile-transition-standard"],
     } as CSSProperties;
   }, [isTargetProfileResolved, targetThemeAccentColor, targetThemePrimaryColor]);
   const targetHasCustomBannerImage = useMemo(() => {
@@ -2443,7 +2780,7 @@ export default function DirectMessageChatView({
   const openMessageProfileUsername = String(openMessageProfileParticipant?.username ?? "").trim() || "usuario";
   const openMessageProfileFallbackAvatar = getNameAvatarUrl(openMessageProfileDisplayName || openMessageProfileUsername || "U");
   const openMessageProfileAvatarSrc = String(openMessageProfileParticipant?.avatarSrc ?? "").trim() || openMessageProfileFallbackAvatar;
-  const openMessageProfilePresenceState: PresenceState = openMessageProfileParticipant?.presenceState ?? "offline";
+  const openMessageProfilePresenceState: PresenceState = openMessageProfileParticipant?.presenceState ?? "invisivel";
   const openMessageProfilePresenceLabel = PRESENCE_LABELS[openMessageProfilePresenceState];
   const isOpenMessageProfileCurrentUser = openMessageProfileUserId === currentUserId;
   const openMessageProfileBannerSrc = useMemo(() => {
@@ -3039,6 +3376,40 @@ export default function DirectMessageChatView({
   }, [draftAttachments]);
 
   useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  useEffect(() => {
+    if (messages.length <= ACTIVE_MESSAGE_WINDOW_MAX) {
+      return;
+    }
+
+    const trimmed = trimMessagesToActiveWindow(messages, "drop-older");
+    if (areMessagesEqual(messages, trimmed.messages)) {
+      return;
+    }
+
+    setMessages(trimmed.messages);
+    if (trimmed.droppedOlder.length > 0) {
+      const cursor = buildOlderCursorFromMessages(trimmed.messages);
+      setNextCursor(cursor);
+      setHasMoreBefore(Boolean(cursor));
+    }
+  }, [messages]);
+
+  useEffect(() => {
+    const messageIds = new Set(messages.map((message) => message.id));
+    setAttachmentUrlMap((current) => {
+      const next = pruneAttachmentMapByMessageIds(current, messageIds);
+      return areFlatRecordValuesEqual(current, next) ? current : next;
+    });
+    setAttachmentThumbUrlMap((current) => {
+      const next = pruneAttachmentMapByMessageIds(current, messageIds);
+      return areFlatRecordValuesEqual(current, next) ? current : next;
+    });
+  }, [messages]);
+
+  useEffect(() => {
     const stableMessages = messages.filter((message) => !message.optimistic && isVisibleChatMessage(message));
     if (stableMessages.some((message) => message.conversationId !== conversationId)) {
       return;
@@ -3110,21 +3481,26 @@ export default function DirectMessageChatView({
           return next;
         });
       }
-      setNextCursor(listed.nextCursor ?? null);
-      setHasMoreBefore(Boolean(listed.nextCursor));
+      const optimisticMessages = messagesRef.current.filter((message) => message.optimistic || message.failed);
+      const serverClientIds = new Set(
+        serverMessages.map((message) => (message.clientId ? message.clientId : "")).filter(Boolean),
+      );
 
-      setMessages((current) => {
-        const optimisticMessages = current.filter((message) => message.optimistic || message.failed);
-        const serverClientIds = new Set(
-          serverMessages.map((message) => (message.clientId ? message.clientId : "")).filter(Boolean),
-        );
+      const carryOverMessages = optimisticMessages.filter(
+        (message) => !message.clientId || !serverClientIds.has(message.clientId),
+      );
+      const mergedMessages = sortMessages([...serverMessages, ...carryOverMessages]).filter(isVisibleChatMessage);
+      const trimmed = trimMessagesToActiveWindow(mergedMessages, "drop-older");
+      const derivedOlderCursor = buildOlderCursorFromMessages(trimmed.messages);
+      const resolvedCursor = trimmed.droppedOlder.length > 0
+        ? derivedOlderCursor
+        : (listed.nextCursor ?? null);
+      const resolvedHasMoreBefore = trimmed.droppedOlder.length > 0 || Boolean(listed.nextCursor);
 
-        const carryOverMessages = optimisticMessages.filter(
-          (message) => !message.clientId || !serverClientIds.has(message.clientId),
-        );
-        const mergedMessages = sortMessages([...serverMessages, ...carryOverMessages]).filter(isVisibleChatMessage);
-        return areMessagesEqual(current, mergedMessages) ? current : mergedMessages;
-      });
+      setMessages((current) => (areMessagesEqual(current, trimmed.messages) ? current : trimmed.messages));
+      setNextCursor(resolvedCursor);
+      setHasMoreBefore(resolvedHasMoreBefore);
+      setHasTrimmedNewerMessages(false);
 
       setLoadError(null);
       void markConversationAsRead(serverMessages);
@@ -3175,16 +3551,19 @@ export default function DirectMessageChatView({
         });
       }
       if (olderMessages.length > 0) {
-        setMessages((current) => {
-          const currentById = new Map(current.map((message) => [message.id, message]));
-          olderMessages.forEach((message) => {
-            currentById.set(message.id, {
-              ...currentById.get(message.id),
-              ...message,
-            });
+        const currentById = new Map(messagesRef.current.map((message) => [message.id, message]));
+        olderMessages.forEach((message) => {
+          currentById.set(message.id, {
+            ...currentById.get(message.id),
+            ...message,
           });
-          return sortMessages(Array.from(currentById.values())).filter(isVisibleChatMessage);
         });
+        const mergedMessages = sortMessages(Array.from(currentById.values())).filter(isVisibleChatMessage);
+        const trimmed = trimMessagesToActiveWindow(mergedMessages, "drop-newer");
+        if (trimmed.droppedNewer.length > 0) {
+          setHasTrimmedNewerMessages(true);
+        }
+        setMessages((current) => (areMessagesEqual(current, trimmed.messages) ? current : trimmed.messages));
       }
 
       setNextCursor(listed.nextCursor ?? null);
@@ -3227,10 +3606,16 @@ export default function DirectMessageChatView({
         ? null
         : getCachedInitialChatMessages(conversationId, STALE_MESSAGE_SEED_CACHE_TTL_MS);
     const preloadedWindow = preloadedConversation ? normalizeListedMessages(preloadedConversation.messages ?? []) : null;
+    const preloadedWindowHasMessages = Boolean(preloadedWindow && preloadedWindow.visibleMessages.length > 0);
     const stalePreloadedWindow = stalePreloadedConversation
       ? normalizeListedMessages(stalePreloadedConversation.messages ?? [])
       : null;
-    const preloadedHasSeed = Boolean(preloadedWindow || stalePreloadedWindow || staleConversationHasMessages);
+    const stalePreloadedWindowHasMessages = Boolean(
+      stalePreloadedWindow && stalePreloadedWindow.visibleMessages.length > 0,
+    );
+    const preloadedHasSeed = Boolean(
+      staleConversationHasMessages || preloadedWindowHasMessages || stalePreloadedWindowHasMessages,
+    );
 
     if (cachedConversationHasMessages && cachedConversation) {
       setMessages(cachedConversation.messages);
@@ -3258,7 +3643,7 @@ export default function DirectMessageChatView({
         source: "conversation-stale-seed",
         messageCount: staleConversationSeed.messages.length,
       });
-    } else if (preloadedConversation && preloadedWindow) {
+    } else if (preloadedConversation && preloadedWindow && preloadedWindowHasMessages) {
       setMessages(preloadedWindow.visibleMessages);
       setNextCursor(preloadedConversation.nextCursor ?? null);
       setHasMoreBefore(Boolean(preloadedConversation.nextCursor));
@@ -3271,7 +3656,7 @@ export default function DirectMessageChatView({
         source: "preload",
         messageCount: preloadedWindow.visibleMessages.length,
       });
-    } else if (stalePreloadedConversation && stalePreloadedWindow) {
+    } else if (stalePreloadedConversation && stalePreloadedWindow && stalePreloadedWindowHasMessages) {
       setMessages(stalePreloadedWindow.visibleMessages);
       setNextCursor(stalePreloadedConversation.nextCursor ?? null);
       setHasMoreBefore(Boolean(stalePreloadedConversation.nextCursor));
@@ -3307,8 +3692,14 @@ export default function DirectMessageChatView({
     setMediaViewerState(null);
     setIsEmojiOpen(false);
     setIsLoadingOlder(false);
+    setHasTrimmedNewerMessages(false);
     setShowNewMessagesButton(false);
+    setVirtualFocusIndex(null);
+    setVirtualScrollTop(0);
+    setVirtualViewportHeight(0);
     isLoadingOlderRef.current = false;
+    isRestoringTrimmedWindowRef.current = false;
+    pendingVirtualScrollMessageIdRef.current = null;
     setDraftAttachments((current) => {
       current.forEach((attachment) => {
         revokeDraftAttachment(attachment);
@@ -3317,6 +3708,7 @@ export default function DirectMessageChatView({
     });
     forceNextAutoScrollRef.current = true;
     initialScrollDoneRef.current = false;
+    previousTailMessageIdRef.current = null;
     isNearBottomRef.current = true;
 
     const requestLoad = async (reason: string): Promise<void> => {
@@ -3356,8 +3748,13 @@ export default function DirectMessageChatView({
     void requestLoad("open");
 
     const intervalId = window.setInterval(() => {
+      if (typeof document !== "undefined") {
+        if (document.visibilityState !== "visible" || !document.hasFocus()) {
+          return;
+        }
+      }
       void requestLoad("interval");
-    }, 12_000);
+    }, 18_000);
 
     const handleFocus = (): void => {
       void requestLoad("focus");
@@ -3500,6 +3897,7 @@ export default function DirectMessageChatView({
     const currentMessageCount = messages.length;
     if (currentMessageCount === 0) {
       previousMessageCountRef.current = 0;
+      previousTailMessageIdRef.current = null;
       isNearBottomRef.current = true;
       return;
     }
@@ -3507,6 +3905,7 @@ export default function DirectMessageChatView({
     if (!initialScrollDoneRef.current) {
       initialScrollDoneRef.current = true;
       previousMessageCountRef.current = currentMessageCount;
+      previousTailMessageIdRef.current = messages[currentMessageCount - 1]?.id ?? null;
       requestAnimationFrame(() => {
         scrollToBottom(true);
       });
@@ -3514,8 +3913,12 @@ export default function DirectMessageChatView({
       return;
     }
 
-    const hadNewMessages = currentMessageCount > previousMessageCountRef.current;
+    const latestMessageId = messages[currentMessageCount - 1]?.id ?? null;
+    const hadNewMessages =
+      currentMessageCount > previousMessageCountRef.current ||
+      latestMessageId !== previousTailMessageIdRef.current;
     previousMessageCountRef.current = currentMessageCount;
+    previousTailMessageIdRef.current = latestMessageId;
 
     if (!hadNewMessages) {
       forceNextAutoScrollRef.current = false;
@@ -3702,9 +4105,17 @@ export default function DirectMessageChatView({
     }
 
     updateScrollThumb();
+    setVirtualViewportHeight(container.clientHeight);
+    setVirtualScrollTop(container.scrollTop);
 
     const handleResize = (): void => {
       updateScrollThumb();
+      const liveContainer = scrollContainerRef.current;
+      if (!liveContainer) {
+        return;
+      }
+      setVirtualViewportHeight(liveContainer.clientHeight);
+      setVirtualScrollTop(liveContainer.scrollTop);
     };
 
     let resizeObserver: ResizeObserver | null = null;
@@ -3728,18 +4139,42 @@ export default function DirectMessageChatView({
       return;
     }
 
+    setVirtualScrollTop(container.scrollTop);
+    setVirtualViewportHeight(container.clientHeight);
+    if (virtualFocusIndex !== null) {
+      setVirtualFocusIndex(null);
+    }
+    pendingVirtualScrollMessageIdRef.current = null;
+
     const distanceToBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
     const nearBottom = distanceToBottom <= AUTO_SCROLL_THRESHOLD_PX;
     isNearBottomRef.current = nearBottom;
 
     if (nearBottom) {
       setShowNewMessagesButton(false);
+      if (
+        hasTrimmedNewerMessages &&
+        !isLoadingOlderRef.current &&
+        !isRestoringTrimmedWindowRef.current
+      ) {
+        isRestoringTrimmedWindowRef.current = true;
+        void loadConversationMessages("window-restore-latest").finally(() => {
+          isRestoringTrimmedWindowRef.current = false;
+        });
+      }
     }
 
     if (container.scrollTop <= LOAD_OLDER_THRESHOLD_PX && hasMoreBefore && !isLoadingOlderRef.current) {
       void loadOlderMessages();
     }
-  }, [hasMoreBefore, loadOlderMessages, updateScrollThumb]);
+  }, [
+    hasMoreBefore,
+    hasTrimmedNewerMessages,
+    loadConversationMessages,
+    loadOlderMessages,
+    updateScrollThumb,
+    virtualFocusIndex,
+  ]);
 
   const scrollToMessageById = useCallback(
     (messageId: string): void => {
@@ -3754,6 +4189,32 @@ export default function DirectMessageChatView({
         (container.querySelector(`[data-message-id="${anchorMessageId}"]`) as HTMLElement | null);
 
       if (!element) {
+        let anchorMessageVisibleIndex = -1;
+        let visibleCursor = 0;
+        for (const entry of messageRenderData.entries) {
+          if (entry.skipRender || !isVisibleChatMessage(entry.message)) {
+            continue;
+          }
+          if (entry.message.id === anchorMessageId) {
+            anchorMessageVisibleIndex = visibleCursor;
+            break;
+          }
+          visibleCursor += 1;
+        }
+
+        if (
+          anchorMessageVisibleIndex >= 0 &&
+          pendingVirtualScrollMessageIdRef.current !== anchorMessageId
+        ) {
+          pendingVirtualScrollMessageIdRef.current = anchorMessageId;
+          setVirtualFocusIndex(anchorMessageVisibleIndex);
+          requestAnimationFrame(() => {
+            scrollToMessageById(messageId);
+          });
+          return;
+        }
+
+        pendingVirtualScrollMessageIdRef.current = null;
         setLoadError("Mensagem nao encontrada.");
         return;
       }
@@ -3772,9 +4233,11 @@ export default function DirectMessageChatView({
         onComplete: updateScrollThumb,
       });
 
+      pendingVirtualScrollMessageIdRef.current = null;
       setHighlightMessageId(anchorMessageId);
+      setVirtualFocusIndex(null);
     },
-    [messageRenderData.hiddenMessageAnchorMap, updateScrollThumb],
+    [messageRenderData.entries, messageRenderData.hiddenMessageAnchorMap, updateScrollThumb],
   );
 
   const handleHeaderSearchStep = useCallback(
@@ -3935,6 +4398,7 @@ export default function DirectMessageChatView({
         onProgress?: (ratio: number) => void,
       ): Promise<void> => {
         await uploadAttachmentBlob({
+          conversationId,
           file: fileToUpload,
           key,
           contentType: fileToUpload.type || "application/octet-stream",
@@ -4521,6 +4985,38 @@ export default function DirectMessageChatView({
     () => messageRenderData.entries.filter((entry) => !entry.skipRender && isVisibleChatMessage(entry.message)),
     [messageRenderData.entries],
   );
+  const virtualViewportHeightSafe = virtualViewportHeight > 0 ? virtualViewportHeight : 720;
+  const virtualVisibleRows = Math.max(
+    MESSAGE_VIRTUAL_MIN_ROWS,
+    Math.ceil(virtualViewportHeightSafe / MESSAGE_VIRTUAL_ESTIMATED_ROW_HEIGHT) + MESSAGE_VIRTUAL_OVERSCAN * 2,
+  );
+  const virtualStartIndex = useMemo(() => {
+    const total = messageRenderEntries.length;
+    if (total <= virtualVisibleRows) {
+      return 0;
+    }
+
+    if (typeof virtualFocusIndex === "number" && virtualFocusIndex >= 0 && virtualFocusIndex < total) {
+      const centeredStart = Math.max(virtualFocusIndex - Math.floor(virtualVisibleRows / 2), 0);
+      return Math.min(centeredStart, Math.max(total - virtualVisibleRows, 0));
+    }
+
+    const estimatedStart = Math.max(
+      Math.floor(virtualScrollTop / MESSAGE_VIRTUAL_ESTIMATED_ROW_HEIGHT) - MESSAGE_VIRTUAL_OVERSCAN,
+      0,
+    );
+    return Math.min(estimatedStart, Math.max(total - virtualVisibleRows, 0));
+  }, [messageRenderEntries.length, virtualFocusIndex, virtualScrollTop, virtualVisibleRows]);
+  const virtualEndIndex = Math.min(messageRenderEntries.length, virtualStartIndex + virtualVisibleRows);
+  const virtualTopSpacerHeight = virtualStartIndex * MESSAGE_VIRTUAL_ESTIMATED_ROW_HEIGHT;
+  const virtualBottomSpacerHeight = Math.max(
+    (messageRenderEntries.length - virtualEndIndex) * MESSAGE_VIRTUAL_ESTIMATED_ROW_HEIGHT,
+    0,
+  );
+  const visibleMessageRenderEntries = useMemo(
+    () => messageRenderEntries.slice(virtualStartIndex, virtualEndIndex),
+    [messageRenderEntries, virtualEndIndex, virtualStartIndex],
+  );
   const isLoadingMessages = isInitialConversationLoading;
   const shouldShowMessagesSkeleton = !loadError && isLoadingMessages && messages.length === 0;
   const composerPlaceholder = `Conversar com @${safeTargetUsername}`;
@@ -5040,19 +5536,8 @@ export default function DirectMessageChatView({
       return targetFirebaseUid;
     }
 
-    const { data, error } = await supabase
-      .from("users")
-      .select("firebase_uid")
-      .eq("id", targetUser.userId)
-      .limit(1)
-      .maybeSingle();
-
-    if (error) {
-      return null;
-    }
-
-    const resolvedUid = String((data as { firebase_uid?: string | null } | null)?.firebase_uid ?? "").trim();
-    return resolvedUid || null;
+    const fallbackTargetUid = String(targetUser.userId ?? "").trim();
+    return fallbackTargetUid || null;
   }, [targetFirebaseUid, targetUser.userId]);
 
   const startOutgoingCall = useCallback(async (
@@ -6150,18 +6635,21 @@ export default function DirectMessageChatView({
   }, [callPhase, activeCallSession?.id, incomingCallSession?.id, outgoingCallSession?.id]);
 
   useEffect(() => {
-    if (!currentFirebaseUid) {
+    if (!currentFirebaseUid || callPhase === "idle") {
       return;
     }
 
     const timer = window.setInterval(() => {
+      if (pendingCallEventsRef.current.length === 0) {
+        return;
+      }
       void flushPendingCallEvents();
-    }, 900);
+    }, 2500);
 
     return () => {
       window.clearInterval(timer);
     };
-  }, [currentFirebaseUid, flushPendingCallEvents]);
+  }, [callPhase, currentFirebaseUid, flushPendingCallEvents]);
 
   useEffect(() => {
     return () => {
@@ -6280,6 +6768,47 @@ export default function DirectMessageChatView({
     || Boolean(callLocalStream);
   const isRemoteParticipantInCall = isCallParticipantConnected(effectiveCallSession, remoteParticipantUidForPresence)
     || Boolean(callRemoteStream);
+  useEffect(() => {
+    const shouldPlayRingingTone =
+      (callPhase === "outgoing" || callPhase === "incoming") &&
+      isCallSoundEnabled;
+    if (shouldPlayRingingTone) {
+      playAudioCue(callRingingAudioRef, CALL_RINGING_SOUND_URL, {
+        loop: true,
+        restart: true,
+      });
+      return;
+    }
+
+    stopAudioCue(callRingingAudioRef, true);
+  }, [callPhase, isCallSoundEnabled]);
+  useEffect(() => {
+    const isInCallPhase = callPhase === "connecting" || callPhase === "active" || callPhase === "reconnecting";
+    if (!isInCallPhase) {
+      previousRemoteParticipantInCallRef.current = false;
+      return;
+    }
+
+    const wasRemoteParticipantInCall = previousRemoteParticipantInCallRef.current;
+    if (isCallSoundEnabled) {
+      if (!wasRemoteParticipantInCall && isRemoteParticipantInCall) {
+        playAudioCue(callJoinAudioRef, CALL_JOIN_SOUND_URL, { restart: true });
+      } else if (wasRemoteParticipantInCall && !isRemoteParticipantInCall) {
+        playAudioCue(callLeaveAudioRef, CALL_LEAVE_SOUND_URL, { restart: true });
+      }
+    }
+
+    previousRemoteParticipantInCallRef.current = isRemoteParticipantInCall;
+  }, [callPhase, isCallSoundEnabled, isRemoteParticipantInCall]);
+  useEffect(() => () => {
+    stopAudioCue(callRingingAudioRef, true);
+    stopAudioCue(callJoinAudioRef, true);
+    stopAudioCue(callLeaveAudioRef, true);
+    callRingingAudioRef.current = null;
+    callJoinAudioRef.current = null;
+    callLeaveAudioRef.current = null;
+    previousRemoteParticipantInCallRef.current = false;
+  }, []);
   useEffect(() => {
     if (!isLocalParticipantInCall || isRemoteParticipantInCall) {
       return;
@@ -6422,7 +6951,7 @@ export default function DirectMessageChatView({
                 className="dm-chat__header-avatar"
                 src={targetAvatarSrc}
                 alt={`Avatar de ${safeTargetDisplayName}`}
-                loading="lazy"
+                loading="eager"
                 onError={(event) => {
                   const target = event.currentTarget;
                   if (target.src !== targetFallbackAvatar) {
@@ -6441,7 +6970,7 @@ export default function DirectMessageChatView({
                 type="button"
                 className="dm-chat__header-action-btn"
                 aria-label="Iniciar chamada de voz"
-                title="Iniciar chamada de voz"
+                data-tooltip="Iniciar chamada de voz"
                 onClick={handleStartVoiceCall}
                 disabled={Boolean(activeCallSession) || Boolean(incomingCallSession)}
               >
@@ -6451,7 +6980,7 @@ export default function DirectMessageChatView({
                 type="button"
                 className="dm-chat__header-action-btn"
                 aria-label="Iniciar chamada de video"
-                title="Iniciar chamada de video"
+                data-tooltip="Iniciar chamada de video"
                 onClick={handleStartVideoCall}
                 disabled={Boolean(activeCallSession) || Boolean(incomingCallSession)}
               >
@@ -6506,7 +7035,7 @@ export default function DirectMessageChatView({
                   className="dm-chat__rejoin-stage-avatar"
                   src={targetAvatarSrc || targetFallbackAvatar}
                   alt={`Avatar de ${safeTargetDisplayName}`}
-                  loading="lazy"
+                  loading="eager"
                   onError={(event) => {
                     const target = event.currentTarget;
                     if (target.src !== targetFallbackAvatar) {
@@ -6520,7 +7049,7 @@ export default function DirectMessageChatView({
                     className="video-call-control"
                     onClick={() => handleRejoinCall(false)}
                     aria-label="Entrar novamente"
-                    title="Entrar novamente"
+                    data-tooltip="Entrar novamente"
                   >
                     <MaterialSymbolIcon name="call" size={18} />
                   </button>
@@ -6529,7 +7058,7 @@ export default function DirectMessageChatView({
                     className="video-call-control"
                     onClick={() => handleRejoinCall(true)}
                     aria-label="Entrar com camera"
-                    title="Entrar com camera"
+                    data-tooltip="Entrar com camera"
                   >
                     <MaterialSymbolIcon name="videocam" size={18} />
                   </button>
@@ -6574,13 +7103,13 @@ export default function DirectMessageChatView({
           {isLoadingOlder ? <p className="dm-chat__state">Carregando mensagens antigas...</p> : null}
           {loadError ? <p className="dm-chat__state dm-chat__state--error">{loadError}</p> : null}
           {shouldShowMessagesSkeleton ? <MessagesSkeleton /> : null}
-          {!loadError && !isLoadingMessages ? (
+          {!loadError ? (
             <section className="dm-chat__intro" aria-label={`Inicio da conversa com ${safeTargetDisplayName}`}>
               <img
                 className="dm-chat__intro-avatar"
                 src={targetAvatarSrc}
                 alt={`Avatar de ${safeTargetDisplayName}`}
-                loading="lazy"
+                loading="eager"
                 onError={(event) => {
                   const target = event.currentTarget;
                   if (target.src !== targetFallbackAvatar) {
@@ -6593,13 +7122,21 @@ export default function DirectMessageChatView({
               <p className="dm-chat__intro-copy">
                 Este e o inicio da sua conversa privada com {safeTargetDisplayName}.
               </p>
-              {messages.length === 0 && !isLoadingMessages ? (
+              {messages.length === 0 && !shouldShowMessagesSkeleton ? (
                 <p className="dm-chat__intro-empty-note">Envie a primeira mensagem abaixo.</p>
               ) : null}
             </section>
           ) : null}
 
-          {messageRenderEntries.map(({ message, showHeader, mediaGroup }) => {
+          {virtualTopSpacerHeight > 0 ? (
+            <div
+              className="dm-chat__messages-virtual-spacer dm-chat__messages-virtual-spacer--top"
+              style={{ height: `${virtualTopSpacerHeight}px` }}
+              aria-hidden="true"
+            />
+          ) : null}
+
+          {visibleMessageRenderEntries.map(({ message, showHeader, mediaGroup }) => {
             const isFromCurrentUser = message.senderId === currentUserId;
             const sender = isFromCurrentUser ? currentUser : targetUser;
             const senderAvatar = isFromCurrentUser ? currentAvatarSrc : targetAvatarSrc;
@@ -6922,7 +7459,7 @@ export default function DirectMessageChatView({
                         <button
                           type="button"
                           className="dm-chat__message-action"
-                          title="Responder"
+                          data-tooltip="Responder"
                           aria-label="Responder mensagem"
                           onMouseDown={(event) => {
                             // Keep hover logic stable: do not leave this button focused after click.
@@ -6937,7 +7474,7 @@ export default function DirectMessageChatView({
                         <button
                           type="button"
                           className="dm-chat__message-action"
-                          title="Editar"
+                          data-tooltip="Editar"
                           aria-label="Editar mensagem"
                           onMouseDown={(event) => {
                             // Keep hover logic stable: do not leave this button focused after click.
@@ -6952,7 +7489,7 @@ export default function DirectMessageChatView({
                         <button
                           type="button"
                           className="dm-chat__message-action dm-chat__message-action--danger"
-                          title="Excluir"
+                          data-tooltip="Excluir"
                           aria-label="Excluir mensagem"
                           onMouseDown={(event) => {
                             // Keep hover logic stable: do not leave this button focused after click.
@@ -6969,6 +7506,14 @@ export default function DirectMessageChatView({
             </div>
             );
           })}
+
+          {virtualBottomSpacerHeight > 0 ? (
+            <div
+              className="dm-chat__messages-virtual-spacer dm-chat__messages-virtual-spacer--bottom"
+              style={{ height: `${virtualBottomSpacerHeight}px` }}
+              aria-hidden="true"
+            />
+          ) : null}
 
           {isSending && uploadingAttachmentsCount > 0 ? (
             <div className="dm-chat__messages-upload-status-wrap">
@@ -7144,7 +7689,12 @@ export default function DirectMessageChatView({
           style={targetSidebarProfileThemeInlineStyle}
         >
           <section className="dm-chat__profile-panel">
-            <div className="dm-chat__profile-banner-wrap" style={targetBannerInlineStyle}>
+            <div
+              className={`dm-chat__profile-banner-wrap ${
+                targetHasCustomBannerImage ? "dm-chat__profile-banner-wrap--image" : "dm-chat__profile-banner-wrap--separator"
+              }`}
+              style={targetBannerInlineStyle}
+            >
               {targetHasCustomBannerImage ? (
                 <img
                   className="dm-chat__profile-banner"
@@ -7158,7 +7708,11 @@ export default function DirectMessageChatView({
               ) : null}
             </div>
 
-            <div className="dm-chat__profile-content">
+            <div
+              className={`dm-chat__profile-content ${
+                targetHasCustomBannerImage ? "dm-chat__profile-content--banner-image" : ""
+              }`}
+            >
               <button
                 type="button"
                 className="dm-chat__profile-avatar-wrap dm-chat__profile-avatar-button"
@@ -7195,6 +7749,105 @@ export default function DirectMessageChatView({
                 </button>
               </h3>
               <p className="dm-chat__profile-username">@{safeTargetUsername}</p>
+
+              {targetSidebarSpotifyActivity ? (
+                <section className="dm-chat__profile-spotify-section" aria-label={`Ouvindo ${targetSidebarSpotifyActivity.trackTitle}`}>
+                  <article className="dm-chat__profile-spotify-card">
+                    <p className="dm-chat__profile-spotify-title">
+                      <span className="dm-chat__profile-spotify-title-icon" aria-hidden="true">
+                        <SpotifyIcon size={12} monochrome />
+                      </span>
+                      Ouvindo Spotify
+                    </p>
+                    <div className="dm-chat__profile-spotify-main">
+                      <button
+                        type="button"
+                        className="dm-chat__profile-spotify-cover-button"
+                        onClick={handleOpenSidebarSpotifyTrack}
+                        aria-label={`Abrir ${targetSidebarSpotifyActivity.trackTitle} no Spotify`}
+                        title="Abrir no Spotify"
+                      >
+                        {targetSidebarSpotifyActivity.coverUrl ? (
+                          <img
+                            className="dm-chat__profile-spotify-cover"
+                            src={targetSidebarSpotifyActivity.coverUrl}
+                            alt=""
+                            loading="lazy"
+                          />
+                        ) : null}
+                      </button>
+                      <div className="dm-chat__profile-spotify-meta">
+                        <button
+                          type="button"
+                          className="dm-chat__profile-spotify-track"
+                          onClick={handleOpenSidebarSpotifyTrack}
+                          title="Abrir no Spotify"
+                        >
+                          {targetSidebarSpotifyActivity.trackTitle}
+                        </button>
+                        <button
+                          type="button"
+                          className="dm-chat__profile-spotify-artist"
+                          onClick={handleOpenSidebarSpotifyTrack}
+                          title="Abrir no Spotify"
+                        >
+                          {targetSidebarSpotifyActivity.artistNames}
+                        </button>
+                        <div className="dm-chat__profile-spotify-timeline">
+                          <span className="dm-chat__profile-spotify-time">
+                            {formatSpotifyPlaybackTime(targetSidebarSpotifyActivity.progressSeconds)}
+                          </span>
+                          <div className="dm-chat__profile-spotify-progress-track" aria-hidden="true">
+                            <span
+                              className="dm-chat__profile-spotify-progress-bar"
+                              style={{
+                                width: `${Math.max(
+                                  0,
+                                  Math.min(
+                                    100,
+                                    targetSidebarSpotifyActivity.durationSeconds > 0
+                                      ? (targetSidebarSpotifyActivity.progressSeconds / targetSidebarSpotifyActivity.durationSeconds) * 100
+                                      : 0,
+                                  ),
+                                )}%`,
+                              }}
+                            />
+                          </div>
+                          <span className="dm-chat__profile-spotify-time">
+                            {formatSpotifyPlaybackTime(targetSidebarSpotifyActivity.durationSeconds)}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="dm-chat__profile-spotify-actions">
+                      <button
+                        type="button"
+                        className="dm-chat__profile-spotify-action dm-chat__profile-spotify-action--primary"
+                        onClick={handleOpenSidebarSpotifyTrack}
+                      >
+                        <SpotifyIcon size={14} monochrome />
+                        <span>Ouvir no Spotify</span>
+                      </button>
+                      <Tooltip
+                        text={isSidebarListenAlongActive ? `Ouvindo junto com ${safeTargetDisplayName}` : `Ouça junto com ${safeTargetDisplayName}`}
+                        position="top"
+                        delay={180}
+                        disabled={!canSidebarListenAlong}
+                      >
+                        <button
+                          type="button"
+                          className={`dm-chat__profile-spotify-action dm-chat__profile-spotify-action--icon${isSidebarListenAlongActive ? " dm-chat__profile-spotify-action--active" : ""}`}
+                          onClick={handleToggleSidebarListenAlong}
+                          aria-label={isSidebarListenAlongActive ? "Parar de ouvir junto" : "Ouvir junto"}
+                          disabled={!canSidebarListenAlong}
+                        >
+                          <MaterialSymbolIcon name="headphones" size={18} filled={isSidebarListenAlongActive} />
+                        </button>
+                      </Tooltip>
+                    </div>
+                  </article>
+                </section>
+              ) : null}
 
               {shouldShowSidebarProfileMetaCard ? (
                 <div className="dm-chat__profile-meta-card" role="note" aria-label={`Membro desde ${targetMemberSinceLabelForFullProfile}`}>
@@ -7269,6 +7922,8 @@ export default function DirectMessageChatView({
                 displayName={openMessageProfileDisplayName}
                 username={openMessageProfileUsername}
                 aboutText={openMessageProfileAboutText}
+                profileUserId={openMessageProfileParticipant.userId}
+                spotifyActivity={openMessageProfileParticipant.spotifyActivity ?? null}
                 presenceState={openMessageProfilePresenceState}
                 presenceLabel={openMessageProfilePresenceLabel}
                 showActions={false}
@@ -7285,6 +7940,7 @@ export default function DirectMessageChatView({
                 messageComposerEmojiDisabled={isSending}
                 isMessageComposerEmojiOpen={isEmojiOpen && emojiPopoverSource === "profile"}
                 onToggleMessageComposerEmoji={handleToggleProfileComposerEmoji}
+                onOpenSettings={onOpenSettings}
               />
             </div>,
             document.body,
@@ -7309,8 +7965,10 @@ export default function DirectMessageChatView({
                   themeAccentColor={targetThemeAccentColor}
                   displayName={safeTargetDisplayName}
                   username={safeTargetUsername}
+                  profileUserId={targetUser.userId}
                   viewMode="full"
                   aboutText={targetAboutText}
+                  spotifyActivity={targetUser.spotifyActivity ?? null}
                   memberSinceLabel={targetMemberSinceLabelForFullProfile}
                   onCloseFullProfile={closeSidebarFullProfile}
                   presenceState={targetPresenceState}
@@ -7319,6 +7977,7 @@ export default function DirectMessageChatView({
                   showEditProfileButton={isSidebarProfileCurrentUser}
                   onMessageComposerSubmit={handleFullProfilePrimaryAction}
                   onEditProfile={handleOpenCurrentUserSettings}
+                  onOpenSettings={onOpenSettings}
                   showFriendActions={!isSidebarProfileCurrentUser && isTargetFriend}
                   onUnfriend={handleFullProfileUnfriend}
                   isUnfriending={isUnfriendingTarget}
@@ -7326,6 +7985,7 @@ export default function DirectMessageChatView({
                   showAddFriendAction={!isSidebarProfileCurrentUser && !isTargetFriend && !isTargetFriendRequestPending}
                   onAddFriend={handleFullProfileAddFriend}
                   isAddingFriend={isAddingTargetFriend}
+                  mutualFriends={mutualFriends}
                   showBlockAction={!isSidebarProfileCurrentUser}
                   onBlockUser={handleFullProfileBlock}
                   isBlockingUser={isBlockingTarget}

@@ -1,47 +1,127 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEvent as ReactPointerEvent } from "react";
-import {
-  EmailAuthProvider,
-  deleteUser,
-  reauthenticateWithCredential,
-  signOut,
-  updatePassword,
-  verifyBeforeUpdateEmail,
-} from "firebase/auth";
+﻿import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ChangeEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { useAuthSession } from "../../auth/AuthProvider";
 import {
   getAvatarUrl,
   getBannerUrl,
   getDefaultAvatarUrl,
   getDefaultBannerUrl,
-  getNameAvatarUrl,
+  isDefaultAvatarUrl,
 } from "../../services/cdn/mediaUrls";
 import {
   isProfileMediaUploadError,
   uploadProfileMediaAsset,
   type ProfileMediaKind,
 } from "../../services/media/profileMediaUpload";
+import { deleteMedia } from "../../api/mediaController";
 import { AVATAR_MAX_BYTES, AVATAR_MAX_MB, BANNER_MAX_BYTES, BANNER_MAX_MB } from "../../services/media/imageLimits";
 import ImageEditModal from "../media/ImageEditModal";
-import { PRESENCE_LABELS } from "../../services/presence/presenceTypes";
+import { PRESENCE_LABELS, type PresencePlatform, type PresenceState } from "../../services/presence/presenceTypes";
 import { supabase } from "../../services/supabase";
-import { firebaseAuth } from "../../services/firebase";
-import { escapeLikePattern, normalizeEmail } from "../../services/usernameAvailability";
+import { isUsernameAvailable, normalizeEmail, validateUsernameInput } from "../../services/usernameAvailability";
 import { DEFAULT_BANNER_COLOR, getBannerColorInputValue, normalizeBannerColor } from "../../services/profile/bannerColor";
-import { ensureUser } from "../../services/userSync";
+import { ensureUser, loadPendingProfile } from "../../services/userSync";
+import {
+  connectSpotifyOAuth,
+  createDefaultSpotifyConnection,
+  disconnectSpotifyOAuth,
+  setSpotifyConnectionVisibility,
+  isSpotifyOAuthConfigured,
+  readSpotifyConnection,
+  subscribeSpotifyConnection,
+  type SpotifyConnectionState,
+} from "../../services/connections/spotifyConnection";
+import {
+  DEFAULT_FRIEND_REQUEST_PRIVACY_SETTINGS,
+  getFriendRequestPrivacySettings,
+  type FriendRequestPrivacySettings,
+} from "../../services/friends/friendRequestPrivacy";
+import {
+  endCurrentLoginSession,
+  endLoginSessionById,
+  getCurrentLoginSessionId,
+  listActiveLoginSessions,
+  type LoginSessionView,
+} from "../../services/security/loginSessions";
+import {
+  getPresenceDeviceMetadataSnapshot,
+  hydratePresenceDeviceMetadata,
+  type PresenceDeviceMetadata,
+} from "../../services/presence/presenceDeviceInfo";
 import MaterialSymbolIcon from "../ui/MaterialSymbolIcon";
+import AvatarImage from "../ui/AvatarImage";
+import BannerImage from "../ui/BannerImage";
+import spotifyLogoSrc from "../../assets/icons/ui/spotify.svg";
 import Modal from "../ui/Modal";
 import UserProfilePopover from "../UserProfilePopover/UserProfilePopover";
 import styles from "./AppSettingsView.module.css";
 import appPackage from "../../../package.json";
 
+// Firebase removed: provide minimal stubs for legacy flows.
+const EmailAuthProvider = { credential: (_e: string, _p: string) => ({}) };
+async function reauthenticateWithCredential(): Promise<void> {
+  return;
+}
+async function updatePassword(_user: unknown, password: string): Promise<void> {
+  await supabase.auth.updateUser({ password });
+}
+async function verifyBeforeUpdateEmail(_user: unknown, email: string): Promise<void> {
+  await supabase.auth.updateUser({ email });
+}
+async function deleteUser(_user: { id?: string } | null): Promise<void> {
+  const uid = _user?.id;
+  if (uid) {
+    try {
+      await supabase.rpc("delete_user", { user_id: uid });
+    } catch {
+      // ignore
+    }
+  }
+}
+const onValue = () => () => undefined;
+const ref = () => null;
+async function remove(): Promise<void> {
+  return;
+}
+const getOrCreatePresenceDeviceId = (): string => {
+  if (typeof window === "undefined") return "device";
+  const key = "messly:presence:device-id";
+  const existing = window.localStorage.getItem(key);
+  if (existing) return existing;
+  const created = crypto.randomUUID ? crypto.randomUUID() : `device-${Date.now()}`;
+  window.localStorage.setItem(key, created);
+  return created;
+};
+
 interface AppSettingsViewProps {
   onClose: () => void;
   currentUserId?: string | null;
+  initialSection?: SettingsSection;
 }
 
 interface UploadFeedbackState {
   message: string;
   tone: "error" | "success";
+}
+
+interface ModalAvailabilityFeedbackState {
+  message: string;
+  tone: "error" | "success" | "info";
+}
+
+interface ProcessingCheckboxProps {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  ariaLabel: string;
 }
 
 interface PendingImageEdit {
@@ -58,10 +138,21 @@ interface ProfileUpdatedDetail {
   userId: string;
   display_name?: string | null;
   username?: string | null;
+  username_changed_at?: string | null;
   about?: string | null;
   banner_color?: string | null;
   profile_theme_primary_color?: string | null;
   profile_theme_accent_color?: string | null;
+}
+
+interface ProfileMediaUpdatedDetail {
+  userId: string;
+  avatar_key?: string | null;
+  avatar_hash?: string | null;
+  avatar_url?: string | null;
+  banner_color?: string | null;
+  banner_key?: string | null;
+  banner_hash?: string | null;
 }
 
 interface BlockedAccountItem {
@@ -69,6 +160,20 @@ interface BlockedAccountItem {
   displayName: string;
   username: string;
   avatarSrc: string;
+  blockedAtLabel: string;
+}
+
+interface DeviceSessionItem {
+  deviceId: string;
+  platform: PresencePlatform;
+  state: PresenceState;
+  clientName: string;
+  osName: string;
+  locationLabel: string | null;
+  lastActive: number | null;
+  updatedAt: number | null;
+  isCurrent: boolean;
+  source: "presence" | "loginSession";
 }
 
 interface BlockedUserRow {
@@ -86,6 +191,9 @@ interface UserProfileRow {
   firebase_uid?: string | null;
   display_name?: string | null;
   username?: string | null;
+  username_changed_at?: string | null;
+  friend_requests_allow_all?: boolean | null;
+  friend_requests_allow_friends_of_friends?: boolean | null;
   about?: string | null;
   banner_color?: string | null;
   profile_theme_primary_color?: string | null;
@@ -97,32 +205,66 @@ interface UserProfileRow {
   banner_hash?: string | null;
 }
 
-type SettingsSection = "account" | "profile" | "social" | "audio" | "windows";
-type AccountModalKind = "email" | "password" | "deactivate" | "delete";
+type SettingsSection = "account" | "profile" | "connections" | "social" | "devices" | "audio" | "windows";
+type AccountModalKind = "username" | "email" | "password" | "deactivate" | "delete";
 type AccountEmailModalStep = "verifyCurrent" | "verifyNew";
+type ProfileThemeColorSlot = "primary" | "accent";
 
 type ProfileMediaUpdatePayload = Record<string, string | null>;
+type UserProfileUpdatePayload = Record<string, unknown>;
 
 const ABOUT_MAX_LENGTH = 190;
+const USERNAME_CHANGE_COOLDOWN_DAYS = 30;
+const USERNAME_CHANGE_COOLDOWN_MS = USERNAME_CHANGE_COOLDOWN_DAYS * 24 * 60 * 60 * 1000;
 const USERS_MISSING_COLUMN_REGEX = /Could not find the '([^']+)' column of 'users' in the schema cache/i;
 const PROFILE_MEDIA_COLUMNS = new Set(["avatar_key", "avatar_hash", "avatar_url", "banner_key", "banner_hash"]);
-const OPTIONAL_PROFILE_COLUMNS = new Set(["banner_color", "profile_theme_primary_color", "profile_theme_accent_color"]);
+const OPTIONAL_PROFILE_COLUMNS = new Set([
+  "banner_color",
+  "profile_theme_primary_color",
+  "profile_theme_accent_color",
+  "spotify_connection",
+  "username_changed_at",
+  "friend_requests_allow_all",
+  "friend_requests_allow_friends_of_friends",
+]);
+
+function isTableMissing(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const casted = error as { code?: string; status?: number; message?: string };
+  const code = String(casted.code ?? "").trim();
+  const status = Number(casted.status ?? 0);
+  const message = String(casted.message ?? "").toLowerCase();
+  return code === "42P01" || code === "PGRST114" || status === 404 || message.includes("does not exist");
+}
 const USER_PROFILE_SELECT_COLUMNS =
-  "id,username,display_name,email,firebase_uid,about,banner_color,profile_theme_primary_color,profile_theme_accent_color,avatar_key,avatar_hash,avatar_url,banner_key,banner_hash";
+  "id,username,display_name,email,avatar_url,avatar_key,avatar_hash,banner_url,banner_key,banner_hash,banner_color,profile_theme_primary_color,profile_theme_accent_color,bio,about:bio,created_at,updated_at";
 const USER_PROFILE_SELECT_COLUMNS_WITHOUT_AVATAR_URL =
-  "id,username,display_name,email,firebase_uid,about,banner_color,profile_theme_primary_color,profile_theme_accent_color,avatar_key,avatar_hash,banner_key,banner_hash";
-const USER_PROFILE_SELECT_COLUMNS_FALLBACK = "id,username,display_name,email,firebase_uid,about";
-const BLOCKED_USERS_SELECT_COLUMNS = "id,username,display_name,avatar_key,avatar_hash,avatar_url";
-const BLOCKED_USERS_SELECT_COLUMNS_FALLBACK = "id,username,display_name,avatar_key,avatar_hash";
+  "id,username,display_name,email,avatar_key,avatar_hash,banner_url,banner_key,banner_hash,banner_color,profile_theme_primary_color,profile_theme_accent_color,bio,about:bio,created_at,updated_at";
+const USER_PROFILE_SELECT_COLUMNS_FALLBACK = "id,username,display_name,email,bio,about:bio";
+const BLOCKED_USERS_SELECT_COLUMNS = "id,username,display_name,avatar_url,avatar_key,avatar_hash";
+const BLOCKED_USERS_SELECT_COLUMNS_FALLBACK = "id,username,display_name,avatar_url";
 const SIDEBAR_IDENTITY_CACHE_PREFIX = "messly:sidebar-identity:";
 const SIDEBAR_RESOLVED_MEDIA_CACHE_PREFIX = "messly:sidebar-media:";
 const AUDIO_SETTINGS_STORAGE_KEY_PREFIX = "messly:audio-settings:";
+const AUDIO_SETTINGS_UPDATED_EVENT = "messly:audio-settings-updated";
 const PROFILE_PLUS_THEME_STORAGE_KEY_PREFIX = "messly:profile-plus-theme:";
 const PROFILE_PLUS_THEME_UPDATED_EVENT = "messly:profile-plus-theme-updated";
+const USERNAME_CHANGE_STORAGE_KEY_PREFIX = "messly:username-change:";
 const DEFAULT_PUSH_TO_TALK_BIND = "V";
 const APP_RELEASE_CHANNEL = "stable";
-const DEFAULT_PLUS_PROFILE_PRIMARY_COLOR = "#5D4CF4";
-const DEFAULT_PLUS_PROFILE_ACCENT_COLOR = "#8B2BE2";
+const DEFAULT_PLUS_PROFILE_PRIMARY_COLOR = "#FFFFFF";
+const DEFAULT_PLUS_PROFILE_ACCENT_COLOR = "#FFFFFF";
+const LEGACY_PLUS_PROFILE_PRIMARY_COLOR = "#6F737C";
+const LEGACY_PLUS_PROFILE_ACCENT_COLOR = "#4A4E56";
+const USERS_UPDATE_ROW_NOT_FOUND_ERROR = "Não foi possível encontrar o usuário para atualizar.";
+const ENDED_DEVICE_SESSION_SUPPRESS_TTL_MS = 5 * 60 * 1000;
+const DISMISSED_LOGIN_SESSIONS_STORAGE_PREFIX = "messly:security:dismissed-login-sessions:";
+const DISMISSED_LOGIN_SESSIONS_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const LOGIN_SESSIONS_CACHE_STORAGE_PREFIX = "messly:security:login-sessions-cache:";
+const LOGIN_SESSIONS_CACHE_TTL_MS = 2 * 60 * 1000;
+const BANNER_COLOR_SWATCHES = ["#3B82F6", "#F44C4C", "#10B981", "#F59E0B", "#8B5CF6"];
 const DEFAULT_WINDOWS_BEHAVIOR_SETTINGS: WindowsBehaviorSettings = {
   startMinimized: true,
   closeToTray: true,
@@ -135,9 +277,11 @@ const SETTINGS_SIDEBAR_ITEMS: ReadonlyArray<{
 }> = [
   { key: "account", label: "Minha conta", icon: "badge" },
   { key: "profile", label: "Editar perfil", icon: "person" },
-  { key: "social", label: "Conteudo social", icon: "groups" },
-  { key: "audio", label: "Audio", icon: "graphic_eq" },
-  { key: "windows", label: "Windows", icon: "desktop_windows" },
+  { key: "connections", label: "Conexões", icon: "link" },
+  { key: "social", label: "Conteúdo social", icon: "groups" },
+  { key: "devices", label: "Dispositivos", icon: "devices" },
+  { key: "audio", label: "Voz e vídeo", icon: "graphic_eq" },
+  { key: "windows", label: "Config. Windows", icon: "desktop_windows" },
 ];
 
 const ACCOUNT_DELETE_CONFIRM_TEXT = "EXCLUIR";
@@ -159,6 +303,12 @@ interface CachedSidebarResolvedMediaFallback {
   bannerSrc: string;
 }
 
+interface CachedLoginSessionsPayload {
+  v: 1;
+  updatedAt: number;
+  sessions: LoginSessionView[];
+}
+
 interface PersistedAudioSettings {
   v: 1;
   inputDeviceId: string;
@@ -174,6 +324,7 @@ interface PersistedAudioSettings {
   sensitivityDb: number;
   pushToTalkEnabled: boolean;
   pushToTalkBind: string;
+  qosHighPriority: boolean;
 }
 
 interface PersistedProfilePlusThemeSettings {
@@ -184,6 +335,97 @@ interface PersistedProfilePlusThemeSettings {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+function maskEmailAddress(emailRaw: string): string {
+  const email = normalizeEmail(emailRaw);
+  if (!email) {
+    return "";
+  }
+
+  const [localPart, domainPart] = email.split("@");
+  if (!localPart || !domainPart) {
+    return email;
+  }
+
+  const visibleLocalChars = localPart.length <= 2 ? 1 : 2;
+  const preservedLocal = localPart.slice(0, visibleLocalChars);
+  const hiddenLocal = "*".repeat(Math.max(4, localPart.length - visibleLocalChars));
+
+  return `${preservedLocal}${hiddenLocal}@${domainPart}`;
+}
+
+function deriveSessionFallbackUsername(
+  firebaseUid: string | null | undefined,
+  pendingUsername: string | null | undefined,
+): string {
+  const sanitize = (raw: string | null | undefined): string => {
+    const normalized = String(raw ?? "")
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9_]/g, "_")
+      .replace(/_+/g, "_")
+      .replace(/^_+|_+$/g, "");
+    if (!normalized) {
+      return "";
+    }
+    if (normalized.length >= 3) {
+      return normalized.slice(0, 20);
+    }
+    return `${normalized}user`.slice(0, 20);
+  };
+
+  const uidSeed = String(firebaseUid ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "")
+    .slice(0, 12);
+
+  return sanitize(pendingUsername) || sanitize(uidSeed ? `user_${uidSeed}` : "") || "usuario";
+}
+
+function formatReleaseChannelLabel(channelRaw: string | null | undefined): string {
+  const normalizedChannel = String(channelRaw ?? "").trim().toLowerCase();
+  switch (normalizedChannel) {
+    case "stable":
+      return "Canal estável";
+    case "beta":
+      return "Canal beta";
+    case "alpha":
+      return "Canal alpha";
+    default:
+      return normalizedChannel ? `Canal ${normalizedChannel}` : "Canal padrão";
+  }
+}
+
+function formatRuntimePlatformName(
+  platformRaw: string | null | undefined,
+  archRaw: string | null | undefined,
+): string {
+  const normalizedPlatform = String(platformRaw ?? "").trim().toLowerCase();
+  const normalizedArch = String(archRaw ?? "").trim().toLowerCase();
+
+  const platformLabel =
+    normalizedPlatform === "win32"
+      ? "Windows"
+      : normalizedPlatform === "darwin"
+        ? "macOS"
+        : normalizedPlatform === "linux"
+          ? "Linux"
+          : normalizedPlatform === "web"
+            ? "Web"
+            : normalizedPlatform || "Desktop";
+
+  const archLabel =
+    normalizedArch === "x64"
+      ? "x64"
+      : normalizedArch === "arm64"
+        ? "ARM64"
+        : normalizedArch === "ia32"
+          ? "x86"
+          : normalizedArch;
+
+  return archLabel ? `${platformLabel} ${archLabel}` : platformLabel;
 }
 
 function buildAudioSettingsStorageKey(userUid: string | null | undefined): string {
@@ -223,8 +465,18 @@ function readProfilePlusThemeSettings(userUid: string | null | undefined): {
     }
 
     const parsed = JSON.parse(raw) as Partial<PersistedProfilePlusThemeSettings> | null;
-    const primary = normalizeBannerColor(parsed?.primary) ?? DEFAULT_PLUS_PROFILE_PRIMARY_COLOR;
-    const accent = normalizeBannerColor(parsed?.accent) ?? DEFAULT_PLUS_PROFILE_ACCENT_COLOR;
+    const normalizedLegacyPrimary = normalizeBannerColor(LEGACY_PLUS_PROFILE_PRIMARY_COLOR);
+    const normalizedLegacyAccent = normalizeBannerColor(LEGACY_PLUS_PROFILE_ACCENT_COLOR);
+    const normalizedPrimary = normalizeBannerColor(parsed?.primary);
+    const normalizedAccent = normalizeBannerColor(parsed?.accent);
+    const primary =
+      !normalizedPrimary || normalizedPrimary === normalizedLegacyPrimary
+        ? DEFAULT_PLUS_PROFILE_PRIMARY_COLOR
+        : normalizedPrimary;
+    const accent =
+      !normalizedAccent || normalizedAccent === normalizedLegacyAccent
+        ? DEFAULT_PLUS_PROFILE_ACCENT_COLOR
+        : normalizedAccent;
     return { primary, accent };
   } catch {
     return {
@@ -261,7 +513,88 @@ function writeProfilePlusThemeSettings(
 
 function formatDeviceOptionLabel(rawLabel: string | null | undefined, fallback: string): string {
   const label = String(rawLabel ?? "").trim();
-  return label.length > 0 ? label : fallback;
+  if (!label) {
+    return fallback;
+  }
+
+  const withoutRoutePrefixes = label
+    .replace(/^\s*default\s*-\s*/i, "")
+    .replace(/^\s*communications\s*-\s*/i, "")
+    .trim();
+  const withoutHardwareIds = withoutRoutePrefixes
+    .replace(/\(\s*[0-9a-f]{4}\s*:\s*[0-9a-f]{4}\s*\)/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  return withoutHardwareIds || fallback;
+}
+
+function buildUniqueAudioDeviceOptions(
+  devices: MediaDeviceInfo[],
+  defaultLabel: string,
+  fallbackLabel: string,
+  selectedDeviceId: string,
+): Array<{ value: string; title: string; subtitle: string }> {
+  const normalizedSelectedDeviceId = String(selectedDeviceId ?? "").trim();
+  const normalizeKey = (value: string): string =>
+    value
+      .toLocaleLowerCase("pt-BR")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  const defaultOption = {
+    value: "",
+    title: defaultLabel,
+    subtitle: "",
+  };
+  const defaultKey = normalizeKey(defaultLabel);
+  const uniqueOptionsByKey = new Map<string, { value: string; title: string; subtitle: string }>();
+
+  devices.forEach((device) => {
+    const value = String(device.deviceId ?? "").trim();
+    if (!value) {
+      return;
+    }
+
+    const title = formatDeviceOptionLabel(device.label, fallbackLabel);
+    const key = normalizeKey(title);
+    if (!key || key === defaultKey) {
+      return;
+    }
+
+    const nextOption = {
+      value,
+      title,
+      subtitle: "",
+    };
+    const currentOption = uniqueOptionsByKey.get(key);
+    if (!currentOption) {
+      uniqueOptionsByKey.set(key, nextOption);
+      return;
+    }
+    if (normalizedSelectedDeviceId && value === normalizedSelectedDeviceId) {
+      uniqueOptionsByKey.set(key, nextOption);
+    }
+  });
+
+  const result = [defaultOption, ...Array.from(uniqueOptionsByKey.values())];
+  if (
+    normalizedSelectedDeviceId &&
+    normalizedSelectedDeviceId !== "" &&
+    !result.some((option) => option.value === normalizedSelectedDeviceId)
+  ) {
+    const selectedDevice = devices.find(
+      (device) => String(device.deviceId ?? "").trim() === normalizedSelectedDeviceId,
+    );
+    if (selectedDevice) {
+      result.push({
+        value: normalizedSelectedDeviceId,
+        title: formatDeviceOptionLabel(selectedDevice.label, fallbackLabel),
+        subtitle: "",
+      });
+    }
+  }
+
+  return result;
 }
 
 function normalizePushToTalkBind(rawValue: unknown): string {
@@ -416,10 +749,10 @@ function getErrorMessage(error: unknown): string {
     const message = String((error as { message?: string }).message ?? "").trim();
     if (message) {
       if (message.includes("column of 'users' in the schema cache")) {
-        return "Seu banco users ainda nao tem as colunas de midia. Rode a migracao de avatar/banner.";
+        return "Seu banco users ainda não tem as colunas de mídia. Execute a migração de avatar/banner.";
       }
       if (message.includes("Profile media payload must be WebP.")) {
-        return "Versao antiga do backend detectada. Reinicie o aplicativo.";
+        return "Versão antiga do backend detectada. Reinicie o aplicativo.";
       }
       if (message.includes("No handler registered for 'media:upload-profile'")) {
         return "Reinicie o aplicativo para ativar o upload de avatar e banner.";
@@ -428,7 +761,7 @@ function getErrorMessage(error: unknown): string {
     }
   }
 
-  return "Nao foi possivel concluir o upload agora.";
+  return "Não foi possível concluir o upload agora.";
 }
 
 function getAccountActionErrorMessage(error: unknown): string {
@@ -439,22 +772,22 @@ function getAccountActionErrorMessage(error: unknown): string {
 
   switch (firebaseCode) {
     case "auth/network-request-failed":
-      return "Sem internet. Verifique sua conexao e tente novamente.";
+      return "Sem internet. Verifique sua conexão e tente novamente.";
     case "auth/too-many-requests":
       return "Muitas tentativas. Aguarde um pouco e tente novamente.";
     case "auth/invalid-credential":
     case "auth/wrong-password":
       return "Senha atual incorreta.";
     case "auth/invalid-email":
-      return "Digite um email valido.";
+      return "Digite um e-mail válido.";
     case "auth/email-already-in-use":
-      return "Esse email ja esta em uso.";
+      return "Esse e-mail já está em uso.";
     case "auth/requires-recent-login":
-      return "Entre novamente para concluir essa alteracao de seguranca.";
+      return "Entre novamente para concluir essa alteração de segurança.";
     case "auth/weak-password":
-      return "A nova senha e muito fraca. Use uma senha mais forte.";
+      return "A nova senha é muito fraca. Use uma senha mais forte.";
     case "auth/user-mismatch":
-      return "Confirme o email atual corretamente.";
+      return "Confirme o e-mail atual corretamente.";
     default:
       break;
   }
@@ -466,7 +799,7 @@ function getAccountActionErrorMessage(error: unknown): string {
     }
   }
 
-  return "Nao foi possivel concluir esta acao agora.";
+  return "Não foi possível concluir esta ação agora.";
 }
 
 function getMissingUsersColumn(error: unknown): string | null {
@@ -494,32 +827,7 @@ function isMissingAvatarUrlColumnError(message: string): boolean {
 }
 
 async function loadLegacyAvatarMap(userIds: string[]): Promise<Map<string, string>> {
-  if (userIds.length === 0) {
-    return new Map();
-  }
-
-  try {
-    const { data, error } = await supabase
-      .from("users_legacy_media_backup")
-      .select("user_id,avatar_url")
-      .in("user_id", userIds);
-
-    if (error || !Array.isArray(data)) {
-      return new Map();
-    }
-
-    const map = new Map<string, string>();
-    data.forEach((item) => {
-      const userId = String((item as { user_id?: string | null }).user_id ?? "").trim();
-      const avatarUrl = String((item as { avatar_url?: string | null }).avatar_url ?? "").trim();
-      if (userId && avatarUrl) {
-        map.set(userId, avatarUrl);
-      }
-    });
-    return map;
-  } catch {
-    return new Map();
-  }
+  return new Map();
 }
 
 function readSidebarIdentityFallback(firebaseUid: string | null | undefined): CachedSidebarIdentityFallback | null {
@@ -550,6 +858,15 @@ function readSidebarIdentityFallback(firebaseUid: string | null | undefined): Ca
   }
 }
 
+function isReusableSidebarMediaUrl(urlRaw: string | null | undefined): boolean {
+  const url = String(urlRaw ?? "").trim();
+  if (!url) {
+    return false;
+  }
+
+  return url.startsWith("http://") || url.startsWith("https://") || url.startsWith("data:");
+}
+
 function readSidebarResolvedMediaFallback(firebaseUid: string | null | undefined): CachedSidebarResolvedMediaFallback | null {
   if (!firebaseUid || typeof window === "undefined") {
     return null;
@@ -568,167 +885,711 @@ function readSidebarResolvedMediaFallback(firebaseUid: string | null | undefined
     if (!avatarSrc && !bannerSrc) {
       return null;
     }
+    if (avatarSrc && !isReusableSidebarMediaUrl(avatarSrc)) {
+      return null;
+    }
+    if (bannerSrc && !isReusableSidebarMediaUrl(bannerSrc)) {
+      return null;
+    }
     return { avatarSrc, bannerSrc };
   } catch {
     return null;
   }
 }
 
+function buildDismissedLoginSessionsStorageKey(scope: string | null | undefined): string | null {
+  const normalizedScope = String(scope ?? "").trim();
+  if (!normalizedScope) {
+    return null;
+  }
+
+  return `${DISMISSED_LOGIN_SESSIONS_STORAGE_PREFIX}${normalizedScope}`;
+}
+
+function readDismissedLoginSessions(scope: string | null | undefined): Map<string, number> {
+  if (typeof window === "undefined") {
+    return new Map();
+  }
+
+  const key = buildDismissedLoginSessionsStorageKey(scope);
+  if (!key) {
+    return new Map();
+  }
+
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) {
+      return new Map();
+    }
+
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const now = Date.now();
+    const nextMap = new Map<string, number>();
+    for (const [sessionIdRaw, dismissedAtRaw] of Object.entries(parsed ?? {})) {
+      const sessionId = String(sessionIdRaw ?? "").trim();
+      const dismissedAt = Number(dismissedAtRaw);
+      if (!sessionId || !Number.isFinite(dismissedAt)) {
+        continue;
+      }
+      if (dismissedAt + DISMISSED_LOGIN_SESSIONS_TTL_MS <= now) {
+        continue;
+      }
+      nextMap.set(sessionId, dismissedAt);
+    }
+    return nextMap;
+  } catch {
+    return new Map();
+  }
+}
+
+function writeDismissedLoginSessions(scope: string | null | undefined, dismissedMap: Map<string, number>): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const key = buildDismissedLoginSessionsStorageKey(scope);
+  if (!key) {
+    return;
+  }
+
+  try {
+    if (dismissedMap.size === 0) {
+      window.localStorage.removeItem(key);
+      return;
+    }
+
+    const payload: Record<string, number> = {};
+    dismissedMap.forEach((dismissedAt, sessionId) => {
+      payload[sessionId] = dismissedAt;
+    });
+    window.localStorage.setItem(key, JSON.stringify(payload));
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
+function buildLoginSessionsCacheStorageKey(scope: string | null | undefined): string | null {
+  const normalizedScope = String(scope ?? "").trim();
+  if (!normalizedScope) {
+    return null;
+  }
+
+  return `${LOGIN_SESSIONS_CACHE_STORAGE_PREFIX}${normalizedScope}`;
+}
+
+function readCachedLoginSessions(scope: string | null | undefined): LoginSessionView[] {
+  if (typeof window === "undefined") {
+    return [];
+  }
+
+  const key = buildLoginSessionsCacheStorageKey(scope);
+  if (!key) {
+    return [];
+  }
+
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) {
+      return [];
+    }
+
+    const parsed = JSON.parse(raw) as Partial<CachedLoginSessionsPayload>;
+    if (parsed.v !== 1) {
+      return [];
+    }
+
+    const updatedAt = Number(parsed.updatedAt ?? NaN);
+    if (!Number.isFinite(updatedAt) || updatedAt + LOGIN_SESSIONS_CACHE_TTL_MS <= Date.now()) {
+      return [];
+    }
+
+    const sessions = Array.isArray(parsed.sessions) ? parsed.sessions : [];
+    return sessions
+      .map((entry) => {
+        const id = String((entry as Partial<LoginSessionView>)?.id ?? "").trim();
+        if (!isUuidLike(id)) {
+          return null;
+        }
+
+        const device = String((entry as Partial<LoginSessionView>)?.device ?? "").trim() || "Cliente";
+        const os = String((entry as Partial<LoginSessionView>)?.os ?? "").trim() || "Sistema";
+        const clientVersionRaw = (entry as Partial<LoginSessionView>)?.clientVersion;
+        const locationRaw = (entry as Partial<LoginSessionView>)?.location;
+        const ipAddressMasked = String((entry as Partial<LoginSessionView>)?.ipAddressMasked ?? "").trim() || "0.0.0.0";
+        const createdAt = String((entry as Partial<LoginSessionView>)?.createdAt ?? "").trim() || new Date().toISOString();
+        const loggedInLabel =
+          String((entry as Partial<LoginSessionView>)?.loggedInLabel ?? "").trim() || "Logged in recently";
+        const suspicious = Boolean((entry as Partial<LoginSessionView>)?.suspicious);
+
+        return {
+          id,
+          device,
+          os,
+          clientVersion: clientVersionRaw == null ? null : String(clientVersionRaw).trim() || null,
+          location: locationRaw == null ? null : String(locationRaw).trim() || null,
+          ipAddressMasked,
+          createdAt,
+          loggedInLabel,
+          suspicious,
+        } satisfies LoginSessionView;
+      })
+      .filter((entry): entry is LoginSessionView => entry !== null);
+  } catch {
+    return [];
+  }
+}
+
+function writeCachedLoginSessions(scope: string | null | undefined, sessions: LoginSessionView[]): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const key = buildLoginSessionsCacheStorageKey(scope);
+  if (!key) {
+    return;
+  }
+
+  try {
+    if (!Array.isArray(sessions) || sessions.length === 0) {
+      window.localStorage.removeItem(key);
+      return;
+    }
+
+    const payload: CachedLoginSessionsPayload = {
+      v: 1,
+      updatedAt: Date.now(),
+      sessions,
+    };
+    window.localStorage.setItem(key, JSON.stringify(payload));
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
+function normalizeStoredIsoTimestamp(rawValue: string | null | undefined): string | null {
+  const value = String(rawValue ?? "").trim();
+  if (!value) {
+    return null;
+  }
+
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+
+  return new Date(parsed).toISOString();
+}
+
+function buildUsernameChangeStorageKey(scope: string | null | undefined): string | null {
+  const normalizedScope = String(scope ?? "").trim();
+  if (!normalizedScope) {
+    return null;
+  }
+
+  return `${USERNAME_CHANGE_STORAGE_KEY_PREFIX}${normalizedScope}`;
+}
+
+function readUsernameChangeFallback(scope: string | null | undefined): string | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  const key = buildUsernameChangeStorageKey(scope);
+  if (!key) {
+    return null;
+  }
+
+  try {
+    return normalizeStoredIsoTimestamp(window.localStorage.getItem(key));
+  } catch {
+    return null;
+  }
+}
+
+function writeUsernameChangeFallback(scope: string | null | undefined, timestamp: string | null): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const key = buildUsernameChangeStorageKey(scope);
+  if (!key) {
+    return;
+  }
+
+  try {
+    const normalizedTimestamp = normalizeStoredIsoTimestamp(timestamp);
+    if (!normalizedTimestamp) {
+      window.localStorage.removeItem(key);
+      return;
+    }
+    window.localStorage.setItem(key, normalizedTimestamp);
+  } catch {
+    // ignore storage failures
+  }
+}
+
+function formatShortDate(date: Date): string {
+  try {
+    return new Intl.DateTimeFormat("pt-BR", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+    }).format(date);
+  } catch {
+    return date.toLocaleDateString("pt-BR");
+  }
+}
+
+function formatBlockedDateLabel(timestampRaw: string | null | undefined): string {
+  const normalizedTimestamp = normalizeStoredIsoTimestamp(timestampRaw);
+  if (!normalizedTimestamp) {
+    return "BLOQUEADO RECENTEMENTE";
+  }
+
+  const date = new Date(normalizedTimestamp);
+  if (Number.isNaN(date.getTime())) {
+    return "BLOQUEADO RECENTEMENTE";
+  }
+
+  try {
+    const day = new Intl.DateTimeFormat("pt-BR", { day: "2-digit" }).format(date);
+    const month = new Intl.DateTimeFormat("pt-BR", { month: "short" })
+      .format(date)
+      .replace(".", "")
+      .trim()
+      .toUpperCase();
+
+    return `BLOQUEADO EM ${day} ${month}`;
+  } catch {
+    const day = String(date.getDate()).padStart(2, "0");
+    const monthNames = ["JAN", "FEV", "MAR", "ABR", "MAI", "JUN", "JUL", "AGO", "SET", "OUT", "NOV", "DEZ"];
+    return `BLOQUEADO EM ${day} ${monthNames[date.getMonth()] ?? "REC"}`;
+  }
+}
+
+function parsePresenceTimestamp(value: unknown): number | null {
+  if (typeof value === "number") {
+    return Number.isFinite(value) && value > 0 ? value : null;
+  }
+  if (typeof value === "string") {
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  if (value instanceof Date) {
+    const parsed = value.getTime();
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function normalizePresenceState(value: unknown): PresenceState {
+  const raw = String(value ?? "").trim().toLowerCase();
+  if (raw === "online" || raw === "disponivel" || raw === "available") {
+    return "online";
+  }
+  if (raw === "idle" || raw === "ausente" || raw === "away") {
+    return "idle";
+  }
+  if (raw === "dnd" || raw === "nao perturbar" || raw === "busy") {
+    return "dnd";
+  }
+  return "invisivel";
+}
+
+function normalizePresencePlatform(value: unknown): PresencePlatform {
+  const raw = String(value ?? "").trim().toLowerCase();
+  if (raw === "desktop" || raw === "mobile" || raw === "browser") {
+    return raw;
+  }
+  return "browser";
+}
+
+function getDevicePlatformLabel(platform: PresencePlatform): string {
+  switch (platform) {
+    case "desktop":
+      return "Desktop";
+    case "mobile":
+      return "Mobile";
+    default:
+      return "Navegador";
+  }
+}
+
+function getDevicePlatformIcon(platform: PresencePlatform): string {
+  switch (platform) {
+    case "desktop":
+      return "desktop_windows";
+    case "mobile":
+      return "smartphone";
+    default:
+      return "language";
+  }
+}
+
+function formatRelativeLastSeen(timestamp: number | null): string | null {
+  if (!timestamp || !Number.isFinite(timestamp)) {
+    return null;
+  }
+
+  const diffMs = Date.now() - timestamp;
+  if (!Number.isFinite(diffMs) || diffMs < 0) {
+    return "agora mesmo";
+  }
+
+  const minuteMs = 60 * 1000;
+  const hourMs = 60 * minuteMs;
+  const dayMs = 24 * hourMs;
+
+  if (diffMs < minuteMs) {
+    return "agora mesmo";
+  }
+  if (diffMs < hourMs) {
+    const minutes = Math.max(1, Math.round(diffMs / minuteMs));
+    return minutes === 1 ? "há 1 minuto" : `há ${minutes} minutos`;
+  }
+  if (diffMs < dayMs) {
+    const hours = Math.max(1, Math.round(diffMs / hourMs));
+    return hours === 1 ? "há 1 hora" : `há ${hours} horas`;
+  }
+
+  const days = Math.max(1, Math.round(diffMs / dayMs));
+  return days === 1 ? "há 1 dia" : `há ${days} dias`;
+}
+
+function formatDeviceLocationLabel(locationLabelRaw: string | null | undefined): string | null {
+  const raw = String(locationLabelRaw ?? "").trim();
+  if (!raw) {
+    return null;
+  }
+
+  const toTitleCase = (value: string): string =>
+    value.replace(/\b([A-Za-zÀ-ÿ])([A-Za-zÀ-ÿ'’.-]*)/g, (_match, first: string, rest: string) => {
+      return `${first.toLocaleUpperCase("pt-BR")}${rest.toLocaleLowerCase("pt-BR")}`;
+    });
+
+  const normalizeCountryName = (value: string): string => {
+    const normalized = value.trim().toLocaleLowerCase("pt-BR");
+    switch (normalized) {
+      case "br":
+      case "bra":
+      case "brasil":
+        return "Brazil";
+      case "us":
+      case "usa":
+      case "estados unidos":
+      case "eua":
+        return "United States";
+      case "uk":
+      case "gb":
+      case "reino unido":
+        return "United Kingdom";
+      default:
+        return toTitleCase(value.trim());
+    }
+  };
+
+  const parts = raw
+    .split(",")
+    .map((part) => part.replace(/_/g, " ").replace(/\s+/g, " ").trim())
+    .filter((part, index, array) => part.length > 0 && array.findIndex((item) => item.toLowerCase() === part.toLowerCase()) === index);
+
+  if (parts.length === 0) {
+    return null;
+  }
+
+  return parts
+    .map((part, index) => (index === parts.length - 1 ? normalizeCountryName(part) : toTitleCase(part)))
+    .join(", ");
+}
+
+function getPlatformFromLoginSession(session: LoginSessionView): PresencePlatform {
+  const device = session.device.trim().toLocaleLowerCase();
+  const os = session.os.trim().toLocaleLowerCase();
+
+  if (os.includes("android") || os.includes("ios") || device.includes("mobile")) {
+    return "mobile";
+  }
+
+  if (
+    device.includes("electron") ||
+    device.includes("messly desktop") ||
+    device.includes("desktop app") ||
+    os === "win32" ||
+    os === "darwin" ||
+    os === "linux"
+  ) {
+    return "desktop";
+  }
+
+  if (
+    device.includes("chrome") ||
+    device.includes("edge") ||
+    device.includes("firefox") ||
+    device.includes("opera") ||
+    device.includes("safari") ||
+    device.includes("browser")
+  ) {
+    return "browser";
+  }
+
+  if (os.includes("windows") || os.includes("mac") || os.includes("linux")) {
+    return "desktop";
+  }
+
+  return "browser";
+}
+
+function formatSessionOsName(osNameRaw: string | null | undefined): string {
+  const normalized = String(osNameRaw ?? "").trim();
+  if (!normalized) {
+    return "Sistema";
+  }
+
+  const formattedPlatform = formatRuntimePlatformName(normalized, null);
+  return formattedPlatform.trim() || normalized;
+}
+
+function mapLoginSessionsToDeviceItems(
+  sessions: LoginSessionView[],
+  currentSessionId: string | null,
+  currentDeviceMetadata: PresenceDeviceMetadata,
+): DeviceSessionItem[] {
+  const nextItems: DeviceSessionItem[] = sessions.map((session, index) => {
+    const isCurrent = currentSessionId ? session.id === currentSessionId : index === 0;
+    const platform = getPlatformFromLoginSession(session);
+    const parsedCreatedAt = Date.parse(session.createdAt);
+    const state: PresenceState = "online";
+
+    return {
+      deviceId: session.id,
+      platform,
+      state,
+      clientName: isCurrent ? currentDeviceMetadata.clientName : session.device.trim() || "Cliente",
+      osName: isCurrent ? currentDeviceMetadata.osName : formatSessionOsName(session.os),
+      locationLabel: session.location ?? currentDeviceMetadata.locationLabel,
+      lastActive: Number.isFinite(parsedCreatedAt) ? parsedCreatedAt : null,
+      updatedAt: Number.isFinite(parsedCreatedAt) ? parsedCreatedAt : null,
+      isCurrent,
+      source: "loginSession" as const,
+    };
+  });
+
+  nextItems.sort((left, right) => {
+    if (left.isCurrent !== right.isCurrent) {
+      return left.isCurrent ? -1 : 1;
+    }
+
+    const leftSort = left.lastActive ?? left.updatedAt ?? 0;
+    const rightSort = right.lastActive ?? right.updatedAt ?? 0;
+    return rightSort - leftSort;
+  });
+
+  return nextItems;
+}
+
+function isUuidLike(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+function getUsernameCooldownState(lastChangedAtRaw: string | null | undefined): {
+  isLocked: boolean;
+  remainingDays: number;
+  nextAllowedAt: Date | null;
+  nextAllowedLabel: string | null;
+} {
+  const normalizedTimestamp = normalizeStoredIsoTimestamp(lastChangedAtRaw);
+  if (!normalizedTimestamp) {
+    return {
+      isLocked: false,
+      remainingDays: 0,
+      nextAllowedAt: null,
+      nextAllowedLabel: null,
+    };
+  }
+
+  const nextAllowedAt = new Date(Date.parse(normalizedTimestamp) + USERNAME_CHANGE_COOLDOWN_MS);
+  const remainingMs = nextAllowedAt.getTime() - Date.now();
+  if (!Number.isFinite(remainingMs) || remainingMs <= 0) {
+    return {
+      isLocked: false,
+      remainingDays: 0,
+      nextAllowedAt,
+      nextAllowedLabel: formatShortDate(nextAllowedAt),
+    };
+  }
+
+  return {
+    isLocked: true,
+    remainingDays: Math.max(1, Math.ceil(remainingMs / (24 * 60 * 60 * 1000))),
+    nextAllowedAt,
+    nextAllowedLabel: formatShortDate(nextAllowedAt),
+  };
+}
+
 async function queryUserByFirebaseUid(firebaseUid: string) {
-  const primary = await supabase
-    .from("users")
+  return supabase
+    .from("profiles")
     .select(USER_PROFILE_SELECT_COLUMNS)
-    .eq("firebase_uid", firebaseUid)
+    .eq("id", firebaseUid)
     .limit(1)
     .maybeSingle();
-
-  if (primary.error && isMissingAvatarUrlColumnError(primary.error.message ?? "")) {
-    const withoutAvatarUrl = await supabase
-      .from("users")
-      .select(USER_PROFILE_SELECT_COLUMNS_WITHOUT_AVATAR_URL)
-      .eq("firebase_uid", firebaseUid)
-      .limit(1)
-      .maybeSingle();
-    if (!withoutAvatarUrl.error) {
-      return withoutAvatarUrl;
-    }
-  }
-
-  if (primary.error && isUsersSchemaColumnCacheError(primary.error.message ?? "")) {
-    return supabase
-      .from("users")
-      .select(USER_PROFILE_SELECT_COLUMNS_FALLBACK)
-      .eq("firebase_uid", firebaseUid)
-      .limit(1)
-      .maybeSingle();
-  }
-
-  return primary;
 }
 
 async function queryUserById(userId: string) {
-  const primary = await supabase
-    .from("users")
-    .select(USER_PROFILE_SELECT_COLUMNS)
-    .eq("id", userId)
-    .limit(1)
-    .maybeSingle();
-
-  if (primary.error && isMissingAvatarUrlColumnError(primary.error.message ?? "")) {
-    const withoutAvatarUrl = await supabase
-      .from("users")
-      .select(USER_PROFILE_SELECT_COLUMNS_WITHOUT_AVATAR_URL)
-      .eq("id", userId)
-      .limit(1)
-      .maybeSingle();
-    if (!withoutAvatarUrl.error) {
-      return withoutAvatarUrl;
-    }
-  }
-
-  if (primary.error && isUsersSchemaColumnCacheError(primary.error.message ?? "")) {
-    return supabase.from("users").select(USER_PROFILE_SELECT_COLUMNS_FALLBACK).eq("id", userId).limit(1).maybeSingle();
-  }
-
-  return primary;
+  return supabase.from("profiles").select(USER_PROFILE_SELECT_COLUMNS).eq("id", userId).limit(1).maybeSingle();
 }
 
-async function queryUserByEmail(email: string) {
-  const escapedEmail = escapeLikePattern(email);
-  const primary = await supabase
-    .from("users")
-    .select(USER_PROFILE_SELECT_COLUMNS)
-    .ilike("email", escapedEmail)
-    .limit(1)
-    .maybeSingle();
+async function queryUsernameChangedAt(userId: string): Promise<string | null> {
+  const normalizedUserId = String(userId ?? "").trim();
+  if (!normalizedUserId) {
+    return null;
+  }
 
-  if (primary.error && isMissingAvatarUrlColumnError(primary.error.message ?? "")) {
-    const withoutAvatarUrl = await supabase
-      .from("users")
-      .select(USER_PROFILE_SELECT_COLUMNS_WITHOUT_AVATAR_URL)
-      .ilike("email", escapedEmail)
-      .limit(1)
-      .maybeSingle();
-    if (!withoutAvatarUrl.error) {
-      return withoutAvatarUrl;
+  const { data, error } = await supabase.from("profiles").select("updated_at").eq("id", normalizedUserId).limit(1).maybeSingle();
+
+  if (error) {
+    const message = String(error.message ?? "");
+    const details = String((error as { details?: string | null }).details ?? "");
+    const code = String((error as { code?: string | null }).code ?? "").toUpperCase();
+    if (
+      isUsersSchemaColumnCacheError(message) ||
+      message.toLowerCase().includes("username_changed_at") ||
+      details.toLowerCase().includes("username_changed_at") ||
+      code.startsWith("PGRST")
+    ) {
+      return null;
     }
+    throw error;
   }
 
-  if (primary.error && isUsersSchemaColumnCacheError(primary.error.message ?? "")) {
-    return supabase
-      .from("users")
-      .select(USER_PROFILE_SELECT_COLUMNS_FALLBACK)
-      .ilike("email", escapedEmail)
-      .limit(1)
-      .maybeSingle();
-  }
-
-  return primary;
+  return normalizeStoredIsoTimestamp((data as { updated_at?: string | null } | null)?.updated_at ?? null);
 }
 
 async function updateUserMediaWithSchemaFallback(
   userId: string,
   updates: ProfileMediaUpdatePayload,
 ): Promise<ProfileMediaUpdatePayload> {
-  const pendingUpdates: ProfileMediaUpdatePayload = { ...updates };
+  const allowedKeys: Array<keyof ProfileMediaUpdatePayload> = [
+    "avatar_key",
+    "avatar_hash",
+    "avatar_url",
+    "banner_key",
+    "banner_hash",
+    "banner_url",
+  ];
 
-  while (Object.keys(pendingUpdates).length > 0) {
-    const { error } = await supabase.from("users").update(pendingUpdates).eq("id", userId);
-    if (!error) {
-      return pendingUpdates;
+  const filtered: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(updates)) {
+    if (allowedKeys.includes(key as keyof ProfileMediaUpdatePayload)) {
+      filtered[key] = value;
     }
-
-    const missingColumn = getMissingUsersColumn(error);
-    if (
-      missingColumn &&
-      Object.prototype.hasOwnProperty.call(pendingUpdates, missingColumn) &&
-      PROFILE_MEDIA_COLUMNS.has(missingColumn)
-    ) {
-      delete pendingUpdates[missingColumn];
-      continue;
-    }
-
-    throw error;
   }
 
-  throw new Error("Tabela users sem colunas de midia para salvar avatar/banner.");
+  if (Object.keys(filtered).length === 0) {
+    return {};
+  }
+
+  const { data, error } = await supabase.from("profiles").update(filtered).eq("id", userId).select("id").maybeSingle();
+  if (error) {
+    throw error;
+  }
+  if (!data?.id) {
+    throw new Error(USERS_UPDATE_ROW_NOT_FOUND_ERROR);
+  }
+
+  return filtered as ProfileMediaUpdatePayload;
 }
 
 async function updateUserProfileWithSchemaFallback(
   userId: string,
-  updates: ProfileMediaUpdatePayload,
-): Promise<ProfileMediaUpdatePayload> {
-  const pendingUpdates: ProfileMediaUpdatePayload = { ...updates };
-
-  while (Object.keys(pendingUpdates).length > 0) {
-    const { error } = await supabase.from("users").update(pendingUpdates).eq("id", userId);
-    if (!error) {
-      return pendingUpdates;
+  updates: UserProfileUpdatePayload,
+): Promise<UserProfileUpdatePayload> {
+  const allowed = [
+    "display_name",
+    "username",
+    "email",
+    "avatar_url",
+    "avatar_key",
+    "avatar_hash",
+    "banner_url",
+    "banner_key",
+    "banner_hash",
+    "bio",
+    "about",
+    "banner_color",
+    "profile_theme_primary_color",
+    "profile_theme_accent_color",
+    "friend_requests_allow_all",
+    "friend_requests_allow_friends_of_friends",
+  ];
+  const filtered: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(updates)) {
+    if (allowed.includes(key)) {
+      filtered[key] = value;
     }
-
-    const missingColumn = getMissingUsersColumn(error);
-    if (
-      missingColumn &&
-      Object.prototype.hasOwnProperty.call(pendingUpdates, missingColumn) &&
-      OPTIONAL_PROFILE_COLUMNS.has(missingColumn)
-    ) {
-      delete pendingUpdates[missingColumn];
-      continue;
-    }
-
+  }
+  if (Object.keys(filtered).length === 0) {
+    return {};
+  }
+  const { data, error } = await supabase.from("profiles").update(filtered).eq("id", userId).select("id").maybeSingle();
+  if (error) {
     throw error;
   }
-
-  throw new Error("Tabela users sem colunas de perfil para salvar.");
+  if (!data?.id) {
+    throw new Error(USERS_UPDATE_ROW_NOT_FOUND_ERROR);
+  }
+  return filtered as UserProfileUpdatePayload;
 }
 
-export default function AppSettingsView({ onClose, currentUserId = null }: AppSettingsViewProps) {
-  const { user } = useAuthSession();
-  const [activeSection, setActiveSection] = useState<SettingsSection>("account");
+function ProcessingCheckbox({ checked, onChange, ariaLabel }: ProcessingCheckboxProps) {
+  return (
+    <label className={styles.processingCoreCheckbox}>
+      <input
+        className={styles.processingCoreCheckboxInput}
+        type="checkbox"
+        checked={checked}
+        aria-label={ariaLabel}
+        onChange={(event) => {
+          onChange(event.target.checked);
+        }}
+      />
+      <span className={`${styles.processingCoreCheckboxFill} ${styles.processingCoreCheckboxTransition}`} aria-hidden="true" />
+      <span className={`${styles.processingCoreCheckboxIcon} ${styles.processingCoreCheckboxTransition}`} aria-hidden="true">
+        <MaterialSymbolIcon name="done" size={16} filled={true} />
+      </span>
+    </label>
+  );
+}
+
+export default function AppSettingsView({
+  onClose,
+  currentUserId = null,
+  initialSection = "account",
+}: AppSettingsViewProps) {
+  const { user, signOutCurrent, updateCurrentAccountProfile } = useAuthSession();
+  const [activeSection, setActiveSection] = useState<SettingsSection>(initialSection);
+  useEffect(() => {
+    setActiveSection(initialSection);
+  }, [initialSection]);
+  useEffect(() => {
+    if (activeSection !== "account") {
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      accountContentRef.current?.scrollTo({ top: 0, behavior: "auto" });
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frame);
+    };
+  }, [activeSection]);
+
   const [dbUserId, setDbUserId] = useState<string | null>(null);
   const [displayName, setDisplayName] = useState("Nome");
   const [savedDisplayName, setSavedDisplayName] = useState("Nome");
   const [username, setUsername] = useState("username");
+  const [accountUsernameChangedAt, setAccountUsernameChangedAt] = useState<string | null>(null);
   const [about, setAbout] = useState("");
   const [savedAbout, setSavedAbout] = useState("");
   const [bannerColor, setBannerColor] = useState<string | null>(null);
@@ -737,6 +1598,14 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
   const [savedProfileThemePrimaryColor, setSavedProfileThemePrimaryColor] = useState<string>(DEFAULT_PLUS_PROFILE_PRIMARY_COLOR);
   const [profileThemeAccentColor, setProfileThemeAccentColor] = useState<string>(DEFAULT_PLUS_PROFILE_ACCENT_COLOR);
   const [savedProfileThemeAccentColor, setSavedProfileThemeAccentColor] = useState<string>(DEFAULT_PLUS_PROFILE_ACCENT_COLOR);
+  const [isProfileThemeColorPickerOpen, setIsProfileThemeColorPickerOpen] = useState(false);
+  const [profileThemeColorPickerSlot, setProfileThemeColorPickerSlot] = useState<ProfileThemeColorSlot>("primary");
+  const [profileThemeColorInput, setProfileThemeColorInput] = useState(
+    getBannerColorInputValue(DEFAULT_PLUS_PROFILE_PRIMARY_COLOR),
+  );
+  const [profileThemeColorHue, setProfileThemeColorHue] = useState(0);
+  const [profileThemeColorSaturation, setProfileThemeColorSaturation] = useState(0);
+  const [profileThemeColorValue, setProfileThemeColorValue] = useState(0);
   const [bannerColorInput, setBannerColorInput] = useState(getBannerColorInputValue(null));
   const [bannerColorHue, setBannerColorHue] = useState(0);
   const [bannerColorSaturation, setBannerColorSaturation] = useState(0);
@@ -748,11 +1617,22 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
   const [bannerKey, setBannerKey] = useState<string | null>(null);
   const [bannerHash, setBannerHash] = useState<string | null>(null);
   const [avatarSrc, setAvatarSrc] = useState<string>("");
-  const [bannerSrc, setBannerSrc] = useState<string>(getDefaultBannerUrl);
+  const [bannerSrc, setBannerSrc] = useState<string>(() => {
+    const cachedMedia = readSidebarResolvedMediaFallback(user?.uid ?? null);
+    const cachedBannerSrc = String(cachedMedia?.bannerSrc ?? "").trim();
+    return cachedBannerSrc || getDefaultBannerUrl();
+  });
   const [isProfileIdentityLoading, setIsProfileIdentityLoading] = useState(true);
   const [accountModalKind, setAccountModalKind] = useState<AccountModalKind | null>(null);
   const [accountActionFeedback, setAccountActionFeedback] = useState<UploadFeedbackState | null>(null);
+  const [isAccountEmailVisible, setIsAccountEmailVisible] = useState(false);
   const [isAccountActionPending, setIsAccountActionPending] = useState(false);
+  const [accountUsernameInput, setAccountUsernameInput] = useState("");
+  const [accountUsernamePasswordInput, setAccountUsernamePasswordInput] = useState("");
+  const [accountUsernameModalFeedback, setAccountUsernameModalFeedback] = useState<UploadFeedbackState | null>(null);
+  const [accountUsernameAvailabilityFeedback, setAccountUsernameAvailabilityFeedback] =
+    useState<ModalAvailabilityFeedbackState | null>(null);
+  const [isAccountUsernameAvailabilityPending, setIsAccountUsernameAvailabilityPending] = useState(false);
   const [accountEmailModalStep, setAccountEmailModalStep] = useState<AccountEmailModalStep>("verifyCurrent");
   const [accountCurrentEmailInput, setAccountCurrentEmailInput] = useState("");
   const [accountCurrentPasswordInput, setAccountCurrentPasswordInput] = useState("");
@@ -768,17 +1648,40 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
   const [accountDeletePasswordInput, setAccountDeletePasswordInput] = useState("");
   const [accountDeleteConfirmInput, setAccountDeleteConfirmInput] = useState("");
   const [accountDeleteModalFeedback, setAccountDeleteModalFeedback] = useState<UploadFeedbackState | null>(null);
+  const [isSidebarSignOutPending, setIsSidebarSignOutPending] = useState(false);
+  const [sidebarSignOutFeedback, setSidebarSignOutFeedback] = useState<string | null>(null);
   const [isAvatarUploading, setIsAvatarUploading] = useState(false);
   const [isBannerUploading, setIsBannerUploading] = useState(false);
+  const [isPreviewBannerHotspotActive, setIsPreviewBannerHotspotActive] = useState(false);
+  const [isPreviewAvatarHotspotActive, setIsPreviewAvatarHotspotActive] = useState(false);
   const [avatarFeedback, setAvatarFeedback] = useState<UploadFeedbackState | null>(null);
   const [bannerFeedback, setBannerFeedback] = useState<UploadFeedbackState | null>(null);
   const [profileFeedback, setProfileFeedback] = useState<UploadFeedbackState | null>(null);
   const [isSavingProfile, setIsSavingProfile] = useState(false);
   const [pendingImageEdit, setPendingImageEdit] = useState<PendingImageEdit | null>(null);
   const [uploadLimitModal, setUploadLimitModal] = useState<UploadLimitModalState | null>(null);
+  const [friendRequestPrivacy, setFriendRequestPrivacy] = useState<FriendRequestPrivacySettings>(
+    DEFAULT_FRIEND_REQUEST_PRIVACY_SETTINGS,
+  );
+  const [friendRequestPrivacyError, setFriendRequestPrivacyError] = useState<string | null>(null);
+  const [savingFriendRequestPrivacyKey, setSavingFriendRequestPrivacyKey] =
+    useState<keyof FriendRequestPrivacySettings | null>(null);
+  const [deviceSessions, setDeviceSessions] = useState<DeviceSessionItem[]>([]);
+  const [isDeviceSessionsLoading, setIsDeviceSessionsLoading] = useState(false);
+  const [deviceSessionsError, setDeviceSessionsError] = useState<string | null>(null);
+  const [endingDeviceSessionId, setEndingDeviceSessionId] = useState<string | null>(null);
+  const [pendingDeviceSession, setPendingDeviceSession] = useState<DeviceSessionItem | null>(null);
+  const [pendingDeviceSessionPasswordInput, setPendingDeviceSessionPasswordInput] = useState("");
+  const [pendingDeviceSessionFeedback, setPendingDeviceSessionFeedback] = useState<UploadFeedbackState | null>(null);
+  const recentlyEndedDeviceSessionsRef = useRef<Map<string, number>>(new Map());
+  const dismissedLoginSessionsRef = useRef<Map<string, number>>(new Map());
+  const [currentPresenceDeviceMetadata, setCurrentPresenceDeviceMetadata] = useState(() =>
+    getPresenceDeviceMetadataSnapshot(),
+  );
   const [blockedAccounts, setBlockedAccounts] = useState<BlockedAccountItem[]>([]);
   const [isBlockedAccountsLoading, setIsBlockedAccountsLoading] = useState(false);
   const [blockedAccountsError, setBlockedAccountsError] = useState<string | null>(null);
+  const [blockedSearchQuery, setBlockedSearchQuery] = useState("");
   const [unblockingUserId, setUnblockingUserId] = useState<string | null>(null);
   const [windowsBehaviorSettings, setWindowsBehaviorSettings] = useState<WindowsBehaviorSettings>(
     DEFAULT_WINDOWS_BEHAVIOR_SETTINGS,
@@ -786,10 +1689,15 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
   const [isWindowsBehaviorLoading, setIsWindowsBehaviorLoading] = useState(false);
   const [windowsBehaviorError, setWindowsBehaviorError] = useState<string | null>(null);
   const [savingWindowsBehaviorKey, setSavingWindowsBehaviorKey] = useState<keyof WindowsBehaviorSettings | null>(null);
+  const [spotifyConnection, setSpotifyConnection] = useState<SpotifyConnectionState>(createDefaultSpotifyConnection);
+  const [isSpotifyConnecting, setIsSpotifyConnecting] = useState(false);
+  const [spotifyConnectionError, setSpotifyConnectionError] = useState<string | null>(null);
   const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([]);
   const [audioOutputs, setAudioOutputs] = useState<MediaDeviceInfo[]>([]);
   const [selectedInputId, setSelectedInputId] = useState("");
   const [selectedOutputId, setSelectedOutputId] = useState("");
+  const [isInputDeviceSelectOpen, setIsInputDeviceSelectOpen] = useState(false);
+  const [isOutputDeviceSelectOpen, setIsOutputDeviceSelectOpen] = useState(false);
   const [inputGain, setInputGain] = useState(100);
   const [outputVolume, setOutputVolume] = useState(100);
   const [noiseSuppression, setNoiseSuppression] = useState(true);
@@ -799,6 +1707,7 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
   const [voiceFocus, setVoiceFocus] = useState(false);
   const [autoMicSensitivity, setAutoMicSensitivity] = useState(true);
   const [manualMicSensitivity, setManualMicSensitivity] = useState(-70);
+  const [qosHighPriority, setQosHighPriority] = useState(false);
   const [pushToTalkEnabled, setPushToTalkEnabled] = useState(false);
   const [pushToTalkBind, setPushToTalkBind] = useState(DEFAULT_PUSH_TO_TALK_BIND);
   const [listeningForBind, setListeningForBind] = useState(false);
@@ -811,6 +1720,16 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
   const [vadState, setVadState] = useState<"speaking" | "silence">("silence");
   const bannerColorPickerRef = useRef<HTMLDivElement | null>(null);
   const bannerColorAreaRef = useRef<HTMLDivElement | null>(null);
+  const profileThemeColorPickerRef = useRef<HTMLDivElement | null>(null);
+  const profileThemeColorAreaRef = useRef<HTMLDivElement | null>(null);
+  const profileThemeColorPopoverRef = useRef<HTMLDivElement | null>(null);
+  const [profileThemeColorPopoverPosition, setProfileThemeColorPopoverPosition] = useState<{
+    top: number;
+    left: number;
+  } | null>(null);
+  const avatarFileInputRef = useRef<HTMLInputElement | null>(null);
+  const bannerFileInputRef = useRef<HTMLInputElement | null>(null);
+  const accountContentRef = useRef<HTMLDivElement | null>(null);
   const temporaryAvatarUrlRef = useRef<string | null>(null);
   const temporaryBannerUrlRef = useRef<string | null>(null);
   const windowsBehaviorLoadedRef = useRef(false);
@@ -820,13 +1739,33 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
   const micTestAudioContextRef = useRef<AudioContext | null>(null);
   const micTestAnalyserRef = useRef<AnalyserNode | null>(null);
   const micTestAnalyserDataRef = useRef<Float32Array<ArrayBuffer> | null>(null);
+  const inputDeviceSelectRef = useRef<HTMLDivElement | null>(null);
+  const outputDeviceSelectRef = useRef<HTMLDivElement | null>(null);
   const inputGainRef = useRef(100);
   const vadEnabledRef = useRef(true);
   const autoMicSensitivityRef = useRef(true);
   const manualMicSensitivityRef = useRef(-70);
+  const accountProfileSyncSignatureRef = useRef<string>("");
   const normalizedInputGain = clamp(Math.round(inputGain), 0, 100);
-  const displayedMicSensitivity = autoMicSensitivity ? -40 : manualMicSensitivity;
+  const normalizedOutputVolume = clamp(Math.round(outputVolume), 0, 200);
+  const displayedMicSensitivity = manualMicSensitivity;
+  const inputVolumeProgressPercent = clamp(normalizedInputGain, 0, 100);
+  const outputVolumeProgressPercent = clamp((normalizedOutputVolume / 200) * 100, 0, 100);
+  const inputVolumeSliderStyle = {
+    "--volume-progress": `${inputVolumeProgressPercent}%`,
+  } as CSSProperties;
+  const outputVolumeSliderStyle = {
+    "--volume-progress": `${outputVolumeProgressPercent}%`,
+  } as CSSProperties;
+  const micSensitivityProgressPercent = clamp(displayedMicSensitivity + 100, 0, 100);
+  const micSensitivitySliderStyle = {
+    "--sensitivity-progress": `${micSensitivityProgressPercent}%`,
+  } as CSSProperties;
   const audioSettingsStorageKey = useMemo(() => buildAudioSettingsStorageKey(user?.uid ?? null), [user?.uid]);
+  const spotifyConnectionScope = useMemo(
+    () => String(dbUserId ?? currentUserId ?? user?.uid ?? "").trim() || null,
+    [currentUserId, dbUserId, user?.uid],
+  );
   const normalizedProfileThemePrimaryColor = useMemo(
     () => normalizeBannerColor(profileThemePrimaryColor) ?? DEFAULT_PLUS_PROFILE_PRIMARY_COLOR,
     [profileThemePrimaryColor],
@@ -835,31 +1774,142 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
     () => normalizeBannerColor(profileThemeAccentColor) ?? DEFAULT_PLUS_PROFILE_ACCENT_COLOR,
     [profileThemeAccentColor],
   );
-  const hasBannerMedia = useMemo(
-    () =>
-      Boolean(
-        bannerKey ||
-          bannerHash ||
-          (bannerSrc && bannerSrc.trim().length > 0 && bannerSrc !== getDefaultBannerUrl()),
-      ),
-    [bannerHash, bannerKey, bannerSrc],
+  const safeBannerColor = useMemo(() => normalizeBannerColor(bannerColor), [bannerColor]);
+  const draftProfileTheme = useMemo(
+    () => ({
+      primary: normalizedProfileThemePrimaryColor,
+      accent: normalizedProfileThemeAccentColor,
+    }),
+    [normalizedProfileThemeAccentColor, normalizedProfileThemePrimaryColor],
   );
+  const savedProfileTheme = useMemo(
+    () => ({
+      primary: normalizeBannerColor(savedProfileThemePrimaryColor) ?? DEFAULT_PLUS_PROFILE_PRIMARY_COLOR,
+      accent: normalizeBannerColor(savedProfileThemeAccentColor) ?? DEFAULT_PLUS_PROFILE_ACCENT_COLOR,
+    }),
+    [savedProfileThemeAccentColor, savedProfileThemePrimaryColor],
+  );
+  const activeProfileThemePickerColor = useMemo(
+    () =>
+      profileThemeColorPickerSlot === "primary"
+        ? draftProfileTheme.primary
+        : draftProfileTheme.accent,
+    [draftProfileTheme, profileThemeColorPickerSlot],
+  );
+  const hasAvatarMedia = useMemo(() => {
+    const resolvedAvatarSrc = avatarSrc.trim();
+    return resolvedAvatarSrc.length > 0 && !isDefaultAvatarUrl(resolvedAvatarSrc);
+  }, [avatarSrc]);
+  const hasBannerMedia = useMemo(() => {
+    const resolvedBannerSrc = bannerSrc.trim();
+    return resolvedBannerSrc.length > 0 && resolvedBannerSrc !== getDefaultBannerUrl();
+  }, [bannerSrc]);
   const isDesktopRuntime = typeof window !== "undefined" && Boolean(window.electronAPI);
   const isWindowsDesktopRuntime = isDesktopRuntime && window.electronAPI?.platform === "win32";
   const canManageWindowsBehavior =
     isWindowsDesktopRuntime &&
     typeof window.electronAPI?.getWindowsSettings === "function" &&
     typeof window.electronAPI?.updateWindowsSettings === "function";
+  const currentPresenceDeviceId = useMemo(
+    () => (typeof window === "undefined" ? null : getOrCreatePresenceDeviceId()),
+    [],
+  );
+  const dismissedLoginSessionsStorageScope = useMemo(
+    () => String(user?.uid ?? "").trim() || null,
+    [user?.uid],
+  );
+  const loginSessionsCacheStorageScope = useMemo(
+    () => String(user?.uid ?? "").trim() || null,
+    [user?.uid],
+  );
+  useEffect(() => {
+    dismissedLoginSessionsRef.current = readDismissedLoginSessions(dismissedLoginSessionsStorageScope);
+  }, [dismissedLoginSessionsStorageScope]);
+  useEffect(() => {
+    if (activeSection !== "devices") {
+      return;
+    }
+
+    let cancelled = false;
+    setCurrentPresenceDeviceMetadata(getPresenceDeviceMetadataSnapshot());
+
+    void hydratePresenceDeviceMetadata()
+      .then((metadata) => {
+        if (!cancelled) {
+          setCurrentPresenceDeviceMetadata(metadata);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setCurrentPresenceDeviceMetadata(getPresenceDeviceMetadataSnapshot());
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSection]);
   const settingsVersion = String(appPackage.version ?? "0.0.0").trim() || "0.0.0";
-  const runtimePlatformLabel = isDesktopRuntime
-    ? `${window.electronAPI?.platform ?? "desktop"}${window.electronAPI?.arch ? ` ${window.electronAPI.arch}` : ""}`
-    : "web";
-  const runtimeEngineLabel =
-    isDesktopRuntime && window.electronAPI?.versions?.electron
-      ? `electron ${window.electronAPI.versions.electron}`
-      : "navegador";
-  const settingsSidebarVersionPrimary = `${APP_RELEASE_CHANNEL} v${settingsVersion}`;
-  const settingsSidebarVersionSecondary = `${runtimeEngineLabel} · ${runtimePlatformLabel}`;
+  const runtimePlatformLabel = useMemo(
+    () => formatRuntimePlatformName(isDesktopRuntime ? window.electronAPI?.platform : "web", window.electronAPI?.arch),
+    [isDesktopRuntime],
+  );
+  const runtimeEngineLabel = useMemo(
+    () =>
+      isDesktopRuntime && window.electronAPI?.versions?.electron
+        ? `Electron ${window.electronAPI.versions.electron}`
+        : "Navegador",
+    [isDesktopRuntime],
+  );
+  const releaseChannelLabel = useMemo(() => formatReleaseChannelLabel(APP_RELEASE_CHANNEL), []);
+  const defaultInputDeviceLabel = useMemo(
+    () => formatDeviceOptionLabel(audioInputs[0]?.label, "Microfone"),
+    [audioInputs],
+  );
+  const defaultOutputDeviceLabel = useMemo(
+    () => formatDeviceOptionLabel(audioOutputs[0]?.label, "Saída"),
+    [audioOutputs],
+  );
+  const inputDeviceOptions = useMemo(
+    () => buildUniqueAudioDeviceOptions(audioInputs, defaultInputDeviceLabel, "Microfone", selectedInputId),
+    [audioInputs, defaultInputDeviceLabel, selectedInputId],
+  );
+  const outputDeviceOptions = useMemo(
+    () => buildUniqueAudioDeviceOptions(audioOutputs, defaultOutputDeviceLabel, "Dispositivo de saída", selectedOutputId),
+    [audioOutputs, defaultOutputDeviceLabel, selectedOutputId],
+  );
+  const selectedInputDeviceOption = useMemo(
+    () => inputDeviceOptions.find((option) => option.value === selectedInputId) ?? inputDeviceOptions[0] ?? null,
+    [inputDeviceOptions, selectedInputId],
+  );
+  const selectedOutputDeviceOption = useMemo(
+    () => outputDeviceOptions.find((option) => option.value === selectedOutputId) ?? outputDeviceOptions[0] ?? null,
+    [outputDeviceOptions, selectedOutputId],
+  );
+  const settingsSidebarVersionPrimary = `Messly ${settingsVersion}`;
+  const settingsSidebarVersionSecondary = `${releaseChannelLabel} · ${runtimePlatformLabel} · ${runtimeEngineLabel}`;
+  const pendingProfile = useMemo(() => {
+    if (!user?.uid || typeof window === "undefined") {
+      return null;
+    }
+    const candidate = loadPendingProfile();
+    if (!candidate || candidate.firebaseUid !== user.uid) {
+      return null;
+    }
+    return candidate;
+  }, [user?.uid]);
+  const sessionFallbackUsername = useMemo(
+    () => deriveSessionFallbackUsername(user?.uid ?? null, pendingProfile?.username ?? null),
+    [pendingProfile?.username, user?.uid],
+  );
+  const sessionFallbackDisplayName = useMemo(
+    () =>
+      String(pendingProfile?.displayName ?? "").trim() ||
+      String(user?.displayName ?? "").trim() ||
+      sessionFallbackUsername ||
+      "Usuário",
+    [pendingProfile?.displayName, sessionFallbackUsername, user?.displayName],
+  );
 
   const setTemporaryPreviewUrl = (kind: ProfileMediaKind, nextUrl: string): void => {
     if (kind === "avatar") {
@@ -948,16 +1998,18 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
 
       setAudioInputs(nextInputs);
       setAudioOutputs(nextOutputs);
-      setSelectedInputId((current) =>
-        current ||
-        nextInputs[0]?.deviceId ||
-        "",
-      );
-      setSelectedOutputId((current) =>
-        current ||
-        nextOutputs[0]?.deviceId ||
-        "",
-      );
+      setSelectedInputId((current) => {
+        if (!current) {
+          return "";
+        }
+        return nextInputs.some((device) => device.deviceId === current) ? current : "";
+      });
+      setSelectedOutputId((current) => {
+        if (!current) {
+          return "";
+        }
+        return nextOutputs.some((device) => device.deviceId === current) ? current : "";
+      });
     } catch {
       // Ignore enumerateDevices failures on unsupported environments.
     }
@@ -965,7 +2017,7 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
 
   const startMicTest = async (): Promise<void> => {
     if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
-      setMicTestError("Teste de microfone indisponivel neste ambiente.");
+      setMicTestError("Teste de microfone indisponível neste ambiente.");
       return;
     }
 
@@ -1046,7 +2098,7 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
       micTestAnimationFrameRef.current = window.requestAnimationFrame(tick);
     } catch {
       stopMicTest();
-      setMicTestError("Nao foi possivel acessar o microfone para teste.");
+      setMicTestError("Não foi possível acessar o microfone para teste.");
     }
   };
 
@@ -1065,31 +2117,61 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
     }
   };
 
+  const handleSelectInputDevice = (value: string): void => {
+    setSelectedInputId(value);
+    setIsInputDeviceSelectOpen(false);
+  };
+
+  const handleSelectOutputDevice = (value: string): void => {
+    setSelectedOutputId(value);
+    setIsOutputDeviceSelectOpen(false);
+  };
+
   const handleManualMicSensitivityChange = (value: number): void => {
     setManualMicSensitivity(clamp(Math.round(value), -100, 0));
   };
 
+  const handleMicSensitivitySliderChange = (value: number): void => {
+    if (autoMicSensitivity) {
+      setAutoMicSensitivity(false);
+    }
+    handleManualMicSensitivityChange(value);
+  };
+
   useEffect(() => {
-    const firebaseDisplayName = (user?.displayName ?? "").trim();
-    if (!firebaseDisplayName) {
+    if (!sessionFallbackDisplayName) {
       return;
     }
 
     setDisplayName((current) => {
       const trimmed = current.trim();
-      if (trimmed && trimmed !== "Nome") {
+      if (trimmed && trimmed !== "Nome" && trimmed !== "Usuário") {
         return current;
       }
-      return firebaseDisplayName;
+      return sessionFallbackDisplayName;
     });
     setSavedDisplayName((current) => {
       const trimmed = current.trim();
-      if (trimmed && trimmed !== "Nome") {
+      if (trimmed && trimmed !== "Nome" && trimmed !== "Usuário") {
         return current;
       }
-      return firebaseDisplayName;
+      return sessionFallbackDisplayName;
     });
-  }, [user?.displayName]);
+  }, [sessionFallbackDisplayName]);
+
+  useEffect(() => {
+    if (!sessionFallbackUsername) {
+      return;
+    }
+
+    setUsername((current) => {
+      const trimmed = current.trim();
+      if (trimmed && trimmed !== "username" && trimmed !== "usuario") {
+        return current;
+      }
+      return sessionFallbackUsername;
+    });
+  }, [sessionFallbackUsername]);
 
   useEffect(() => {
     const normalizedCurrentUserId = String(currentUserId ?? "").trim();
@@ -1100,12 +2182,29 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
   }, [currentUserId]);
 
   useEffect(() => {
+    setSpotifyConnection(readSpotifyConnection(spotifyConnectionScope));
+    return subscribeSpotifyConnection(spotifyConnectionScope, setSpotifyConnection);
+  }, [spotifyConnectionScope]);
+
+  useEffect(() => {
     const normalizedColor = normalizeBannerColor(bannerColor) ?? DEFAULT_BANNER_COLOR;
     const nextHsv = hexToHsv(normalizedColor);
     setBannerColorHue(nextHsv.h);
     setBannerColorSaturation(nextHsv.s);
     setBannerColorValue(nextHsv.v);
   }, [bannerColor]);
+
+  useEffect(() => {
+    if (!isProfileThemeColorPickerOpen) {
+      return;
+    }
+    const normalizedColor = normalizeBannerColor(activeProfileThemePickerColor) ?? DEFAULT_PLUS_PROFILE_PRIMARY_COLOR;
+    const nextHsv = hexToHsv(normalizedColor);
+    setProfileThemeColorInput(normalizedColor.toUpperCase());
+    setProfileThemeColorHue(nextHsv.h);
+    setProfileThemeColorSaturation(nextHsv.s);
+    setProfileThemeColorValue(nextHsv.v);
+  }, [activeProfileThemePickerColor, isProfileThemeColorPickerOpen]);
 
   useEffect(() => {
     if (!isBannerColorPickerOpen) {
@@ -1133,6 +2232,75 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
       window.removeEventListener("keydown", handleKeyDown);
     };
   }, [isBannerColorPickerOpen]);
+
+  useEffect(() => {
+    if (!isProfileThemeColorPickerOpen) {
+      return;
+    }
+
+    const handlePointerDown = (event: PointerEvent): void => {
+      const pickerElement = profileThemeColorPickerRef.current;
+      if (!pickerElement || !(event.target instanceof Node) || pickerElement.contains(event.target)) {
+        return;
+      }
+      setIsProfileThemeColorPickerOpen(false);
+    };
+
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") {
+        setIsProfileThemeColorPickerOpen(false);
+      }
+    };
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [isProfileThemeColorPickerOpen]);
+
+  useLayoutEffect(() => {
+    if (!isProfileThemeColorPickerOpen) {
+      setProfileThemeColorPopoverPosition(null);
+      return;
+    }
+
+    const updatePopoverPosition = (): void => {
+      const anchorElement = profileThemeColorPickerRef.current;
+      const popoverElement = profileThemeColorPopoverRef.current;
+      if (!anchorElement || !popoverElement) {
+        return;
+      }
+
+      const anchorRect = anchorElement.getBoundingClientRect();
+      const popoverRect = popoverElement.getBoundingClientRect();
+      const viewportMargin = 12;
+      const gap = 10;
+      const width = Math.max(popoverRect.width, popoverElement.offsetWidth);
+      const height = Math.max(popoverRect.height, popoverElement.offsetHeight);
+
+      const nextLeft = clamp(anchorRect.left, viewportMargin, window.innerWidth - width - viewportMargin);
+      const nextTop = clamp(anchorRect.bottom + gap, viewportMargin, window.innerHeight - height - viewportMargin);
+
+      setProfileThemeColorPopoverPosition((current) => {
+        if (current && Math.abs(current.left - nextLeft) < 0.5 && Math.abs(current.top - nextTop) < 0.5) {
+          return current;
+        }
+        return { top: nextTop, left: nextLeft };
+      });
+    };
+
+    const frameId = window.requestAnimationFrame(updatePopoverPosition);
+    window.addEventListener("resize", updatePopoverPosition);
+    window.addEventListener("scroll", updatePopoverPosition, true);
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+      window.removeEventListener("resize", updatePopoverPosition);
+      window.removeEventListener("scroll", updatePopoverPosition, true);
+    };
+  }, [isProfileThemeColorPickerOpen, profileThemeColorPickerSlot]);
 
   useEffect(() => {
     if (hasBannerMedia && isBannerColorPickerOpen) {
@@ -1207,6 +2375,7 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
       if (typeof parsed.sensitivityDb === "number" && Number.isFinite(parsed.sensitivityDb)) {
         setManualMicSensitivity(clamp(Math.round(parsed.sensitivityDb), -100, 0));
       }
+      setQosHighPriority(typeof parsed.qosHighPriority === "boolean" ? parsed.qosHighPriority : false);
       setPushToTalkEnabled(typeof parsed.pushToTalkEnabled === "boolean" ? parsed.pushToTalkEnabled : false);
       setPushToTalkBind(normalizePushToTalkBind(parsed.pushToTalkBind));
     } catch {
@@ -1236,10 +2405,19 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
       sensitivityDb: clamp(Math.round(manualMicSensitivity), -100, 0),
       pushToTalkEnabled,
       pushToTalkBind: normalizePushToTalkBind(pushToTalkBind),
+      qosHighPriority,
     };
 
     try {
       window.localStorage.setItem(audioSettingsStorageKey, JSON.stringify(payload));
+      window.dispatchEvent(
+        new CustomEvent(AUDIO_SETTINGS_UPDATED_EVENT, {
+          detail: {
+            storageKey: audioSettingsStorageKey,
+            qosHighPriority: payload.qosHighPriority,
+          },
+        }),
+      );
     } catch {
       // Ignore persistence errors.
     }
@@ -1258,6 +2436,7 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
     manualMicSensitivity,
     pushToTalkEnabled,
     pushToTalkBind,
+    qosHighPriority,
   ]);
 
   useEffect(() => {
@@ -1279,6 +2458,43 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
       navigator.mediaDevices.removeEventListener("devicechange", handleDeviceChange);
     };
   }, [activeSection]);
+
+  useEffect(() => {
+    if (!isInputDeviceSelectOpen && !isOutputDeviceSelectOpen) {
+      return;
+    }
+
+    const handlePointerDown = (event: PointerEvent): void => {
+      const target = event.target as Node | null;
+      if (!target) {
+        return;
+      }
+
+      const clickedInsideInput = inputDeviceSelectRef.current?.contains(target) ?? false;
+      const clickedInsideOutput = outputDeviceSelectRef.current?.contains(target) ?? false;
+      if (clickedInsideInput || clickedInsideOutput) {
+        return;
+      }
+
+      setIsInputDeviceSelectOpen(false);
+      setIsOutputDeviceSelectOpen(false);
+    };
+
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== "Escape") {
+        return;
+      }
+      setIsInputDeviceSelectOpen(false);
+      setIsOutputDeviceSelectOpen(false);
+    };
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [isInputDeviceSelectOpen, isOutputDeviceSelectOpen]);
 
   useEffect(() => {
     if (!listeningForBind) {
@@ -1357,6 +2573,11 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
       let data: UserProfileRow | null = null;
       const cachedIdentity = readSidebarIdentityFallback(stableFirebaseUid);
       const cachedMedia = readSidebarResolvedMediaFallback(stableFirebaseUid);
+      const cachedUsernameChangedAt = readUsernameChangeFallback(stableFirebaseUid ?? stableCurrentUserId);
+
+      if (isMounted) {
+        setAccountUsernameChangedAt(cachedUsernameChangedAt);
+      }
 
       if (isMounted && (cachedIdentity || cachedMedia)) {
         const cachedDisplayName = String(cachedIdentity?.displayName ?? "").trim();
@@ -1421,16 +2642,6 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
         }
       }
 
-      if (!data && stableFirebaseUid) {
-        const normalizedEmail = normalizeEmail(user?.email ?? "");
-        if (normalizedEmail) {
-          const { data: byEmail, error: emailError } = await queryUserByEmail(normalizedEmail);
-          if (!emailError) {
-            data = byEmail as UserProfileRow | null;
-          }
-        }
-      }
-
       if (!data) {
         try {
           if (user) {
@@ -1443,14 +2654,12 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
       }
 
       if (!data) {
-        const emailUsername = String(user?.email ?? "").trim().split("@")[0]?.trim() || "username";
-        const uidUsername = String(user?.uid ?? "").trim().slice(0, 12);
-        const fallbackUsername = cachedIdentity?.username || emailUsername || uidUsername || "username";
+        const fallbackUsername =
+          String(cachedIdentity?.username ?? "").trim() || sessionFallbackUsername || "usuario";
         const fallbackDisplayName = cachedIdentity?.displayName || (user?.displayName ?? "").trim() || fallbackUsername || "Nome";
         const fallbackAbout = String(cachedIdentity?.about ?? "").slice(0, ABOUT_MAX_LENGTH);
-        const fallbackAvatarSource =
-          cachedIdentity?.avatarKey ?? cachedIdentity?.avatarUrl ?? cachedMedia?.avatarSrc ?? null;
-        const fallbackBannerSource = cachedIdentity?.bannerKey ?? cachedMedia?.bannerSrc ?? null;
+        const fallbackAvatarSource = cachedIdentity?.avatarUrl ?? cachedMedia?.avatarSrc ?? null;
+        const fallbackBannerSource = cachedIdentity?.bannerKey ?? null;
 
         if (stableCurrentUserId) {
           setDbUserId(stableCurrentUserId);
@@ -1458,6 +2667,7 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
         setDisplayName(fallbackDisplayName);
         setSavedDisplayName(fallbackDisplayName);
         setUsername(fallbackUsername);
+        setAccountUsernameChangedAt(cachedUsernameChangedAt);
         setAbout(fallbackAbout);
         setSavedAbout(fallbackAbout);
         setAvatarKey(String(cachedIdentity?.avatarKey ?? "").trim() || null);
@@ -1475,11 +2685,14 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
         return;
       }
       const row = data as UserProfileRow;
+      const rowHasUsernameChangedAt = Object.prototype.hasOwnProperty.call(row, "username_changed_at");
+      const resolvedUsernameChangedAtFromDatabase = rowHasUsernameChangedAt
+        ? normalizeStoredIsoTimestamp(row.username_changed_at ?? null)
+        : null;
+      const resolvedUsernameChangedAt = resolvedUsernameChangedAtFromDatabase ?? cachedUsernameChangedAt;
 
       setDbUserId(row.id ?? null);
-      const emailUsername = String(user?.email ?? "").trim().split("@")[0]?.trim() || "";
-      const uidUsername = String(user?.uid ?? "").trim().slice(0, 12);
-      const resolvedUsername = (row.username ?? "").trim() || emailUsername || uidUsername || "username";
+      const resolvedUsername = (row.username ?? "").trim() || sessionFallbackUsername || "usuario";
       const resolvedDisplayName =
         (row.display_name ?? "").trim() ||
         resolvedUsername ||
@@ -1489,17 +2702,29 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
       const resolvedBannerColor = normalizeBannerColor(row.banner_color) ?? null;
       const rowHasProfileThemePrimaryColor = Object.prototype.hasOwnProperty.call(row, "profile_theme_primary_color");
       const rowHasProfileThemeAccentColor = Object.prototype.hasOwnProperty.call(row, "profile_theme_accent_color");
+      const normalizedLegacyPrimary = normalizeBannerColor(LEGACY_PLUS_PROFILE_PRIMARY_COLOR);
+      const normalizedLegacyAccent = normalizeBannerColor(LEGACY_PLUS_PROFILE_ACCENT_COLOR);
+      const normalizedRowPrimary = normalizeBannerColor(row.profile_theme_primary_color);
+      const normalizedRowAccent = normalizeBannerColor(row.profile_theme_accent_color);
       const resolvedProfileThemePrimaryColor =
-        normalizeBannerColor(row.profile_theme_primary_color) ?? DEFAULT_PLUS_PROFILE_PRIMARY_COLOR;
+        !normalizedRowPrimary || normalizedRowPrimary === normalizedLegacyPrimary
+          ? DEFAULT_PLUS_PROFILE_PRIMARY_COLOR
+          : normalizedRowPrimary;
       const resolvedProfileThemeAccentColor =
-        normalizeBannerColor(row.profile_theme_accent_color) ?? DEFAULT_PLUS_PROFILE_ACCENT_COLOR;
+        !normalizedRowAccent || normalizedRowAccent === normalizedLegacyAccent
+          ? DEFAULT_PLUS_PROFILE_ACCENT_COLOR
+          : normalizedRowAccent;
       const fallbackProfileThemePrimaryColor =
         normalizeBannerColor(savedProfileThemePrimaryColor) ?? DEFAULT_PLUS_PROFILE_PRIMARY_COLOR;
       const fallbackProfileThemeAccentColor =
         normalizeBannerColor(savedProfileThemeAccentColor) ?? DEFAULT_PLUS_PROFILE_ACCENT_COLOR;
+      const resolvedFriendRequestPrivacy = getFriendRequestPrivacySettings(row);
       setDisplayName(resolvedDisplayName);
       setSavedDisplayName(resolvedDisplayName);
       setUsername(resolvedUsername);
+      setAccountUsernameChangedAt(resolvedUsernameChangedAt);
+      setFriendRequestPrivacy(resolvedFriendRequestPrivacy);
+      setFriendRequestPrivacyError(null);
       setAbout(resolvedAbout);
       setSavedAbout(resolvedAbout);
       setBannerColor(resolvedBannerColor);
@@ -1528,6 +2753,7 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
       setAvatarHash((row.avatar_hash ?? "").trim() || null);
       setBannerKey((row.banner_key ?? "").trim() || null);
       setBannerHash((row.banner_hash ?? "").trim() || null);
+      writeUsernameChangeFallback(stableFirebaseUid ?? row.id ?? stableCurrentUserId, resolvedUsernameChangedAt);
       setIsProfileIdentityLoading(false);
     }
 
@@ -1540,7 +2766,326 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
     return () => {
       isMounted = false;
     };
-  }, [currentUserId, user?.displayName, user?.email, user?.uid]);
+  }, [currentUserId, sessionFallbackUsername, user?.displayName, user?.uid]);
+
+  useEffect(() => {
+    const resolvedUserId = String(dbUserId ?? currentUserId ?? "").trim();
+    if (!resolvedUserId) {
+      return;
+    }
+
+    const usernameChangeStorageScope = user?.uid ?? resolvedUserId;
+
+    const handleProfileUpdated = (event: Event): void => {
+      const detail = (event as CustomEvent<ProfileUpdatedDetail>).detail;
+      if (!detail?.userId || detail.userId !== resolvedUserId) {
+        return;
+      }
+
+      if (Object.prototype.hasOwnProperty.call(detail, "username")) {
+        const nextUsername = String(detail.username ?? "").trim().toLowerCase() || username;
+        setUsername(nextUsername);
+        if (accountModalKind !== "username") {
+          setAccountUsernameInput(nextUsername);
+        }
+      }
+
+      if (Object.prototype.hasOwnProperty.call(detail, "display_name")) {
+        const fallbackUsername = String(detail.username ?? username).trim().toLowerCase();
+        const nextDisplayName = String(detail.display_name ?? "").trim() || fallbackUsername || "Nome";
+        setDisplayName(nextDisplayName);
+        setSavedDisplayName(nextDisplayName);
+      }
+
+      if (Object.prototype.hasOwnProperty.call(detail, "about")) {
+        const nextAbout = String(detail.about ?? "").slice(0, ABOUT_MAX_LENGTH);
+        setAbout(nextAbout);
+        setSavedAbout(nextAbout);
+      }
+
+      if (Object.prototype.hasOwnProperty.call(detail, "banner_color")) {
+        const nextBannerColor = normalizeBannerColor(detail.banner_color) ?? null;
+        setBannerColor(nextBannerColor);
+        setSavedBannerColor(nextBannerColor);
+        setBannerColorInput(getBannerColorInputValue(nextBannerColor));
+      }
+
+      const hasPrimary = Object.prototype.hasOwnProperty.call(detail, "profile_theme_primary_color");
+      const hasAccent = Object.prototype.hasOwnProperty.call(detail, "profile_theme_accent_color");
+      if (hasPrimary || hasAccent) {
+        const nextPrimary = hasPrimary
+          ? normalizeBannerColor(detail.profile_theme_primary_color) ?? DEFAULT_PLUS_PROFILE_PRIMARY_COLOR
+          : normalizeBannerColor(profileThemePrimaryColor) ?? DEFAULT_PLUS_PROFILE_PRIMARY_COLOR;
+        const nextAccent = hasAccent
+          ? normalizeBannerColor(detail.profile_theme_accent_color) ?? DEFAULT_PLUS_PROFILE_ACCENT_COLOR
+          : normalizeBannerColor(profileThemeAccentColor) ?? DEFAULT_PLUS_PROFILE_ACCENT_COLOR;
+
+        setProfileThemePrimaryColor(nextPrimary);
+        setSavedProfileThemePrimaryColor(nextPrimary);
+        setProfileThemeAccentColor(nextAccent);
+        setSavedProfileThemeAccentColor(nextAccent);
+        writeProfilePlusThemeSettings(user?.uid ?? null, {
+          primary: nextPrimary,
+          accent: nextAccent,
+        });
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(
+            new CustomEvent(PROFILE_PLUS_THEME_UPDATED_EVENT, {
+              detail: {
+                userUid: user?.uid ?? null,
+                primary: nextPrimary,
+                accent: nextAccent,
+              },
+            }),
+          );
+        }
+      }
+
+      if (Object.prototype.hasOwnProperty.call(detail, "username_changed_at")) {
+        const normalizedChangedAt = normalizeStoredIsoTimestamp(detail.username_changed_at ?? null);
+        setAccountUsernameChangedAt(normalizedChangedAt);
+        writeUsernameChangeFallback(usernameChangeStorageScope, normalizedChangedAt);
+      }
+    };
+
+    const handleProfileMediaUpdated = (event: Event): void => {
+      const detail = (event as CustomEvent<ProfileMediaUpdatedDetail>).detail;
+      if (!detail?.userId || detail.userId !== resolvedUserId) {
+        return;
+      }
+
+      if (Object.prototype.hasOwnProperty.call(detail, "avatar_key")) {
+        setAvatarKey(detail.avatar_key ?? null);
+      }
+      if (Object.prototype.hasOwnProperty.call(detail, "avatar_hash")) {
+        setAvatarHash(detail.avatar_hash ?? null);
+      }
+      if (Object.prototype.hasOwnProperty.call(detail, "avatar_url")) {
+        setAvatarUrl(detail.avatar_url ?? null);
+      }
+
+      if (Object.prototype.hasOwnProperty.call(detail, "banner_key")) {
+        setBannerKey(detail.banner_key ?? null);
+      }
+      if (Object.prototype.hasOwnProperty.call(detail, "banner_hash")) {
+        setBannerHash(detail.banner_hash ?? null);
+      }
+      if (Object.prototype.hasOwnProperty.call(detail, "banner_color")) {
+        const nextBannerColor = normalizeBannerColor(detail.banner_color) ?? null;
+        setBannerColor(nextBannerColor);
+        setSavedBannerColor(nextBannerColor);
+        setBannerColorInput(getBannerColorInputValue(nextBannerColor));
+      }
+
+      const avatarKeyTouched = Object.prototype.hasOwnProperty.call(detail, "avatar_key");
+      const avatarUrlTouched = Object.prototype.hasOwnProperty.call(detail, "avatar_url");
+      if ((avatarKeyTouched && detail.avatar_key == null) || (avatarUrlTouched && detail.avatar_url == null)) {
+        setAvatarSrc("");
+      }
+
+      const bannerKeyTouched = Object.prototype.hasOwnProperty.call(detail, "banner_key");
+      const bannerHashTouched = Object.prototype.hasOwnProperty.call(detail, "banner_hash");
+      if ((bannerKeyTouched && detail.banner_key == null) || (bannerHashTouched && detail.banner_hash == null)) {
+        setBannerSrc(getDefaultBannerUrl());
+      }
+    };
+
+    window.addEventListener("messly:profile-updated", handleProfileUpdated as EventListener);
+    window.addEventListener("messly:profile-media-updated", handleProfileMediaUpdated as EventListener);
+    return () => {
+      window.removeEventListener("messly:profile-updated", handleProfileUpdated as EventListener);
+      window.removeEventListener("messly:profile-media-updated", handleProfileMediaUpdated as EventListener);
+    };
+  }, [accountModalKind, currentUserId, dbUserId, profileThemeAccentColor, profileThemePrimaryColor, user?.uid, username]);
+
+  useEffect(() => {
+    if (activeSection !== "devices") {
+      return;
+    }
+
+    const firebaseUid = String(user?.uid ?? "").trim();
+    if (!firebaseUid) {
+      setDeviceSessions([]);
+      setDeviceSessionsError("Sessão atual indisponível.");
+      setIsDeviceSessionsLoading(false);
+      return;
+    }
+
+    const currentFallbackSession: DeviceSessionItem | null = currentPresenceDeviceId
+      ? {
+          deviceId: currentPresenceDeviceId,
+          platform: currentPresenceDeviceMetadata.platform,
+          state: "online",
+          clientName: currentPresenceDeviceMetadata.clientName,
+          osName: currentPresenceDeviceMetadata.osName,
+          locationLabel: currentPresenceDeviceMetadata.locationLabel,
+          lastActive: Date.now(),
+          updatedAt: Date.now(),
+          isCurrent: true,
+          source: "presence",
+        }
+      : null;
+
+    setDeviceSessions(currentFallbackSession ? [currentFallbackSession] : []);
+    setDeviceSessionsError(null);
+    setIsDeviceSessionsLoading(true);
+    let isCancelled = false;
+    let didReceivePresenceSnapshot = false;
+    let didApplyServerSessions = false;
+    let shouldUsePresenceFallback = false;
+    let lastPresenceItems: DeviceSessionItem[] | null = null;
+    let didReceivePresenceError = false;
+    const isSuppressedDevice = (deviceIdRaw: string): boolean => {
+      const deviceId = String(deviceIdRaw ?? "").trim();
+      if (!deviceId) {
+        return false;
+      }
+
+      const now = Date.now();
+      const suppressionMap = recentlyEndedDeviceSessionsRef.current;
+      for (const [id, expiresAt] of suppressionMap.entries()) {
+        if (!Number.isFinite(expiresAt) || expiresAt <= now) {
+          suppressionMap.delete(id);
+        }
+      }
+
+      const expiresAt = suppressionMap.get(deviceId);
+      return Number.isFinite(expiresAt) && (expiresAt as number) > now;
+    };
+    const isDismissedSession = (sessionIdRaw: string): boolean => {
+      const sessionId = String(sessionIdRaw ?? "").trim();
+      if (!sessionId) {
+        return false;
+      }
+
+      const now = Date.now();
+      const dismissedMap = dismissedLoginSessionsRef.current;
+      let mutated = false;
+      for (const [id, dismissedAt] of dismissedMap.entries()) {
+        if (!Number.isFinite(dismissedAt) || dismissedAt + DISMISSED_LOGIN_SESSIONS_TTL_MS <= now) {
+          dismissedMap.delete(id);
+          mutated = true;
+        }
+      }
+      if (mutated) {
+        writeDismissedLoginSessions(dismissedLoginSessionsStorageScope, dismissedMap);
+      }
+
+      return dismissedMap.has(sessionId);
+    };
+    const applyPresenceFallback = (): void => {
+      if (isCancelled || !shouldUsePresenceFallback || didApplyServerSessions) {
+        return;
+      }
+
+      if (didReceivePresenceError) {
+        setDeviceSessions(currentFallbackSession ? [currentFallbackSession] : []);
+        setDeviceSessionsError("Não foi possível carregar os dispositivos desta conta.");
+        setIsDeviceSessionsLoading(false);
+        return;
+      }
+
+      if (lastPresenceItems !== null) {
+        const hasDismissedSessions = dismissedLoginSessionsRef.current.size > 0;
+        const basePresenceItems = lastPresenceItems as DeviceSessionItem[];
+        const visiblePresenceItems = hasDismissedSessions
+          ? basePresenceItems.filter((session) => session.isCurrent)
+          : basePresenceItems;
+        setDeviceSessions(visiblePresenceItems);
+        setDeviceSessionsError(null);
+        setIsDeviceSessionsLoading(false);
+        return;
+      }
+
+      if (didReceivePresenceSnapshot) {
+        setDeviceSessions(currentFallbackSession ? [currentFallbackSession] : []);
+        setDeviceSessionsError(null);
+        setIsDeviceSessionsLoading(false);
+        return;
+      }
+    };
+    const unsubscribePresence = () => {};
+
+    const cachedLoginSessions = readCachedLoginSessions(loginSessionsCacheStorageScope).filter(
+      (session) => !isSuppressedDevice(session.id) && !isDismissedSession(session.id),
+    );
+    if (cachedLoginSessions.length > 0) {
+      const mappedCachedSessions = mapLoginSessionsToDeviceItems(
+        cachedLoginSessions,
+        getCurrentLoginSessionId(),
+        currentPresenceDeviceMetadata,
+      );
+      const currentOnlyCachedSessions = mappedCachedSessions.filter((session) => session.isCurrent);
+      setDeviceSessions(currentOnlyCachedSessions.length > 0 ? currentOnlyCachedSessions : mappedCachedSessions);
+      setIsDeviceSessionsLoading(false);
+    }
+
+    void (async () => {
+      try {
+        const loginSessions = await listActiveLoginSessions();
+        if (isCancelled) {
+          return;
+        }
+
+        const visibleLoginSessions = loginSessions.filter(
+          (session) => !isSuppressedDevice(session.id) && !isDismissedSession(session.id),
+        );
+
+        if (visibleLoginSessions.length > 0) {
+          didApplyServerSessions = true;
+          writeCachedLoginSessions(loginSessionsCacheStorageScope, visibleLoginSessions);
+          unsubscribePresence();
+          setDeviceSessions(
+            mapLoginSessionsToDeviceItems(
+              visibleLoginSessions,
+              getCurrentLoginSessionId(),
+              currentPresenceDeviceMetadata,
+            ),
+          );
+          setDeviceSessionsError(null);
+          setIsDeviceSessionsLoading(false);
+          return;
+        }
+
+        didApplyServerSessions = true;
+        writeCachedLoginSessions(loginSessionsCacheStorageScope, []);
+        unsubscribePresence();
+        setDeviceSessions(currentFallbackSession ? [currentFallbackSession] : []);
+        setDeviceSessionsError(null);
+        setIsDeviceSessionsLoading(false);
+        return;
+      } catch (error) {
+        console.warn("[devices:login-sessions]", error);
+      }
+
+      if (isCancelled || didApplyServerSessions) {
+        return;
+      }
+
+      if (cachedLoginSessions.length > 0) {
+        setIsDeviceSessionsLoading(false);
+        return;
+      }
+
+      shouldUsePresenceFallback = true;
+      applyPresenceFallback();
+      if (!didReceivePresenceSnapshot) {
+        setIsDeviceSessionsLoading(false);
+      }
+    })();
+
+    return () => {
+      isCancelled = true;
+      unsubscribePresence();
+    };
+  }, [
+    activeSection,
+    currentPresenceDeviceId,
+    currentPresenceDeviceMetadata,
+    dismissedLoginSessionsStorageScope,
+    loginSessionsCacheStorageScope,
+    user?.uid,
+  ]);
 
   useEffect(() => {
     if (activeSection !== "social") {
@@ -1549,7 +3094,7 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
 
     if (!dbUserId) {
       setBlockedAccounts([]);
-      setBlockedAccountsError("Usuario ainda nao sincronizado.");
+      setBlockedAccountsError("Usuário ainda não sincronizado.");
       return;
     }
 
@@ -1573,8 +3118,8 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
         setBlockedAccounts([]);
         setBlockedAccountsError(
           isUserBlocksUnavailableError(blocksError)
-            ? "Tabela user_blocks indisponivel no banco."
-            : "Nao foi possivel carregar contas bloqueadas.",
+            ? "Tabela user_blocks indisponível no banco."
+            : "Não foi possível carregar contas bloqueadas.",
         );
         setIsBlockedAccountsLoading(false);
         return;
@@ -1588,6 +3133,13 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
       const blockedIds = blocks
         .map((item) => String(item.blocked_id ?? "").trim())
         .filter((value): value is string => value.length > 0);
+      const blockedCreatedAtById = new Map<string, string | null>();
+      blocks.forEach((item) => {
+        const blockedId = String(item.blocked_id ?? "").trim();
+        if (blockedId && !blockedCreatedAtById.has(blockedId)) {
+          blockedCreatedAtById.set(blockedId, item.created_at ?? null);
+        }
+      });
 
       if (blockedIds.length === 0) {
         setBlockedAccounts([]);
@@ -1596,7 +3148,7 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
       }
 
       const { data: usersData, error: usersError } = await supabase
-        .from("users")
+        .from("profiles")
         .select(BLOCKED_USERS_SELECT_COLUMNS)
         .in("id", blockedIds);
 
@@ -1607,7 +3159,7 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
         const message = String(resolvedUsersError.message ?? "");
         if (isUsersSchemaColumnCacheError(message) || isMissingAvatarUrlColumnError(message)) {
           const fallbackUsersResult = await supabase
-            .from("users")
+            .from("profiles")
             .select(BLOCKED_USERS_SELECT_COLUMNS_FALLBACK)
             .in("id", blockedIds);
           resolvedUsersData = fallbackUsersResult.data as BlockedUserRow[] | null;
@@ -1621,7 +3173,7 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
 
       if (resolvedUsersError) {
         setBlockedAccounts([]);
-        setBlockedAccountsError("Nao foi possivel carregar os perfis bloqueados.");
+        setBlockedAccountsError("Não foi possível carregar os perfis bloqueados.");
         setIsBlockedAccountsLoading(false);
         return;
       }
@@ -1647,20 +3199,21 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
           const avatarSource = String(userRow?.avatar_key ?? "").trim() || legacyAvatarUrl || null;
 
           let resolvedAvatar = await getAvatarUrl(blockedId, avatarSource, userRow?.avatar_hash ?? null);
-          if (resolvedAvatar === getDefaultAvatarUrl() && legacyAvatarUrl) {
+          if (isDefaultAvatarUrl(resolvedAvatar) && legacyAvatarUrl) {
             const resolvedLegacyAvatar = await getAvatarUrl(blockedId, legacyAvatarUrl, userRow?.avatar_hash ?? null);
-            if (resolvedLegacyAvatar !== getDefaultAvatarUrl()) {
+            if (!isDefaultAvatarUrl(resolvedLegacyAvatar)) {
               resolvedAvatar = resolvedLegacyAvatar;
             }
           }
 
-          const fallbackAvatar = getNameAvatarUrl(resolvedDisplayName || resolvedUsername || "U");
+          const fallbackAvatar = getDefaultAvatarUrl(blockedId || resolvedUsername || resolvedDisplayName);
 
           return {
             userId: blockedId,
             username: resolvedUsername,
             displayName: resolvedDisplayName,
-            avatarSrc: resolvedAvatar === getDefaultAvatarUrl() ? fallbackAvatar : resolvedAvatar,
+            avatarSrc: isDefaultAvatarUrl(resolvedAvatar) ? fallbackAvatar : resolvedAvatar,
+            blockedAtLabel: formatBlockedDateLabel(blockedCreatedAtById.get(blockedId) ?? null),
           } satisfies BlockedAccountItem;
         }),
       );
@@ -1686,7 +3239,7 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
     }
 
     if (!isWindowsDesktopRuntime) {
-      setWindowsBehaviorError("Disponivel apenas no aplicativo desktop para Windows.");
+      setWindowsBehaviorError("Disponível apenas no aplicativo desktop para Windows.");
       return;
     }
 
@@ -1704,18 +3257,19 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
         if (!isMounted || !settings) {
           return;
         }
+        const launchAtStartup = Boolean(settings.launchAtStartup);
         windowsBehaviorLoadedRef.current = true;
         setWindowsBehaviorSettings({
-          startMinimized: Boolean(settings.startMinimized),
+          startMinimized: launchAtStartup && Boolean(settings.startMinimized),
           closeToTray: Boolean(settings.closeToTray),
-          launchAtStartup: Boolean(settings.launchAtStartup),
+          launchAtStartup,
         });
       })
       .catch(() => {
         if (!isMounted) {
           return;
         }
-        setWindowsBehaviorError("Nao foi possivel carregar as configuracoes do Windows.");
+        setWindowsBehaviorError("Não foi possível carregar as configurações do Windows.");
       })
       .finally(() => {
         if (!isMounted) {
@@ -1729,23 +3283,37 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
     };
   }, [activeSection, canManageWindowsBehavior, isWindowsDesktopRuntime]);
 
-  const safeUsername = useMemo(() => username.trim() || "username", [username]);
-  const safeDisplayName = useMemo(() => displayName.trim() || safeUsername || "Nome", [displayName, safeUsername]);
+  const safeUsername = useMemo(() => username.trim() || sessionFallbackUsername || "usuario", [sessionFallbackUsername, username]);
+  const safeDisplayName = useMemo(
+    () => displayName.trim() || sessionFallbackDisplayName || safeUsername || "Usuário",
+    [displayName, safeUsername, sessionFallbackDisplayName],
+  );
+  const usernameCooldownState = useMemo(
+    () => getUsernameCooldownState(accountUsernameChangedAt),
+    [accountUsernameChangedAt],
+  );
+  const usernameCooldownMessage = useMemo(() => {
+    if (!usernameCooldownState.isLocked) {
+      return null;
+    }
+
+    const nextAllowedLabel = usernameCooldownState.nextAllowedLabel;
+    if (nextAllowedLabel) {
+      return `Você poderá alterar o nome de usuário novamente em ${nextAllowedLabel}.`;
+    }
+
+    return `Você poderá alterar o nome de usuário novamente em ${usernameCooldownState.remainingDays} dias.`;
+  }, [usernameCooldownState]);
   const safeAbout = useMemo(() => about.trim(), [about]);
   const micMeterBars = useMemo(
     () =>
-      Array.from({ length: 20 }, (_, index) => {
-        const ramp = 1 - index / 24;
-        const levelContribution = localMicLevel * 1.15;
-        const peakContribution = localMicPeak * 0.35;
-        return clamp(levelContribution * ramp + peakContribution * 0.22, 0.08, 1);
+      Array.from({ length: 56 }, (_, index) => {
+        const shape = 0.72 + Math.sin(index * 0.42) * 0.16;
+        const levelContribution = localMicLevel * 1.28;
+        const peakContribution = localMicPeak * 0.44;
+        return clamp((levelContribution + peakContribution) * shape, 0.14, 1);
       }),
     [localMicLevel, localMicPeak],
-  );
-  const safeBannerColor = useMemo(() => normalizeBannerColor(bannerColor), [bannerColor]);
-  const bannerColorSwatch = useMemo(
-    () => normalizeBannerColor(bannerColor) ?? normalizeBannerColor(savedBannerColor) ?? DEFAULT_BANNER_COLOR,
-    [bannerColor, savedBannerColor],
   );
   const hasUnsavedProfileChanges = useMemo(
     () =>
@@ -1769,20 +3337,266 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
       savedProfileThemePrimaryColor,
     ],
   );
+  const previewThemePrimaryColor = draftProfileTheme.primary;
+  const previewThemeAccentColor = draftProfileTheme.accent;
+  const previewBannerColor = safeBannerColor;
   const aboutCount = about.length;
   const isEyeDropperSupported = typeof window !== "undefined" && "EyeDropper" in window;
-  const blockedAccountsCountLabel = useMemo(() => {
-    const count = blockedAccounts.length;
-    return count === 1 ? "1 conta" : `${count} contas`;
-  }, [blockedAccounts.length]);
+  const normalizedBlockedSearchQuery = blockedSearchQuery.trim().toLocaleLowerCase();
+  const filteredBlockedAccounts = useMemo(() => {
+    if (!normalizedBlockedSearchQuery) {
+      return blockedAccounts;
+    }
+
+    return blockedAccounts.filter((account) => {
+      const displayNameMatch = account.displayName.trim().toLocaleLowerCase().includes(normalizedBlockedSearchQuery);
+      const usernameMatch = account.username.trim().toLocaleLowerCase().includes(normalizedBlockedSearchQuery);
+      return displayNameMatch || usernameMatch;
+    });
+  }, [blockedAccounts, normalizedBlockedSearchQuery]);
+  const hasBlockedSearchQuery = normalizedBlockedSearchQuery.length > 0;
+  const totalBlockedAccounts = blockedAccounts.length;
+  const filteredBlockedAccountsCount = filteredBlockedAccounts.length;
+  const blockedFooterCountLabel = hasBlockedSearchQuery
+    ? `Mostrando ${filteredBlockedAccountsCount} de ${totalBlockedAccounts} usuários bloqueados`
+    : `Mostrando ${filteredBlockedAccountsCount} ${
+        filteredBlockedAccountsCount === 1 ? "usuário bloqueado" : "usuários bloqueados"
+      }`;
+  const reauthenticateCurrentEmailSession = useCallback(
+    async (password: string) => {
+      const currentEmail = normalizeEmail(user?.email ?? "");
+      if (!currentEmail) {
+        throw new Error("Sua conta atual não possui login por e-mail disponível.");
+      }
+
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: currentEmail,
+        password,
+      });
+      if (error || !data.user) {
+        throw error ?? new Error("Falha ao reautenticar.");
+      }
+      return data.user;
+    },
+    [user?.email],
+  );
+  const isRecentlyEndedDeviceSession = useCallback((deviceIdRaw: string): boolean => {
+    const deviceId = String(deviceIdRaw ?? "").trim();
+    if (!deviceId) {
+      return false;
+    }
+
+    const now = Date.now();
+    const suppressionMap = recentlyEndedDeviceSessionsRef.current;
+    for (const [id, expiresAt] of suppressionMap.entries()) {
+      if (!Number.isFinite(expiresAt) || expiresAt <= now) {
+        suppressionMap.delete(id);
+      }
+    }
+
+    const expiresAt = suppressionMap.get(deviceId);
+    return Number.isFinite(expiresAt) && (expiresAt as number) > now;
+  }, []);
+  const markDeviceSessionRecentlyEnded = useCallback((deviceIdRaw: string): void => {
+    const deviceId = String(deviceIdRaw ?? "").trim();
+    if (!deviceId) {
+      return;
+    }
+
+    recentlyEndedDeviceSessionsRef.current.set(deviceId, Date.now() + ENDED_DEVICE_SESSION_SUPPRESS_TTL_MS);
+  }, []);
+  const rememberDismissedLoginSession = useCallback(
+    (sessionIdRaw: string): void => {
+      const sessionId = String(sessionIdRaw ?? "").trim();
+      if (!sessionId) {
+        return;
+      }
+
+      const dismissedMap = dismissedLoginSessionsRef.current;
+      dismissedMap.set(sessionId, Date.now());
+      writeDismissedLoginSessions(dismissedLoginSessionsStorageScope, dismissedMap);
+    },
+    [dismissedLoginSessionsStorageScope],
+  );
+  const currentDeviceSession = useMemo(
+    () => deviceSessions.find((session) => session.isCurrent) ?? null,
+    [deviceSessions],
+  );
+  const otherDeviceSessions = useMemo(
+    () => deviceSessions.filter((session) => !session.isCurrent),
+    [deviceSessions],
+  );
+  const openEndDeviceSessionModal = useCallback(
+    (session: DeviceSessionItem): void => {
+      if (endingDeviceSessionId || !isUuidLike(session.deviceId)) {
+        return;
+      }
+
+      setPendingDeviceSession(session);
+      setPendingDeviceSessionPasswordInput("");
+      setPendingDeviceSessionFeedback(null);
+      setDeviceSessionsError(null);
+    },
+    [endingDeviceSessionId],
+  );
+  const closeEndDeviceSessionModal = useCallback((): void => {
+    if (endingDeviceSessionId) {
+      return;
+    }
+
+    setPendingDeviceSession(null);
+    setPendingDeviceSessionPasswordInput("");
+    setPendingDeviceSessionFeedback(null);
+  }, [endingDeviceSessionId]);
+  const handleEndDeviceSession = useCallback(
+    async (session: DeviceSessionItem, password: string): Promise<boolean> => {
+      const sessionId = session.deviceId;
+      if (endingDeviceSessionId || !isUuidLike(sessionId)) {
+        return false;
+      }
+
+      if (!String(password ?? "").trim()) {
+        setPendingDeviceSessionFeedback({ tone: "error", message: "Digite sua senha atual para continuar." });
+        return false;
+      }
+
+      setEndingDeviceSessionId(sessionId);
+      setDeviceSessionsError(null);
+      setPendingDeviceSessionFeedback(null);
+
+      try {
+        await reauthenticateCurrentEmailSession(password);
+
+        if (session.source === "loginSession") {
+          await endLoginSessionById(sessionId);
+        } else {
+          // Presence cleanup no longer uses Firebase; rely on session invalidation only.
+        }
+        if (session.source === "loginSession") {
+          rememberDismissedLoginSession(sessionId);
+          const cached = readCachedLoginSessions(loginSessionsCacheStorageScope);
+          if (cached.length > 0) {
+            const nextCached = cached.filter((entry) => entry.id !== sessionId);
+            writeCachedLoginSessions(loginSessionsCacheStorageScope, nextCached);
+          }
+        } else {
+          markDeviceSessionRecentlyEnded(sessionId);
+        }
+        setDeviceSessions((current) => current.filter((session) => session.deviceId !== sessionId));
+        return true;
+      } catch (error) {
+        console.error("[devices:end-session]", error);
+        setPendingDeviceSessionFeedback({ tone: "error", message: getAccountActionErrorMessage(error) });
+        setDeviceSessionsError("Não foi possível encerrar este dispositivo agora.");
+        return false;
+      } finally {
+        setEndingDeviceSessionId((current) => (current === sessionId ? null : current));
+      }
+    },
+    [
+      endingDeviceSessionId,
+      markDeviceSessionRecentlyEnded,
+      loginSessionsCacheStorageScope,
+      reauthenticateCurrentEmailSession,
+      rememberDismissedLoginSession,
+      user?.uid,
+    ],
+  );
+  const handleConfirmEndDeviceSession = useCallback(async (): Promise<void> => {
+    if (!pendingDeviceSession) {
+      return;
+    }
+
+    const didEndSession = await handleEndDeviceSession(pendingDeviceSession, pendingDeviceSessionPasswordInput);
+    if (!didEndSession) {
+      return;
+    }
+
+    setPendingDeviceSession(null);
+    setPendingDeviceSessionPasswordInput("");
+    setPendingDeviceSessionFeedback(null);
+  }, [handleEndDeviceSession, pendingDeviceSession, pendingDeviceSessionPasswordInput]);
+  const spotifyOAuthEnabled = isSpotifyOAuthConfigured();
+  const isSpotifyConnected = spotifyConnection.connected;
+  const spotifyDisplayName = useMemo(
+    () => (isSpotifyConnected ? spotifyConnection.accountName || safeDisplayName || safeUsername : "Spotify"),
+    [isSpotifyConnected, safeDisplayName, safeUsername, spotifyConnection.accountName],
+  );
+  const persistSpotifyConnectionToProfile = useCallback(async (_nextConnection: SpotifyConnectionState): Promise<void> => {
+    // Perfil não armazena mais conexão Spotify; mantemos apenas local.
+    return;
+  }, []);
+
+  const handleConnectSpotify = useCallback(async (): Promise<void> => {
+    if (isSpotifyConnecting || !spotifyOAuthEnabled) {
+      return;
+    }
+
+    setSpotifyConnectionError(null);
+    setIsSpotifyConnecting(true);
+
+    try {
+      const next = await connectSpotifyOAuth(spotifyConnectionScope);
+      setSpotifyConnection(next);
+      try {
+        await persistSpotifyConnectionToProfile(next);
+      } catch {
+        setSpotifyConnectionError("Conta conectada, mas não foi possível salvar a conexão no perfil.");
+      }
+    } catch (error) {
+      const message = error instanceof Error && error.message.trim()
+        ? error.message.trim()
+        : "Não foi possível conectar a conta do Spotify.";
+      setSpotifyConnectionError(message);
+    } finally {
+      setIsSpotifyConnecting(false);
+    }
+  }, [isSpotifyConnecting, persistSpotifyConnectionToProfile, spotifyConnectionScope, spotifyOAuthEnabled]);
+
+  const handleDisconnectSpotify = useCallback(async (): Promise<void> => {
+    setSpotifyConnectionError(null);
+    const fallback = createDefaultSpotifyConnection();
+    setSpotifyConnection(fallback);
+    try {
+      const next = await disconnectSpotifyOAuth(spotifyConnectionScope);
+      setSpotifyConnection(next);
+      await persistSpotifyConnectionToProfile(next);
+    } catch {
+      setSpotifyConnectionError("A conexão foi removida só neste dispositivo. Tente novamente para atualizar o perfil.");
+    }
+  }, [persistSpotifyConnectionToProfile, spotifyConnectionScope]);
+
+  const handleSpotifyVisibilityToggle = useCallback(
+    async (key: "showOnProfile" | "showAsStatus"): Promise<void> => {
+      if (!spotifyConnection.connected) {
+        return;
+      }
+      const optimisticNext = {
+        ...spotifyConnection,
+        [key]: !spotifyConnection[key],
+        updatedAt: new Date().toISOString(),
+      };
+      setSpotifyConnection(optimisticNext);
+      try {
+        const next = await setSpotifyConnectionVisibility(spotifyConnectionScope, {
+          [key]: !spotifyConnection[key],
+        });
+        setSpotifyConnection(next);
+        await persistSpotifyConnectionToProfile(next);
+      } catch {
+        setSpotifyConnectionError("A conexão foi atualizada só neste dispositivo. Tente novamente para salvar no perfil.");
+      }
+    },
+    [persistSpotifyConnectionToProfile, spotifyConnection, spotifyConnectionScope],
+  );
 
   const handleResetProfileDraft = (): void => {
     setDisplayName(savedDisplayName);
     setAbout(savedAbout);
     setBannerColor(savedBannerColor);
     setBannerColorInput(getBannerColorInputValue(savedBannerColor));
-    setProfileThemePrimaryColor(normalizeBannerColor(savedProfileThemePrimaryColor) ?? DEFAULT_PLUS_PROFILE_PRIMARY_COLOR);
-    setProfileThemeAccentColor(normalizeBannerColor(savedProfileThemeAccentColor) ?? DEFAULT_PLUS_PROFILE_ACCENT_COLOR);
+    setProfileThemePrimaryColor(savedProfileTheme.primary);
+    setProfileThemeAccentColor(savedProfileTheme.accent);
     setProfileFeedback(null);
   };
 
@@ -1794,10 +3608,134 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
 
     if (slot === "primary") {
       setProfileThemePrimaryColor(normalized);
+      setBannerColor(normalized);
+      setBannerColorInput(getBannerColorInputValue(normalized));
     } else {
       setProfileThemeAccentColor(normalized);
     }
     setProfileFeedback(null);
+  };
+
+  const applyProfileThemeColorPickerValue = (rawValue: string): void => {
+    const normalized = normalizeBannerColor(rawValue);
+    if (!normalized) {
+      return;
+    }
+
+    handleProfileThemeColorChange(profileThemeColorPickerSlot, normalized);
+    setProfileThemeColorInput(normalized.toUpperCase());
+  };
+
+  const handleOpenProfileThemeColorPicker = (slot: ProfileThemeColorSlot): void => {
+    const normalizedColor = slot === "primary" ? draftProfileTheme.primary : draftProfileTheme.accent;
+    const nextHsv = hexToHsv(normalizedColor);
+    setIsBannerColorPickerOpen(false);
+    setProfileThemeColorPickerSlot(slot);
+    setProfileThemeColorInput(normalizedColor.toUpperCase());
+    setProfileThemeColorHue(nextHsv.h);
+    setProfileThemeColorSaturation(nextHsv.s);
+    setProfileThemeColorValue(nextHsv.v);
+    setIsProfileThemeColorPickerOpen(true);
+  };
+
+  const handleProfileThemeColorInputChange = (rawValue: string): void => {
+    const sanitized = rawValue
+      .trim()
+      .replace(/[^#0-9a-fA-F]/g, "")
+      .slice(0, 7)
+      .toUpperCase();
+    setProfileThemeColorInput(sanitized);
+
+    const normalized = normalizeBannerColor(sanitized);
+    if (normalized) {
+      applyProfileThemeColorPickerValue(normalized);
+    }
+  };
+
+  const handleProfileThemeColorInputBlur = (): void => {
+    const normalized = normalizeBannerColor(profileThemeColorInput);
+    if (normalized) {
+      applyProfileThemeColorPickerValue(normalized);
+      return;
+    }
+
+    setProfileThemeColorInput(activeProfileThemePickerColor.toUpperCase());
+  };
+
+  const updateProfileThemeColorFromArea = (clientX: number, clientY: number): void => {
+    const pickerArea = profileThemeColorAreaRef.current;
+    if (!pickerArea) {
+      return;
+    }
+
+    const bounds = pickerArea.getBoundingClientRect();
+    if (bounds.width <= 0 || bounds.height <= 0) {
+      return;
+    }
+
+    const x = clamp(clientX - bounds.left, 0, bounds.width);
+    const y = clamp(clientY - bounds.top, 0, bounds.height);
+    const nextSaturation = (x / bounds.width) * 100;
+    const nextValue = 100 - (y / bounds.height) * 100;
+    const rgb = hsvToRgb(profileThemeColorHue, nextSaturation, nextValue);
+    const nextColor = rgbToHex(rgb.r, rgb.g, rgb.b);
+
+    applyProfileThemeColorPickerValue(nextColor);
+  };
+
+  const handleProfileThemeColorAreaPointerDown = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    updateProfileThemeColorFromArea(event.clientX, event.clientY);
+  };
+
+  const handleProfileThemeColorAreaPointerMove = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    if (!event.currentTarget.hasPointerCapture(event.pointerId)) {
+      return;
+    }
+    updateProfileThemeColorFromArea(event.clientX, event.clientY);
+  };
+
+  const handleProfileThemeColorAreaPointerUp = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  };
+
+  const handleProfileThemeColorHueChange = (event: ChangeEvent<HTMLInputElement>): void => {
+    const parsedHue = Number.parseFloat(event.target.value);
+    const nextHue = Number.isFinite(parsedHue) ? clamp(parsedHue, 0, 360) : 0;
+    const rgb = hsvToRgb(nextHue, profileThemeColorSaturation, profileThemeColorValue);
+    const nextColor = rgbToHex(rgb.r, rgb.g, rgb.b);
+    applyProfileThemeColorPickerValue(nextColor);
+  };
+
+  const handleProfileThemeColorEyedropperClick = async (): Promise<void> => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const eyeDropperCtor = (
+      window as Window & {
+        EyeDropper?: new () => {
+          open: () => Promise<{ sRGBHex?: string }>;
+        };
+      }
+    ).EyeDropper;
+
+    if (!eyeDropperCtor) {
+      return;
+    }
+
+    try {
+      const picker = new eyeDropperCtor();
+      const result = await picker.open();
+      if (result?.sRGBHex) {
+        applyProfileThemeColorPickerValue(result.sRGBHex);
+      }
+    } catch {
+      // Ignore cancellations from the color picker API.
+    }
   };
 
   const handleBannerColorSelect = (rawValue: string): void => {
@@ -1833,29 +3771,73 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
     if (!canManageWindowsBehavior || !window.electronAPI?.updateWindowsSettings) {
       return;
     }
+    if (key === "startMinimized" && !windowsBehaviorSettings.launchAtStartup) {
+      return;
+    }
 
     const previous = windowsBehaviorSettings;
+    const nextPartial: Partial<WindowsBehaviorSettings> = {
+      [key]: nextValue,
+    };
+    if (key === "launchAtStartup" && !nextValue) {
+      nextPartial.startMinimized = false;
+    }
+
     const optimistic = {
       ...previous,
-      [key]: nextValue,
+      ...nextPartial,
     };
     setWindowsBehaviorSettings(optimistic);
     setSavingWindowsBehaviorKey(key);
     setWindowsBehaviorError(null);
 
     try {
-      const updated = await window.electronAPI.updateWindowsSettings({ [key]: nextValue });
+      const updated = await window.electronAPI.updateWindowsSettings(nextPartial);
+      const launchAtStartup = Boolean(updated.launchAtStartup);
       setWindowsBehaviorSettings({
-        startMinimized: Boolean(updated.startMinimized),
+        startMinimized: launchAtStartup && Boolean(updated.startMinimized),
         closeToTray: Boolean(updated.closeToTray),
-        launchAtStartup: Boolean(updated.launchAtStartup),
+        launchAtStartup,
       });
       windowsBehaviorLoadedRef.current = true;
     } catch {
       setWindowsBehaviorSettings(previous);
-      setWindowsBehaviorError("Nao foi possivel salvar a configuracao do Windows.");
+      setWindowsBehaviorError("Não foi possível salvar a configuração do Windows.");
     } finally {
       setSavingWindowsBehaviorKey((current) => (current === key ? null : current));
+    }
+  };
+
+  const handleFriendRequestPrivacyToggle = async (
+    key: keyof FriendRequestPrivacySettings,
+    nextValue: boolean,
+  ): Promise<void> => {
+    const writableUserId = String(dbUserId ?? "").trim();
+    if (!writableUserId || savingFriendRequestPrivacyKey) {
+      return;
+    }
+
+    const previousSettings = friendRequestPrivacy;
+    const nextSettings: FriendRequestPrivacySettings = {
+      ...previousSettings,
+      [key]: nextValue,
+    };
+    const dbColumn =
+      key === "allowAll" ? "friend_requests_allow_all" : "friend_requests_allow_friends_of_friends";
+
+    setFriendRequestPrivacy(nextSettings);
+    setFriendRequestPrivacyError(null);
+    setSavingFriendRequestPrivacyKey(key);
+
+    try {
+      await updateUserProfileWithSchemaFallback(writableUserId, {
+        [dbColumn]: nextValue,
+      });
+    } catch {
+      setFriendRequestPrivacy(previousSettings);
+      setFriendRequestPrivacyError("Não foi possível salvar essa permissão agora.");
+    } finally {
+      setSavingFriendRequestPrivacyKey((current) => (current === key ? null : current));
     }
   };
 
@@ -1966,8 +3948,8 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
     if (error) {
       setBlockedAccountsError(
         isUserBlocksUnavailableError(error)
-          ? "Tabela user_blocks indisponivel no banco."
-          : "Nao foi possivel desbloquear usuario.",
+          ? "Tabela user_blocks indisponível no banco."
+          : "Não foi possível desbloquear o usuário.",
       );
       setUnblockingUserId(null);
       return;
@@ -1978,10 +3960,15 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
   };
 
   const handleSaveProfileDraft = async (): Promise<void> => {
-    if (!dbUserId) {
+    let writableUserId = dbUserId;
+    if (!writableUserId) {
+      writableUserId = await refreshDbUserIdFromSession();
+    }
+
+    if (!writableUserId) {
       setProfileFeedback({
         tone: "error",
-        message: "Usuario ainda nao sincronizado. Reabra as configuracoes e tente novamente.",
+        message: "Usuário ainda não sincronizado. Reabra as configurações e tente novamente.",
       });
       return;
     }
@@ -1989,19 +3976,34 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
     const nextDisplayName = displayName.trim() || safeUsername || "Nome";
     const nextAbout = about.slice(0, ABOUT_MAX_LENGTH);
     const nextBannerColor = normalizeBannerColor(bannerColor) ?? null;
-    const nextProfileThemePrimaryColor = normalizeBannerColor(profileThemePrimaryColor) ?? DEFAULT_PLUS_PROFILE_PRIMARY_COLOR;
-    const nextProfileThemeAccentColor = normalizeBannerColor(profileThemeAccentColor) ?? DEFAULT_PLUS_PROFILE_ACCENT_COLOR;
+    const nextProfileThemePrimaryColor = draftProfileTheme.primary;
+    const nextProfileThemeAccentColor = draftProfileTheme.accent;
 
     setIsSavingProfile(true);
     setProfileFeedback(null);
     try {
-      const persistedUpdates = await updateUserProfileWithSchemaFallback(dbUserId, {
+      const savePayload: UserProfileUpdatePayload = {
         display_name: nextDisplayName,
         about: nextAbout || null,
         banner_color: nextBannerColor,
         profile_theme_primary_color: nextProfileThemePrimaryColor,
         profile_theme_accent_color: nextProfileThemeAccentColor,
-      });
+      };
+      let persistedUpdates: UserProfileUpdatePayload;
+      try {
+        persistedUpdates = await updateUserProfileWithSchemaFallback(writableUserId, savePayload);
+      } catch (error) {
+        if (!(error instanceof Error) || error.message !== USERS_UPDATE_ROW_NOT_FOUND_ERROR) {
+          throw error;
+        }
+
+        const refreshedUserId = await refreshDbUserIdFromSession();
+        if (!refreshedUserId || refreshedUserId === writableUserId) {
+          throw error;
+        }
+        writableUserId = refreshedUserId;
+        persistedUpdates = await updateUserProfileWithSchemaFallback(writableUserId, savePayload);
+      }
       const didPersistBannerColor = Object.prototype.hasOwnProperty.call(persistedUpdates, "banner_color");
       const didPersistProfileThemePrimaryColor = Object.prototype.hasOwnProperty.call(
         persistedUpdates,
@@ -2040,7 +4042,7 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
         );
       }
       const profileUpdateDetail: ProfileUpdatedDetail = {
-        userId: dbUserId,
+        userId: writableUserId,
         display_name: nextDisplayName,
         username: safeUsername,
         about: nextAbout || null,
@@ -2059,7 +4061,12 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
       if (!didPersistBannerColor) {
         setProfileFeedback({
           tone: "error",
-          message: "A coluna banner_color nao existe no banco. Rode a migracao para sincronizar a cor da faixa para todos.",
+          message: "A coluna banner_color não existe no banco. Execute a migração para sincronizar a cor da faixa para todos.",
+        });
+      } else if (!didPersistProfileThemePrimaryColor || !didPersistProfileThemeAccentColor) {
+        setProfileFeedback({
+          tone: "error",
+          message: "As colunas de tema de perfil Plus ainda não existem no banco. O visual foi salvo localmente.",
         });
       }
     } catch (error) {
@@ -2080,19 +4087,19 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
 
     void getAvatarUrl(dbUserId, avatarSource, avatarHash).then((url) => {
       if (isMounted) {
-        const resolvedUrl = String(url ?? "").trim() || getDefaultAvatarUrl();
+        const resolvedUrl = String(url ?? "").trim() || getDefaultAvatarUrl(dbUserId || user?.uid || safeUsername);
         if (temporaryAvatarUrlRef.current && url !== temporaryAvatarUrlRef.current) {
           URL.revokeObjectURL(temporaryAvatarUrlRef.current);
           temporaryAvatarUrlRef.current = null;
         }
         setAvatarSrc((current) => {
-          if (current === resolvedUrl || (resolvedUrl === getDefaultAvatarUrl() && current === "")) {
+          if (current === resolvedUrl || (isDefaultAvatarUrl(resolvedUrl) && current === "")) {
             return current;
           }
-          if (hasAvatarSource && resolvedUrl === getDefaultAvatarUrl() && current && current !== getDefaultAvatarUrl()) {
+          if (hasAvatarSource && isDefaultAvatarUrl(resolvedUrl) && current && !isDefaultAvatarUrl(current)) {
             return current;
           }
-          return resolvedUrl === getDefaultAvatarUrl() ? "" : resolvedUrl;
+          return isDefaultAvatarUrl(resolvedUrl) ? "" : resolvedUrl;
         });
       }
     });
@@ -2100,30 +4107,86 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
     return () => {
       isMounted = false;
     };
-  }, [avatarHash, avatarKey, avatarUrl, dbUserId]);
+  }, [avatarHash, avatarKey, avatarUrl, dbUserId, safeUsername, user?.uid]);
 
   useEffect(() => {
     let isMounted = true;
+    let preloadImage: HTMLImageElement | null = null;
 
     void getBannerUrl(dbUserId, bannerKey, bannerHash).then((url) => {
-      if (isMounted) {
-        if (bannerKey && url === getDefaultBannerUrl()) {
+      if (!isMounted) {
+        return;
+      }
+
+      const resolvedUrl = String(url ?? "").trim() || getDefaultBannerUrl();
+      if (bannerKey && resolvedUrl === getDefaultBannerUrl()) {
+        return;
+      }
+
+      if (temporaryBannerUrlRef.current && resolvedUrl !== temporaryBannerUrlRef.current) {
+        URL.revokeObjectURL(temporaryBannerUrlRef.current);
+        temporaryBannerUrlRef.current = null;
+      }
+
+      if (resolvedUrl === getDefaultBannerUrl()) {
+        setBannerSrc((current) => {
+          const currentTrimmed = String(current ?? "").trim();
+          if (currentTrimmed === resolvedUrl) {
+            return current;
+          }
+
+          const currentHasReusableUrl = isReusableSidebarMediaUrl(currentTrimmed) && currentTrimmed !== getDefaultBannerUrl();
+          return currentHasReusableUrl ? current : resolvedUrl;
+        });
+        return;
+      }
+
+      preloadImage = new Image();
+      preloadImage.decoding = "async";
+      preloadImage.onload = () => {
+        if (!isMounted) {
           return;
         }
-        if (temporaryBannerUrlRef.current && url !== temporaryBannerUrlRef.current) {
-          URL.revokeObjectURL(temporaryBannerUrlRef.current);
-          temporaryBannerUrlRef.current = null;
+        setBannerSrc((current) => (current === resolvedUrl ? current : resolvedUrl));
+      };
+      preloadImage.onerror = () => {
+        if (!isMounted) {
+          return;
         }
-        setBannerSrc(url);
-      }
+        if (!bannerKey) {
+          setBannerSrc((current) => (current === getDefaultBannerUrl() ? current : getDefaultBannerUrl()));
+        }
+      };
+      preloadImage.src = resolvedUrl;
     });
 
     return () => {
       isMounted = false;
+      if (preloadImage) {
+        preloadImage.onload = null;
+        preloadImage.onerror = null;
+        preloadImage = null;
+      }
     };
   }, [bannerHash, bannerKey, dbUserId]);
 
   const canUploadMedia = Boolean(dbUserId);
+  const refreshDbUserIdFromSession = useCallback(async (): Promise<string | null> => {
+    if (!user?.uid) {
+      return null;
+    }
+
+    const byUidResult = await queryUserByFirebaseUid(user.uid);
+    if (byUidResult.error) {
+      return null;
+    }
+    const resolvedId = String((byUidResult.data as UserProfileRow | null)?.id ?? "").trim();
+    if (!resolvedId) {
+      return null;
+    }
+    setDbUserId(resolvedId);
+    return resolvedId;
+  }, [user?.uid]);
 
   const publishProfileMediaChange = (detail: {
     userId: string;
@@ -2142,10 +4205,15 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
   };
 
   const uploadProfileMedia = async (kind: ProfileMediaKind, file: File): Promise<boolean> => {
-    if (!dbUserId) {
+    let writableUserId = dbUserId;
+    if (!writableUserId) {
+      writableUserId = await refreshDbUserIdFromSession();
+    }
+
+    if (!writableUserId) {
       const noSessionFeedback: UploadFeedbackState = {
         tone: "error",
-        message: "Usuario ainda nao sincronizado. Reabra as configuracoes e tente novamente.",
+        message: "Usuário ainda não sincronizado. Reabra as configurações e tente novamente.",
       };
 
       if (kind === "avatar") {
@@ -2165,7 +4233,8 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
     }
 
     try {
-      const uploaded = await uploadProfileMediaAsset(kind, dbUserId, file);
+      const previousKey = kind === "avatar" ? avatarKey : bannerKey;
+      const uploaded = await uploadProfileMediaAsset(kind, writableUserId, file);
       const updates: ProfileMediaUpdatePayload =
         kind === "avatar"
           ? {
@@ -2178,14 +4247,28 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
               banner_hash: uploaded.hash,
             };
 
-      const appliedUpdates = await updateUserMediaWithSchemaFallback(dbUserId, updates);
+      let appliedUpdates: ProfileMediaUpdatePayload;
+      try {
+        appliedUpdates = await updateUserMediaWithSchemaFallback(writableUserId, updates);
+      } catch (error) {
+        if (!(error instanceof Error) || error.message !== USERS_UPDATE_ROW_NOT_FOUND_ERROR) {
+          throw error;
+        }
+
+        const refreshedUserId = await refreshDbUserIdFromSession();
+        if (!refreshedUserId || refreshedUserId === writableUserId) {
+          throw error;
+        }
+        writableUserId = refreshedUserId;
+        appliedUpdates = await updateUserMediaWithSchemaFallback(writableUserId, updates);
+      }
 
       if (kind === "avatar" && !Object.prototype.hasOwnProperty.call(appliedUpdates, "avatar_key")) {
-        throw new Error("A coluna avatar_key nao existe na tabela users.");
+        throw new Error("A coluna avatar_key não existe na tabela profiles.");
       }
 
       if (kind === "banner" && !Object.prototype.hasOwnProperty.call(appliedUpdates, "banner_key")) {
-        throw new Error("A coluna banner_key nao existe na tabela users.");
+        throw new Error("A coluna banner_key não existe na tabela users.");
       }
 
       if (kind === "avatar") {
@@ -2212,7 +4295,7 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
         banner_key?: string | null;
         banner_hash?: string | null;
       } = {
-        userId: dbUserId,
+        userId: writableUserId,
       };
 
       if (Object.prototype.hasOwnProperty.call(appliedUpdates, "avatar_key")) {
@@ -2235,6 +4318,10 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
       }
 
       publishProfileMediaChange(detail);
+
+      if (previousKey && previousKey !== uploaded.key) {
+        void deleteMedia({ fileKey: previousKey }).catch(() => undefined);
+      }
       return true;
     } catch (error) {
       const feedback: UploadFeedbackState = {
@@ -2258,10 +4345,15 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
   };
 
   const removeProfileMedia = async (kind: ProfileMediaKind): Promise<void> => {
-    if (!dbUserId) {
+    let writableUserId = dbUserId;
+    if (!writableUserId) {
+      writableUserId = await refreshDbUserIdFromSession();
+    }
+
+    if (!writableUserId) {
       const noSessionFeedback: UploadFeedbackState = {
         tone: "error",
-        message: "Usuario ainda nao sincronizado. Reabra as configuracoes e tente novamente.",
+        message: "Usuário ainda não sincronizado. Reabra as configurações e tente novamente.",
       };
       if (kind === "avatar") {
         setAvatarFeedback(noSessionFeedback);
@@ -2280,6 +4372,7 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
     }
 
     try {
+      const previousKey = kind === "avatar" ? avatarKey : bannerKey;
       const updates: ProfileMediaUpdatePayload =
         kind === "avatar"
           ? {
@@ -2292,7 +4385,21 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
               banner_hash: null,
             };
 
-      const appliedUpdates = await updateUserMediaWithSchemaFallback(dbUserId, updates);
+      let appliedUpdates: ProfileMediaUpdatePayload;
+      try {
+        appliedUpdates = await updateUserMediaWithSchemaFallback(writableUserId, updates);
+      } catch (error) {
+        if (!(error instanceof Error) || error.message !== USERS_UPDATE_ROW_NOT_FOUND_ERROR) {
+          throw error;
+        }
+
+        const refreshedUserId = await refreshDbUserIdFromSession();
+        if (!refreshedUserId || refreshedUserId === writableUserId) {
+          throw error;
+        }
+        writableUserId = refreshedUserId;
+        appliedUpdates = await updateUserMediaWithSchemaFallback(writableUserId, updates);
+      }
 
       if (kind === "avatar") {
         clearTemporaryPreviewUrl("avatar");
@@ -2317,7 +4424,7 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
         banner_color?: string | null;
         banner_key?: string | null;
         banner_hash?: string | null;
-      } = { userId: dbUserId };
+      } = { userId: writableUserId };
 
       if (Object.prototype.hasOwnProperty.call(appliedUpdates, "avatar_key")) {
         detail.avatar_key = null;
@@ -2339,6 +4446,10 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
       }
 
       publishProfileMediaChange(detail);
+
+      if (previousKey) {
+        void deleteMedia({ fileKey: previousKey }).catch(() => undefined);
+      }
     } catch (error) {
       const feedback: UploadFeedbackState = {
         tone: "error",
@@ -2389,6 +4500,28 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
     setPendingImageEdit({ kind, file });
   };
 
+  const handleOpenProfileMediaDialog = (kind: ProfileMediaKind): void => {
+    if (!canUploadMedia) {
+      const feedback: UploadFeedbackState = {
+        tone: "error",
+        message: "Usuário ainda não sincronizado. Reabra as configurações e tente novamente.",
+      };
+      if (kind === "avatar") {
+        setAvatarFeedback(feedback);
+      } else {
+        setBannerFeedback(feedback);
+      }
+      return;
+    }
+
+    if ((kind === "avatar" && isAvatarUploading) || (kind === "banner" && isBannerUploading)) {
+      return;
+    }
+
+    const input = kind === "avatar" ? avatarFileInputRef.current : bannerFileInputRef.current;
+    input?.click();
+  };
+
   const handleApplyEditedImage = async (editedFile: File): Promise<void> => {
     if (!pendingImageEdit) {
       return;
@@ -2401,26 +4534,35 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
   };
 
   const accountEmail = useMemo(() => normalizeEmail(user?.email ?? ""), [user?.email]);
-  const accountEmailLabel = accountEmail || "Sem email";
-  const accountEmailStatusLabel = user?.emailVerified ? "Email verificado" : "Verificacao pendente";
-  const accountAvatarPreviewSrc = avatarSrc || getNameAvatarUrl(safeDisplayName || safeUsername || "U");
-  const accountBannerHasImage = bannerSrc.trim().length > 0 && bannerSrc !== getDefaultBannerUrl();
-  const accountBannerStyle = useMemo(() => {
-    if (accountBannerHasImage) {
-      return {
-        backgroundImage: `url("${bannerSrc}")`,
-      };
-    }
+  const accountEmailLabel = accountEmail || "Sem e-mail";
+  const maskedAccountEmailLabel = useMemo(() => maskEmailAddress(accountEmailLabel) || accountEmailLabel, [accountEmailLabel]);
+  const accountAvatarPreviewSrc =
+    avatarSrc || getDefaultAvatarUrl(currentUserId || user?.uid || safeUsername || safeDisplayName);
 
-    const baseColor = safeBannerColor ?? DEFAULT_BANNER_COLOR;
-    return {
-      background: `linear-gradient(180deg, ${baseColor} 0%, rgba(17, 20, 28, 0.94) 100%)`,
-    };
-  }, [accountBannerHasImage, bannerSrc, safeBannerColor]);
+  useEffect(() => {
+    if (!user) {
+      accountProfileSyncSignatureRef.current = "";
+      return;
+    }
+    const nextSignature = `${user.uid}:${safeDisplayName}:${accountAvatarPreviewSrc}`;
+    if (accountProfileSyncSignatureRef.current === nextSignature) {
+      return;
+    }
+    accountProfileSyncSignatureRef.current = nextSignature;
+    updateCurrentAccountProfile({
+      alias: safeDisplayName,
+      avatarSrc: accountAvatarPreviewSrc,
+    });
+  }, [accountAvatarPreviewSrc, safeDisplayName, updateCurrentAccountProfile, user]);
 
   const resetAccountModalState = useCallback(() => {
     setAccountActionFeedback(null);
     setIsAccountActionPending(false);
+    setAccountUsernameInput(safeUsername);
+    setAccountUsernamePasswordInput("");
+    setAccountUsernameModalFeedback(null);
+    setAccountUsernameAvailabilityFeedback(null);
+    setIsAccountUsernameAvailabilityPending(false);
     setAccountEmailModalStep("verifyCurrent");
     setAccountCurrentEmailInput(accountEmail);
     setAccountCurrentPasswordInput("");
@@ -2436,7 +4578,7 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
     setAccountDeletePasswordInput("");
     setAccountDeleteConfirmInput("");
     setAccountDeleteModalFeedback(null);
-  }, [accountEmail]);
+  }, [accountEmail, safeUsername]);
 
   const openAccountModal = useCallback(
     (kind: AccountModalKind) => {
@@ -2451,29 +4593,220 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
     resetAccountModalState();
   }, [resetAccountModalState]);
 
-  const reauthenticateCurrentEmailSession = useCallback(async (password: string) => {
-    const currentAuthUser = firebaseAuth.currentUser;
-    const currentEmail = normalizeEmail(currentAuthUser?.email ?? "");
-    if (!currentAuthUser || !currentEmail) {
-      throw new Error("Sua conta atual nao possui login por email disponivel.");
+  useEffect(() => {
+    if (accountModalKind !== "username") {
+      setAccountUsernameAvailabilityFeedback(null);
+      setIsAccountUsernameAvailabilityPending(false);
+      return;
     }
 
-    const credential = EmailAuthProvider.credential(currentEmail, password);
-    await reauthenticateWithCredential(currentAuthUser, credential);
-    return currentAuthUser;
-  }, []);
+    const normalizedUsername = String(accountUsernameInput ?? "").trim().toLowerCase();
+    if (!normalizedUsername) {
+      setAccountUsernameAvailabilityFeedback(null);
+      setIsAccountUsernameAvailabilityPending(false);
+      return;
+    }
+
+    if (normalizedUsername === safeUsername) {
+      setAccountUsernameAvailabilityFeedback(null);
+      setIsAccountUsernameAvailabilityPending(false);
+      return;
+    }
+
+    const validation = validateUsernameInput(normalizedUsername);
+    if (!validation.isValid) {
+      setAccountUsernameAvailabilityFeedback({
+        tone: "error",
+        message: validation.message ?? "Nome de usuário inválido.",
+      });
+      setIsAccountUsernameAvailabilityPending(false);
+      return;
+    }
+
+    let isCancelled = false;
+    const timeout = window.setTimeout(() => {
+      setIsAccountUsernameAvailabilityPending(true);
+      setAccountUsernameAvailabilityFeedback({
+        tone: "info",
+        message: "Verificando disponibilidade...",
+      });
+
+      void isUsernameAvailable(normalizedUsername)
+        .then((isAvailable) => {
+          if (isCancelled) {
+            return;
+          }
+
+          setAccountUsernameAvailabilityFeedback({
+            tone: isAvailable ? "success" : "error",
+            message: isAvailable ? "Nome de usuário disponível." : "Esse nome de usuário já está em uso.",
+          });
+        })
+        .finally(() => {
+          if (!isCancelled) {
+            setIsAccountUsernameAvailabilityPending(false);
+          }
+        });
+    }, 250);
+
+    return () => {
+      isCancelled = true;
+      window.clearTimeout(timeout);
+    };
+  }, [accountModalKind, accountUsernameInput, safeUsername]);
+
+  const handleSidebarSignOut = useCallback(async () => {
+    if (isSidebarSignOutPending) {
+      return;
+    }
+
+    setSidebarSignOutFeedback(null);
+    setIsSidebarSignOutPending(true);
+
+    try {
+      await signOutCurrent();
+    } catch (error) {
+      console.error("[settings:sidebar-signout]", error);
+      setSidebarSignOutFeedback("Não foi possível encerrar a sessão agora.");
+    } finally {
+      setIsSidebarSignOutPending(false);
+    }
+  }, [isSidebarSignOutPending, signOutCurrent]);
+
+  const handleAccountUsernameUpdate = useCallback(async () => {
+    let writableUserId = dbUserId;
+    if (!writableUserId) {
+      writableUserId = await refreshDbUserIdFromSession();
+    }
+
+    if (!writableUserId) {
+      setAccountUsernameModalFeedback({
+        tone: "error",
+        message: "Usuário ainda não sincronizado. Reabra as configurações e tente novamente.",
+      });
+      return;
+    }
+
+    if (usernameCooldownState.isLocked) {
+      setAccountUsernameModalFeedback({
+        tone: "error",
+        message: usernameCooldownMessage ?? "Você ainda não pode alterar o nome de usuário.",
+      });
+      return;
+    }
+
+    const nextUsername = String(accountUsernameInput ?? "").trim().toLowerCase();
+    if (!nextUsername) {
+      setAccountUsernameModalFeedback({ tone: "error", message: "Digite o novo nome de usuário." });
+      return;
+    }
+
+    if (nextUsername === safeUsername) {
+      setAccountUsernameModalFeedback({ tone: "error", message: "Digite um nome de usuário diferente do atual." });
+      return;
+    }
+
+    if (!accountUsernamePasswordInput.trim()) {
+      setAccountUsernameModalFeedback({ tone: "error", message: "Digite sua senha atual para confirmar." });
+      return;
+    }
+
+    const validation = validateUsernameInput(nextUsername);
+    if (!validation.isValid) {
+      setAccountUsernameModalFeedback({
+        tone: "error",
+        message: validation.message ?? "Nome de usuário inválido.",
+      });
+      return;
+    }
+
+    setIsAccountActionPending(true);
+    setAccountUsernameModalFeedback(null);
+
+    try {
+      await reauthenticateCurrentEmailSession(accountUsernamePasswordInput);
+
+      const isAvailable = await isUsernameAvailable(nextUsername);
+      if (!isAvailable) {
+        setAccountUsernameModalFeedback({ tone: "error", message: "Esse nome de usuário já está em uso." });
+        return;
+      }
+
+      const changedAt = new Date().toISOString();
+      const persistedUpdates = await updateUserProfileWithSchemaFallback(writableUserId, {
+        username: nextUsername,
+        username_changed_at: changedAt,
+      });
+      const didPersistUsernameChangedAt = Object.prototype.hasOwnProperty.call(persistedUpdates, "username_changed_at");
+      const effectiveUsernameChangedAt = changedAt;
+      const successMessage = didPersistUsernameChangedAt
+        ? "Nome de usuário atualizado com sucesso."
+        : "Nome de usuário atualizado com sucesso. O prazo de 30 dias foi salvo neste dispositivo.";
+      const usernameChangeStorageScope = user?.uid ?? writableUserId;
+
+      writeUsernameChangeFallback(usernameChangeStorageScope, effectiveUsernameChangedAt);
+      setDbUserId(writableUserId);
+      setUsername(nextUsername);
+      setAccountUsernameInput(nextUsername);
+      setAccountUsernamePasswordInput("");
+      setAccountUsernameChangedAt(effectiveUsernameChangedAt);
+      setAccountUsernameModalFeedback({
+        tone: "success",
+        message: successMessage,
+      });
+      setAccountActionFeedback({
+        tone: "success",
+        message: successMessage,
+      });
+      publishProfileUpdated({
+        userId: writableUserId,
+        display_name: safeDisplayName,
+        username: nextUsername,
+        username_changed_at: effectiveUsernameChangedAt,
+        about: safeAbout || null,
+      });
+
+      window.setTimeout(() => {
+        setAccountModalKind((current) => (current === "username" ? null : current));
+      }, 450);
+    } catch (error) {
+      console.error("[account:change-username]", error);
+      const errorMessage = String((error as { message?: string } | null)?.message ?? "").toLowerCase();
+      setAccountUsernameModalFeedback({
+        tone: "error",
+        message:
+          errorMessage.includes("duplicate key") || errorMessage.includes("users_username")
+            ? "Esse nome de usuário já está em uso."
+            : getAccountActionErrorMessage(error),
+      });
+    } finally {
+      setIsAccountActionPending(false);
+    }
+  }, [
+    accountUsernamePasswordInput,
+    accountUsernameInput,
+    dbUserId,
+    refreshDbUserIdFromSession,
+    reauthenticateCurrentEmailSession,
+    safeAbout,
+    safeDisplayName,
+    safeUsername,
+    user?.uid,
+    usernameCooldownMessage,
+    usernameCooldownState.isLocked,
+  ]);
 
   const handleAccountEmailVerifyCurrentStep = useCallback(async () => {
     const currentTypedEmail = normalizeEmail(accountCurrentEmailInput);
-    const currentSessionEmail = normalizeEmail(firebaseAuth.currentUser?.email ?? user?.email ?? "");
+    const currentSessionEmail = normalizeEmail(user?.email ?? "");
 
     if (!currentSessionEmail) {
-      setAccountEmailModalFeedback({ tone: "error", message: "Nao foi possivel identificar o email atual da conta." });
+      setAccountEmailModalFeedback({ tone: "error", message: "Não foi possível identificar o e-mail atual da conta." });
       return;
     }
 
     if (currentTypedEmail !== currentSessionEmail) {
-      setAccountEmailModalFeedback({ tone: "error", message: "Confirme o email atual exatamente como ele esta na conta." });
+      setAccountEmailModalFeedback({ tone: "error", message: "Confirme o e-mail atual exatamente como ele está na conta." });
       return;
     }
 
@@ -2491,7 +4824,7 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
       setAccountEmailModalStep("verifyNew");
       setAccountEmailModalFeedback({
         tone: "success",
-        message: "Email atual confirmado. Agora informe o novo email para enviar a verificacao.",
+        message: "E-mail atual confirmado. Agora informe o novo e-mail para enviar a verificação.",
       });
     } catch (error) {
       console.error("[account:change-email:verify-current]", error);
@@ -2502,22 +4835,21 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
   }, [accountCurrentEmailInput, accountCurrentPasswordInput, reauthenticateCurrentEmailSession, user?.email]);
 
   const handleAccountEmailSendVerification = useCallback(async () => {
-    const currentAuthUser = firebaseAuth.currentUser;
-    const currentSessionEmail = normalizeEmail(currentAuthUser?.email ?? user?.email ?? "");
+    const currentSessionEmail = normalizeEmail(user?.email ?? "");
     const nextEmail = normalizeEmail(accountNewEmailInput);
 
-    if (!currentAuthUser || !currentSessionEmail) {
-      setAccountEmailModalFeedback({ tone: "error", message: "Sessao invalida. Entre novamente para alterar o email." });
+    if (!currentSessionEmail) {
+      setAccountEmailModalFeedback({ tone: "error", message: "Sessão inválida. Entre novamente para alterar o e-mail." });
       return;
     }
 
     if (!nextEmail) {
-      setAccountEmailModalFeedback({ tone: "error", message: "Digite o novo email." });
+      setAccountEmailModalFeedback({ tone: "error", message: "Digite o novo e-mail." });
       return;
     }
 
     if (nextEmail === currentSessionEmail) {
-      setAccountEmailModalFeedback({ tone: "error", message: "O novo email precisa ser diferente do atual." });
+      setAccountEmailModalFeedback({ tone: "error", message: "O novo e-mail precisa ser diferente do atual." });
       return;
     }
 
@@ -2525,14 +4857,17 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
     setAccountEmailModalFeedback(null);
 
     try {
-      await verifyBeforeUpdateEmail(currentAuthUser, nextEmail);
+      const { error } = await supabase.auth.updateUser({ email: nextEmail });
+      if (error) {
+        throw error;
+      }
       setAccountEmailModalFeedback({
         tone: "success",
-        message: `Enviamos um link de confirmacao para ${nextEmail}. Confirme no novo email para concluir a troca.`,
+        message: `Enviamos um link de confirmação para ${nextEmail}. Confirme no novo e-mail para concluir a troca.`,
       });
       setAccountActionFeedback({
         tone: "success",
-        message: "Solicitacao enviada. Verifique o novo email para concluir a alteracao.",
+        message: "Solicitação enviada. Verifique o novo e-mail para concluir a alteração.",
       });
     } catch (error) {
       console.error("[account:change-email:verify-new]", error);
@@ -2559,7 +4894,7 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
     }
 
     if (accountPasswordNewInput !== accountPasswordConfirmInput) {
-      setAccountPasswordModalFeedback({ tone: "error", message: "A confirmacao da nova senha nao confere." });
+      setAccountPasswordModalFeedback({ tone: "error", message: "A confirmação da nova senha não confere." });
       return;
     }
 
@@ -2608,7 +4943,7 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
       await reauthenticateCurrentEmailSession(accountDeactivatePasswordInput);
 
       if (dbUserId) {
-        const { error } = await supabase.from("users").update({ status: "disabled" }).eq("id", dbUserId);
+        const { error } = await supabase.from("profiles").update({ status: "disabled" }).eq("id", dbUserId);
         if (error) {
           console.error("[account:deactivate:db]", error);
         }
@@ -2616,16 +4951,16 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
 
       setAccountActionFeedback({
         tone: "success",
-        message: "Conta desativada nesta sessao. Voce sera desconectado agora.",
+        message: "Conta desativada nesta sessão. Você será desconectado agora.",
       });
-      await signOut(firebaseAuth);
+      await signOutCurrent();
     } catch (error) {
       console.error("[account:deactivate]", error);
       setAccountDeactivateModalFeedback({ tone: "error", message: getAccountActionErrorMessage(error) });
     } finally {
       setIsAccountActionPending(false);
     }
-  }, [accountDeactivateConfirmInput, accountDeactivatePasswordInput, dbUserId, reauthenticateCurrentEmailSession]);
+  }, [accountDeactivateConfirmInput, accountDeactivatePasswordInput, dbUserId, reauthenticateCurrentEmailSession, signOutCurrent]);
 
   const handleAccountDelete = useCallback(async () => {
     if (!accountDeletePasswordInput.trim()) {
@@ -2648,14 +4983,20 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
       const currentAuthUser = await reauthenticateCurrentEmailSession(accountDeletePasswordInput);
 
       if (dbUserId) {
-        const { error } = await supabase.from("users").update({ status: "disabled" }).eq("id", dbUserId);
+        const { error } = await supabase.from("profiles").update({ status: "disabled" }).eq("id", dbUserId);
         if (error) {
           console.error("[account:delete:disable]", error);
         }
       }
 
+      try {
+        await endCurrentLoginSession();
+      } catch (sessionError) {
+        console.warn("[security:end-login-session]", sessionError);
+      }
+
       await deleteUser(currentAuthUser);
-      setAccountActionFeedback({ tone: "success", message: "Conta excluida com sucesso." });
+      setAccountActionFeedback({ tone: "success", message: "Conta excluída com sucesso." });
     } catch (error) {
       console.error("[account:delete]", error);
       setAccountDeleteModalFeedback({ tone: "error", message: getAccountActionErrorMessage(error) });
@@ -2670,27 +5011,27 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
       : pendingImageEdit?.kind === "banner"
         ? isBannerUploading
         : false;
-  const hasAvatarMedia = Boolean(
-    avatarKey || avatarHash || avatarUrl || (avatarSrc && avatarSrc.trim().length > 0 && avatarSrc !== getDefaultAvatarUrl()),
-  );
-  const shouldSuppressPreviewBannerColor = isProfileIdentityLoading || hasBannerMedia || Boolean(bannerHash);
+  const shouldSuppressPreviewBannerColor = isProfileIdentityLoading || hasBannerMedia;
 
   return (
     <>
-      <section className={styles.settings} aria-label="Configuracoes do aplicativo">
-        <header className={styles.header}>
-          <div className={styles.headerInfo}>
-            <h2 className={styles.title}>Configuracoes do aplicativo</h2>
-            <p className={styles.subtitle}>Ajuste preferencias visuais e de comportamento do Messly.</p>
-          </div>
-
-          <button className={styles.closeButton} type="button" onClick={onClose} aria-label="Fechar configuracoes">
-            <MaterialSymbolIcon name="close" size={18} filled={false} />
-          </button>
-        </header>
+      <section className={styles.settings} aria-label="Configurações">
+        <button className={styles.shellCloseButton} type="button" onClick={onClose} aria-label="Fechar configurações">
+          <MaterialSymbolIcon name="close" size={16} filled={false} />
+        </button>
 
         <div className={styles.grid}>
           <aside className={styles.menu} aria-label="Categorias">
+            <div className={styles.menuBrand}>
+              <span className={styles.menuBrandIcon} aria-hidden="true">
+                <MaterialSymbolIcon name="settings" size={18} filled={true} />
+              </span>
+              <div className={styles.menuBrandCopy}>
+                <h2 className={styles.menuBrandTitle}>Configurações</h2>
+                <p className={styles.menuBrandSection}>Geral</p>
+              </div>
+            </div>
+
             <div className={styles.menuList}>
               {SETTINGS_SIDEBAR_ITEMS.map((item) => {
                 const isActive = activeSection === item.key;
@@ -2713,7 +5054,25 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
               })}
             </div>
 
-            <div className={styles.menuVersionBlock} aria-label={`Versao do aplicativo ${settingsVersion}`}>
+            <div className={styles.menuVersionBlock} aria-label={`Versão do aplicativo ${settingsVersion}`}>
+              <button
+                className={`${styles.menuItem} ${styles.menuSignOutButton}`}
+                type="button"
+                onClick={() => {
+                  void handleSidebarSignOut();
+                }}
+                disabled={isSidebarSignOutPending}
+              >
+                <MaterialSymbolIcon className={styles.menuItemIcon} name="logout" size={17} filled={false} />
+                <span className={styles.menuItemLabel}>{isSidebarSignOutPending ? "Encerrando..." : "Encerrar sessão"}</span>
+              </button>
+
+              {sidebarSignOutFeedback ? (
+                <p className={styles.menuSignOutFeedback} role="status" aria-live="polite">
+                  {sidebarSignOutFeedback}
+                </p>
+              ) : null}
+
               <p className={styles.menuVersionPrimary}>{settingsSidebarVersionPrimary}</p>
               <p className={styles.menuVersionSecondary}>{settingsSidebarVersionSecondary}</p>
             </div>
@@ -2726,128 +5085,166 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
                   <h3 className={styles.editorTitle}>Minha conta</h3>
                 </header>
 
-                <div className={styles.accountContent}>
-                  <section className={styles.accountHeroCard} aria-label="Resumo da conta">
-                    <div className={styles.accountHeroBanner} style={accountBannerStyle}>
-                      <div className={styles.accountHeroBannerShade} />
-                    </div>
+                <div ref={accountContentRef} className={styles.accountContent}>
+                  <section className={styles.accountMainCard} aria-label="Resumo da conta">
+                    <section className={styles.accountHeroCard} aria-label="Perfil atual">
+                      <div
+                        className={styles.accountHeroBanner}
+                        style={{ backgroundColor: safeBannerColor ?? DEFAULT_BANNER_COLOR }}
+                      >
+                        {hasBannerMedia ? (
+                          <BannerImage className={styles.accountHeroBannerImage} src={bannerSrc} alt="" />
+                        ) : null}
+                        <div className={styles.accountHeroBannerShade} />
+                      </div>
 
-                    <div className={styles.accountHeroBody}>
-                      <img
-                        className={styles.accountHeroAvatar}
-                        src={accountAvatarPreviewSrc}
-                        alt={`Avatar de ${safeDisplayName}`}
-                        loading="eager"
-                        onError={(event) => {
-                          event.currentTarget.onerror = null;
-                          event.currentTarget.src = getNameAvatarUrl(safeDisplayName || safeUsername || "U");
-                        }}
-                      />
+                      <div className={styles.accountHeroBody}>
+                        <div className={styles.accountHeroBannerIdentity}>
+                          <AvatarImage
+                            className={styles.accountHeroAvatar}
+                            src={accountAvatarPreviewSrc}
+                            name={safeDisplayName}
+                            alt={`Avatar de ${safeDisplayName}`}
+                          />
+                        </div>
 
-                      <div className={styles.accountHeroMeta}>
-                        <p className={styles.accountHeroName}>{safeDisplayName}</p>
-                        <p className={styles.accountHeroUsername}>@{safeUsername}</p>
-                        <div className={styles.accountHeroEmailRow}>
-                          <MaterialSymbolIcon name="mail" size={14} filled={false} />
-                          <span className={styles.accountHeroEmail}>{accountEmailLabel}</span>
-                          <span
-                            className={`${styles.accountHeroEmailBadge}${
-                              user?.emailVerified ? ` ${styles.accountHeroEmailBadgeVerified}` : ""
-                            }`}
+                        <div className={styles.accountHeroMeta}>
+                          <h4 className={styles.accountHeroName}>{safeDisplayName}</h4>
+                        </div>
+
+                        <div className={styles.accountHeroActions}>
+                          <button
+                            type="button"
+                            className={`${styles.accountInlineAction} ${styles.accountInlineActionPrimary}`}
+                            onClick={() => setActiveSection("profile")}
                           >
-                            {accountEmailStatusLabel}
-                          </span>
+                            <MaterialSymbolIcon name="edit" size={16} filled={false} />
+                            Editar perfil
+                          </button>
                         </div>
                       </div>
+                    </section>
 
-                      <div className={styles.accountHeroActions}>
+                    <section className={styles.accountDetailsCard} aria-label="Dados principais da conta">
+                      <article className={styles.accountDetailRow}>
+                        <div className={styles.accountDetailMeta}>
+                          <p className={styles.accountDetailLabel}>Nome exibido</p>
+                          <p className={styles.accountDetailValue}>{safeDisplayName}</p>
+                        </div>
                         <button
                           type="button"
-                          className={styles.accountInlineAction}
+                          className={styles.accountDetailButton}
                           onClick={() => setActiveSection("profile")}
                         >
-                          <MaterialSymbolIcon name="edit" size={15} filled={false} />
-                          <span>Editar perfil</span>
+                          Editar
+                        </button>
+                      </article>
+
+                      <article className={styles.accountDetailRow}>
+                        <div className={styles.accountDetailMeta}>
+                          <p className={styles.accountDetailLabel}>Nome de usuário</p>
+                          <p className={styles.accountDetailValue}>@{safeUsername}</p>
+                        </div>
+                        <button
+                          type="button"
+                          className={styles.accountDetailButton}
+                          onClick={() => openAccountModal("username")}
+                        >
+                          Editar
+                        </button>
+                      </article>
+
+                      <article className={styles.accountDetailRow}>
+                        <div className={styles.accountDetailMeta}>
+                          <p className={styles.accountDetailLabel}>E-mail</p>
+                          <div className={styles.accountDetailValueWrap}>
+                            <p className={styles.accountDetailValue}>
+                              {isAccountEmailVisible ? accountEmailLabel : maskedAccountEmailLabel}
+                            </p>
+                            {accountEmail ? (
+                              <button
+                                type="button"
+                                className={styles.accountDetailReveal}
+                                onClick={() => setIsAccountEmailVisible((current) => !current)}
+                              >
+                                {isAccountEmailVisible ? "Ocultar" : "Mostrar"}
+                              </button>
+                            ) : null}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          className={styles.accountDetailButton}
+                          onClick={() => openAccountModal("email")}
+                        >
+                          Alterar
+                        </button>
+                      </article>
+                    </section>
+                  </section>
+
+                  <div className={styles.accountMainSections}>
+                    <section className={styles.accountFeatureSection} aria-label="Senha e autenticação">
+                      <div className={styles.accountFeatureHeader}>
+                        <h5 className={styles.accountFeatureTitle}>Senha e autenticação</h5>
+                      </div>
+
+                      <div className={styles.accountFeatureStatus}>
+                        <span className={styles.accountFeatureStatusIcon} aria-hidden="true">
+                          <MaterialSymbolIcon name="lock" size={16} filled={false} />
+                        </span>
+                        <span className={styles.accountFeatureStatusText}>Confirmações por senha e e-mail ativas</span>
+                      </div>
+
+                      <div className={styles.accountFeatureActions}>
+                        <button
+                          type="button"
+                          className={`${styles.accountFeatureButton} ${styles.accountFeatureButtonPrimary}`}
+                          onClick={() => openAccountModal("password")}
+                        >
+                          Mudar senha
                         </button>
                       </div>
-                    </div>
-                  </section>
+                    </section>
 
-                  <section className={styles.accountActionList} aria-label="Seguranca da conta">
-                    <article className={styles.accountActionRow}>
-                      <div className={styles.accountActionMeta}>
-                        <p className={styles.accountActionTitle}>Alterar email</p>
-                        <p className={styles.accountActionDescription}>
-                          Confirme o email atual e envie verificacao para o novo email.
-                        </p>
-                      </div>
-                      <button type="button" className={styles.accountActionButton} onClick={() => openAccountModal("email")}>
-                        Alterar email
-                      </button>
-                    </article>
+                    <section className={styles.accountRemovalSection} aria-label="Remoção de conta">
+                      <h5 className={styles.accountFeatureTitle}>Remoção de conta</h5>
+                      <p className={styles.accountFeatureDescription}>
+                        Desativar sua conta significa que você poderá recuperá-la quando quiser.
+                      </p>
 
-                    <article className={styles.accountActionRow}>
-                      <div className={styles.accountActionMeta}>
-                        <p className={styles.accountActionTitle}>Alterar senha</p>
-                        <p className={styles.accountActionDescription}>
-                          Atualize sua senha com confirmacao da senha atual.
-                        </p>
+                      <div className={styles.accountFeatureActions}>
+                        <button
+                          type="button"
+                          className={`${styles.accountFeatureButton} ${styles.accountFeatureButtonWarn}`}
+                          onClick={() => openAccountModal("deactivate")}
+                        >
+                          Desativar conta
+                        </button>
+                        <button
+                          type="button"
+                          className={`${styles.accountFeatureButton} ${styles.accountFeatureButtonDanger}`}
+                          onClick={() => openAccountModal("delete")}
+                        >
+                          Excluir conta
+                        </button>
                       </div>
-                      <button
-                        type="button"
-                        className={styles.accountActionButton}
-                        onClick={() => openAccountModal("password")}
+                    </section>
+
+                    {accountActionFeedback ? (
+                      <p
+                        className={`${styles.accountActionFeedback} ${styles.accountSectionFeedback}${
+                          accountActionFeedback.tone === "error"
+                            ? ` ${styles.accountActionFeedbackError}`
+                            : ` ${styles.accountActionFeedbackSuccess}`
+                        }`}
+                        role="status"
+                        aria-live="polite"
                       >
-                        Alterar senha
-                      </button>
-                    </article>
-
-                    <article className={styles.accountActionRow}>
-                      <div className={styles.accountActionMeta}>
-                        <p className={styles.accountActionTitle}>Desativar conta</p>
-                        <p className={styles.accountActionDescription}>
-                          Desconecta agora e marca a conta como desativada nesta sessao.
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        className={`${styles.accountActionButton} ${styles.accountActionButtonWarn}`}
-                        onClick={() => openAccountModal("deactivate")}
-                      >
-                        Desativar
-                      </button>
-                    </article>
-
-                    <article className={styles.accountActionRow}>
-                      <div className={styles.accountActionMeta}>
-                        <p className={styles.accountActionTitle}>Excluir conta</p>
-                        <p className={styles.accountActionDescription}>
-                          Acao irreversivel. Remove o acesso da conta apos confirmacao.
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        className={`${styles.accountActionButton} ${styles.accountActionButtonDanger}`}
-                        onClick={() => openAccountModal("delete")}
-                      >
-                        Excluir conta
-                      </button>
-                    </article>
-                  </section>
-
-                  {accountActionFeedback ? (
-                    <p
-                      className={`${styles.accountActionFeedback}${
-                        accountActionFeedback.tone === "error"
-                          ? ` ${styles.accountActionFeedbackError}`
-                          : ` ${styles.accountActionFeedbackSuccess}`
-                      }`}
-                      role="status"
-                      aria-live="polite"
-                    >
-                      {accountActionFeedback.message}
-                    </p>
-                  ) : null}
+                        {accountActionFeedback.message}
+                      </p>
+                    ) : null}
+                  </div>
                 </div>
               </section>
             ) : activeSection === "profile" ? (
@@ -2855,70 +5252,13 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
               className={`${styles.profileEditor}${hasUnsavedProfileChanges ? ` ${styles.profileEditorWithUnsaved}` : ""}`}
             >
               <div className={styles.editorHeader}>
-                <h3 className={styles.editorTitle}>Perfil</h3>
+                <h3 className={styles.editorTitle}>Editar perfil</h3>
               </div>
 
               <div
                 className={`${styles.editorContent}${hasUnsavedProfileChanges ? ` ${styles.editorContentWithUnsaved}` : ""}`}
               >
                 <form className={styles.form} onSubmit={(event) => event.preventDefault()}>
-                  <section className={`${styles.formSection} ${styles.plusProfileSection}`} aria-label="Tema de perfil Plus">
-                    <div className={styles.plusProfileHeader}>
-                      <div className={styles.plusProfileHeaderCopy}>
-                        <p className={styles.plusProfileEyebrow}>Experimente o Plus!</p>
-                        <p className={styles.plusProfileDescription}>Personalize as cores do seu perfil com tema primario e realce.</p>
-                      </div>
-                      <span className={styles.plusProfileBadge}>Plus</span>
-                    </div>
-
-                    <div className={styles.plusProfileThemeBlock}>
-                      <p className={styles.plusProfileThemeTitle}>Tema de perfil</p>
-                      <div className={styles.plusProfileThemeColors}>
-                        <label className={styles.plusProfileColorItem} htmlFor="profile-theme-primary-color">
-                          <span
-                            className={styles.plusProfileColorSwatch}
-                            style={{ background: normalizedProfileThemePrimaryColor }}
-                            aria-hidden="true"
-                          >
-                            <span className={styles.plusProfileColorSwatchIcon}>
-                              <MaterialSymbolIcon name="edit" size={14} filled={true} />
-                            </span>
-                          </span>
-                          <span className={styles.plusProfileColorLabel}>Primaria</span>
-                          <input
-                            id="profile-theme-primary-color"
-                            className={styles.plusProfileColorInput}
-                            type="color"
-                            value={normalizedProfileThemePrimaryColor}
-                            onChange={(event) => handleProfileThemeColorChange("primary", event.target.value)}
-                            aria-label="Cor primaria do perfil"
-                          />
-                        </label>
-
-                        <label className={styles.plusProfileColorItem} htmlFor="profile-theme-accent-color">
-                          <span
-                            className={styles.plusProfileColorSwatch}
-                            style={{ background: normalizedProfileThemeAccentColor }}
-                            aria-hidden="true"
-                          >
-                            <span className={styles.plusProfileColorSwatchIcon}>
-                              <MaterialSymbolIcon name="edit" size={14} filled={true} />
-                            </span>
-                          </span>
-                          <span className={styles.plusProfileColorLabel}>Realce</span>
-                          <input
-                            id="profile-theme-accent-color"
-                            className={styles.plusProfileColorInput}
-                            type="color"
-                            value={normalizedProfileThemeAccentColor}
-                            onChange={(event) => handleProfileThemeColorChange("accent", event.target.value)}
-                            aria-label="Cor de realce do perfil"
-                          />
-                        </label>
-                      </div>
-                    </div>
-                  </section>
-
                   <section className={styles.formSection}>
                     <label className={styles.fieldLabel} htmlFor="profile-display-name">
                       Nome exibido
@@ -2933,42 +5273,24 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
                       autoComplete="nickname"
                     />
                   </section>
+                  <div className={styles.formDivider} aria-hidden="true" />
 
-                  <section className={styles.formSection}>
-                    <label className={styles.fieldLabel} htmlFor="profile-about">
-                      Sobre mim
-                    </label>
-                    <p className={styles.fieldHelp}>Voce pode usar markdown e links, se desejar.</p>
-                    <div className={styles.textareaWrap}>
-                      <textarea
-                        id="profile-about"
-                        className={styles.fieldTextarea}
-                        value={about}
-                        onChange={(event) => setAbout(event.target.value.slice(0, ABOUT_MAX_LENGTH))}
-                        maxLength={ABOUT_MAX_LENGTH}
-                        spellCheck={false}
-                      />
-                      <span className={styles.fieldCounter}>{aboutCount}</span>
-                    </div>
-                  </section>
-
-                  <section className={styles.formSection}>
-                  <label className={styles.fieldLabel} htmlFor="profile-avatar-upload">
-                    Avatar
-                  </label>
-                    <div className={styles.uploadActions}>
+                  <div className={styles.profileMediaGrid}>
+                    <section className={`${styles.formSection} ${styles.profileMediaSection}`}>
+                      <label className={styles.fieldLabel} htmlFor="profile-avatar-upload">
+                        Avatar
+                      </label>
+                      <div className={`${styles.uploadActions} ${styles.uploadActionsStack}`}>
                       <label
                         className={`${styles.uploadButton}${isAvatarUploading || !canUploadMedia ? ` ${styles.uploadButtonDisabled}` : ""}`}
                         htmlFor="profile-avatar-upload"
                       >
-                        {isAvatarUploading ? "Enviando avatar..." : "Enviar avatar"}
+                        {isAvatarUploading ? "Enviando avatar..." : "Alterar avatar"}
                       </label>
                       {hasAvatarMedia ? (
                         <button
                           type="button"
-                          className={`${styles.uploadButton} ${styles.removeMediaButton}${
-                            isAvatarUploading || !canUploadMedia ? ` ${styles.uploadButtonDisabled}` : ""
-                          }`}
+                          className={styles.uploadLinkButton}
                           onClick={() => {
                             void removeProfileMedia("avatar");
                           }}
@@ -2979,6 +5301,7 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
                       ) : null}
                       <input
                         id="profile-avatar-upload"
+                        ref={avatarFileInputRef}
                         className={styles.fileInput}
                         type="file"
                         accept="image/png,image/jpeg,image/webp,image/gif"
@@ -2997,25 +5320,23 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
                         {avatarFeedback.message}
                       </p>
                     ) : null}
-                  </section>
+                    </section>
 
-                  <section className={styles.formSection}>
-                    <label className={styles.fieldLabel} htmlFor="profile-banner-upload">
-                      Banner
-                    </label>
-                    <div className={styles.uploadActions}>
+                    <section className={`${styles.formSection} ${styles.profileMediaSection}`}>
+                      <label className={styles.fieldLabel} htmlFor="profile-banner-upload">
+                        Banner do perfil
+                      </label>
+                      <div className={`${styles.uploadActions} ${styles.uploadActionsStack}`}>
                       <label
                         className={`${styles.uploadButton}${isBannerUploading || !canUploadMedia ? ` ${styles.uploadButtonDisabled}` : ""}`}
                         htmlFor="profile-banner-upload"
                       >
-                        {isBannerUploading ? "Enviando banner..." : "Enviar banner"}
+                        {isBannerUploading ? "Enviando banner..." : "Alterar banner"}
                       </label>
                       {hasBannerMedia ? (
                         <button
                           type="button"
-                          className={`${styles.uploadButton} ${styles.removeMediaButton}${
-                            isBannerUploading || !canUploadMedia ? ` ${styles.uploadButtonDisabled}` : ""
-                          }`}
+                          className={styles.uploadLinkButton}
                           onClick={() => {
                             void removeProfileMedia("banner");
                           }}
@@ -3026,6 +5347,7 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
                       ) : null}
                       <input
                         id="profile-banner-upload"
+                        ref={bannerFileInputRef}
                         className={styles.fileInput}
                         type="file"
                         accept="image/png,image/jpeg,image/webp,image/gif"
@@ -3044,114 +5366,241 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
                         {bannerFeedback.message}
                       </p>
                     ) : null}
+                    </section>
+                  </div>
+                  <div className={styles.formDivider} aria-hidden="true" />
+
+                  <section className={`${styles.formSection} ${styles.plusProfileSection}`} aria-label="Tema de perfil">
+                    <div className={styles.plusProfileHeader}>
+                      <p className={styles.plusProfileEyebrow}>Tema de perfil</p>
+                    </div>
+
+                    <div className={styles.plusProfileThemeBlock}>
+                      <div className={styles.plusProfileThemeColors}>
+                        {(
+                          [
+                            { slot: "primary", label: "Primária", color: draftProfileTheme.primary },
+                            { slot: "accent", label: "Realce", color: draftProfileTheme.accent },
+                          ] as const
+                        ).map((entry) => {
+                          const isOpen =
+                            isProfileThemeColorPickerOpen && profileThemeColorPickerSlot === entry.slot;
+                          return (
+                            <div key={entry.slot} className={styles.plusProfileColorPickerItem}>
+                              <span className={styles.plusProfileColorLabel}>{entry.label}</span>
+                              <div
+                                className={styles.bannerColorPicker}
+                                ref={isOpen ? profileThemeColorPickerRef : undefined}
+                              >
+                                <button
+                                  type="button"
+                                  className={styles.bannerColorTrigger}
+                                  style={{ backgroundColor: entry.color }}
+                                  aria-label={`Selecionar cor ${entry.label.toLowerCase()} do perfil`}
+                                  aria-expanded={isOpen}
+                                  onClick={() => {
+                                    if (isOpen) {
+                                      setIsProfileThemeColorPickerOpen(false);
+                                      return;
+                                    }
+                                    handleOpenProfileThemeColorPicker(entry.slot);
+                                  }}
+                                >
+                                  <span className={styles.bannerColorTriggerIcon} aria-hidden="true">
+                                    <MaterialSymbolIcon name="edit" size={14} filled={true} />
+                                  </span>
+                                </button>
+
+                                {isOpen ? (
+                                  <div
+                                    ref={profileThemeColorPopoverRef}
+                                    className={styles.bannerColorPopover}
+                                    style={
+                                      profileThemeColorPopoverPosition
+                                        ? {
+                                            top: `${profileThemeColorPopoverPosition.top}px`,
+                                            left: `${profileThemeColorPopoverPosition.left}px`,
+                                          }
+                                        : undefined
+                                    }
+                                    role="group"
+                                    aria-label={`Cor ${entry.label}`}
+                                  >
+                                    <div
+                                      ref={profileThemeColorAreaRef}
+                                      className={styles.bannerColorArea}
+                                      style={{ backgroundColor: `hsl(${profileThemeColorHue} 100% 50%)` }}
+                                      onPointerDown={handleProfileThemeColorAreaPointerDown}
+                                      onPointerMove={handleProfileThemeColorAreaPointerMove}
+                                      onPointerUp={handleProfileThemeColorAreaPointerUp}
+                                      onPointerCancel={handleProfileThemeColorAreaPointerUp}
+                                    >
+                                      <div className={styles.bannerColorAreaWhiteOverlay} />
+                                      <div className={styles.bannerColorAreaBlackOverlay} />
+                                      <span
+                                        className={styles.bannerColorAreaCursor}
+                                        style={{
+                                          left: `${clamp(profileThemeColorSaturation, 2, 98)}%`,
+                                          top: `${clamp(100 - profileThemeColorValue, 2, 98)}%`,
+                                        }}
+                                        aria-hidden="true"
+                                      />
+                                    </div>
+
+                                    <input
+                                      className={styles.bannerColorHueSlider}
+                                      type="range"
+                                      min={0}
+                                      max={360}
+                                      step={1}
+                                      value={Math.round(profileThemeColorHue)}
+                                      aria-label={`Matiz da cor ${entry.label.toLowerCase()}`}
+                                      onChange={handleProfileThemeColorHueChange}
+                                    />
+
+                                    <div className={styles.bannerColorHexRow}>
+                                      <input
+                                        className={styles.bannerColorHexInput}
+                                        type="text"
+                                        inputMode="text"
+                                        spellCheck={false}
+                                        value={profileThemeColorInput}
+                                        aria-label={`Cor hexadecimal ${entry.label.toLowerCase()}`}
+                                        onChange={(event) => handleProfileThemeColorInputChange(event.target.value)}
+                                        onBlur={handleProfileThemeColorInputBlur}
+                                      />
+                                      <button
+                                        type="button"
+                                        className={styles.bannerColorEyeDropperButton}
+                                        aria-label="Capturar cor da tela"
+                                        title={isEyeDropperSupported ? "Capturar cor da tela" : "Captura de tela indisponível"}
+                                        disabled={!isEyeDropperSupported}
+                                        onClick={() => {
+                                          void handleProfileThemeColorEyedropperClick();
+                                        }}
+                                      >
+                                        <MaterialSymbolIcon name="colorize" size={16} filled={false} />
+                                      </button>
+                                    </div>
+
+                                    <div className={styles.bannerColorSwatches} role="list" aria-label="Cores sugeridas">
+                                      {BANNER_COLOR_SWATCHES.map((color) => {
+                                        const normalizedSwatchColor = normalizeBannerColor(color) ?? color;
+                                        const isActiveSwatch = normalizedSwatchColor === entry.color;
+                                        return (
+                                          <button
+                                            key={`${entry.slot}-${color}`}
+                                            type="button"
+                                            className={`${styles.bannerColorSwatchButton}${isActiveSwatch ? ` ${styles.bannerColorSwatchButtonActive}` : ""}`}
+                                            style={{ backgroundColor: normalizedSwatchColor }}
+                                            aria-label={`Selecionar cor ${normalizedSwatchColor}`}
+                                            onClick={() => {
+                                              applyProfileThemeColorPickerValue(normalizedSwatchColor);
+                                            }}
+                                          />
+                                        );
+                                      })}
+                                    </div>
+                                  </div>
+                                ) : null}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </section>
+                  <div className={styles.formDivider} aria-hidden="true" />
+
+                  <section className={styles.formSection}>
+                    <label className={styles.fieldLabel} htmlFor="profile-about">
+                      Sobre mim
+                    </label>
+                    <div className={styles.fieldMetaRow}>
+                      <p className={styles.fieldHelp}>Markdown e links são suportados.</p>
+                    </div>
+                    <div className={styles.textareaWrap}>
+                      <span className={styles.fieldCounter}>{aboutCount} / {ABOUT_MAX_LENGTH}</span>
+                      <textarea
+                        id="profile-about"
+                        className={styles.fieldTextarea}
+                        value={about}
+                        onChange={(event) => setAbout(event.target.value.slice(0, ABOUT_MAX_LENGTH))}
+                        maxLength={ABOUT_MAX_LENGTH}
+                        spellCheck={false}
+                      />
+                    </div>
                   </section>
 
-                  {!hasBannerMedia ? (
-                    <section className={styles.formSection}>
-                      <span className={styles.fieldLabel}>Cor da faixa</span>
-                      <div className={styles.bannerColorPicker} ref={bannerColorPickerRef}>
-                        <button
-                          type="button"
-                          className={styles.bannerColorTrigger}
-                          style={{ backgroundColor: bannerColorSwatch }}
-                          aria-label="Selecionar cor da faixa"
-                          aria-expanded={isBannerColorPickerOpen}
-                          onClick={() => {
-                            setIsBannerColorPickerOpen((current) => !current);
-                          }}
-                        >
-                          <span className={styles.bannerColorTriggerIcon} aria-hidden="true">
-                            <MaterialSymbolIcon name="edit" size={14} filled={true} />
-                          </span>
-                        </button>
-
-                        {isBannerColorPickerOpen ? (
-                          <div className={styles.bannerColorPopover} role="group" aria-label="Selecionar cor da faixa">
-                            <div
-                              ref={bannerColorAreaRef}
-                              className={styles.bannerColorArea}
-                              style={{ backgroundColor: `hsl(${bannerColorHue} 100% 50%)` }}
-                              onPointerDown={handleBannerColorAreaPointerDown}
-                              onPointerMove={handleBannerColorAreaPointerMove}
-                              onPointerUp={handleBannerColorAreaPointerUp}
-                              onPointerCancel={handleBannerColorAreaPointerUp}
-                            >
-                              <div className={styles.bannerColorAreaWhiteOverlay} />
-                              <div className={styles.bannerColorAreaBlackOverlay} />
-                              <span
-                                className={styles.bannerColorAreaCursor}
-                                style={{
-                                  left: `${bannerColorSaturation}%`,
-                                  top: `${100 - bannerColorValue}%`,
-                                }}
-                                aria-hidden="true"
-                              />
-                            </div>
-
-                            <input
-                              className={styles.bannerColorHueSlider}
-                              type="range"
-                              min={0}
-                              max={360}
-                              step={1}
-                              value={Math.round(bannerColorHue)}
-                              aria-label="Matiz da cor"
-                              onChange={handleBannerHueChange}
-                            />
-
-                            <div className={styles.bannerColorHexRow}>
-                              <input
-                                className={styles.bannerColorHexInput}
-                                type="text"
-                                inputMode="text"
-                                spellCheck={false}
-                                value={bannerColorInput}
-                                aria-label="Cor hexadecimal da faixa"
-                                onChange={(event) => handleBannerColorInputChange(event.target.value)}
-                                onBlur={handleBannerColorInputBlur}
-                              />
-                              <button
-                                type="button"
-                                className={styles.bannerColorEyeDropperButton}
-                                aria-label="Capturar cor da tela"
-                                title={isEyeDropperSupported ? "Capturar cor da tela" : "Seletor de tela indisponivel"}
-                                disabled={!isEyeDropperSupported}
-                                onClick={() => {
-                                  void handleBannerColorEyedropperClick();
-                                }}
-                              >
-                                <MaterialSymbolIcon name="colorize" size={16} filled={false} />
-                              </button>
-                            </div>
-                          </div>
-                        ) : null}
-                      </div>
-                    </section>
-                  ) : null}
                 </form>
 
-                <aside className={styles.previewPane} aria-label="Pre-visualizacao do perfil">
+                <aside className={styles.previewPane} aria-label="Prévia do perfil">
                   <div className={styles.previewCardReuse}>
-                    <UserProfilePopover
-                      avatarSrc={avatarSrc}
-                      bannerSrc={bannerSrc}
-                      bannerColor={shouldSuppressPreviewBannerColor ? null : safeBannerColor}
-                      themePrimaryColor={normalizedProfileThemePrimaryColor}
-                      themeAccentColor={normalizedProfileThemeAccentColor}
-                      displayName={safeDisplayName}
-                      username={safeUsername}
-                      aboutText={safeAbout}
-                      presenceState="online"
-                      presenceLabel={PRESENCE_LABELS.online}
-                      showActions={false}
-                    />
+                    <div className={styles.previewInteractiveFrame}>
+                      <button
+                        type="button"
+                        className={`${styles.previewMediaHotspot} ${styles.previewBannerHotspot}${
+                          isBannerUploading || !canUploadMedia ? ` ${styles.previewMediaHotspotDisabled}` : ""
+                        }`}
+                        onMouseEnter={() => setIsPreviewBannerHotspotActive(true)}
+                        onMouseLeave={() => setIsPreviewBannerHotspotActive(false)}
+                        onFocus={() => setIsPreviewBannerHotspotActive(true)}
+                        onBlur={() => setIsPreviewBannerHotspotActive(false)}
+                        onClick={() => handleOpenProfileMediaDialog("banner")}
+                        disabled={isBannerUploading || !canUploadMedia}
+                        aria-label={isBannerUploading ? "Enviando banner..." : "Clique para enviar banner"}
+                      >
+                        <span className={styles.previewMediaHotspotContent} aria-hidden="true">
+                          <MaterialSymbolIcon className={styles.previewMediaHotspotIcon} name="edit" size={20} filled={false} />
+                          <span className={styles.previewMediaHotspotLabel}>Mudar banner</span>
+                        </span>
+                      </button>
+
+                      <button
+                        type="button"
+                        className={`${styles.previewMediaHotspot} ${styles.previewAvatarHotspot}${
+                          isAvatarUploading || !canUploadMedia ? ` ${styles.previewMediaHotspotDisabled}` : ""
+                        }`}
+                        onMouseEnter={() => setIsPreviewAvatarHotspotActive(true)}
+                        onMouseLeave={() => setIsPreviewAvatarHotspotActive(false)}
+                        onFocus={() => setIsPreviewAvatarHotspotActive(true)}
+                        onBlur={() => setIsPreviewAvatarHotspotActive(false)}
+                        onClick={() => handleOpenProfileMediaDialog("avatar")}
+                        disabled={isAvatarUploading || !canUploadMedia}
+                        aria-label={isAvatarUploading ? "Enviando avatar..." : "Clique para enviar avatar"}
+                      >
+                        <span className={styles.previewMediaHotspotContent} aria-hidden="true">
+                          <MaterialSymbolIcon className={styles.previewMediaHotspotIcon} name="edit" size={18} filled={false} />
+                        </span>
+                      </button>
+
+                      <div className={styles.previewProfileLayer}>
+                        <UserProfilePopover
+                          avatarSrc={avatarSrc}
+                          bannerSrc={bannerSrc}
+                          bannerColor={shouldSuppressPreviewBannerColor ? null : previewBannerColor}
+                          themePrimaryColor={previewThemePrimaryColor}
+                          themeAccentColor={previewThemeAccentColor}
+                          showBannerEditOverlay={isPreviewBannerHotspotActive}
+                          showAvatarEditOverlay={isPreviewAvatarHotspotActive}
+                          displayName={safeDisplayName}
+                          username={safeUsername}
+                          profileUserId={spotifyConnectionScope}
+                          aboutText={safeAbout}
+                          spotifyConnection={spotifyConnection}
+                          presenceState="online"
+                          presenceLabel={PRESENCE_LABELS.online}
+                          showActions={false}
+                        />
+                      </div>
+                    </div>
                   </div>
                 </aside>
               </div>
 
               {hasUnsavedProfileChanges ? (
                 <div className={styles.unsavedBar} role="status" aria-live="polite">
-                  <p className={styles.unsavedText}>Voce tem alteracoes nao salvas.</p>
+                  <p className={styles.unsavedText}>Há alterações não salvas.</p>
                   <div className={styles.unsavedActions}>
                     <button
                       type="button"
@@ -3183,252 +5632,502 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
                 </p>
               ) : null}
             </div>
-            ) : activeSection === "audio" ? (
-              <section className={styles.audioPanel} aria-label="Configuracoes de audio">
+            ) : activeSection === "connections" ? (
+              <section className={styles.connectionsPanel} aria-label="Conexões">
                 <header className={styles.editorHeader}>
-                  <h3 className={styles.editorTitle}>Audio</h3>
+                  <h3 className={styles.editorTitle}>Conexões</h3>
+                </header>
+
+                <div className={styles.connectionsContent}>
+                  <section className={styles.connectionsDirectory} aria-label="Adicionar conexões ao perfil">
+                    <p className={styles.connectionsDirectoryTitle}>Adicionar conexões ao perfil</p>
+                    <p className={styles.connectionsDirectorySubtitle}>
+                      Seus dados só serão usados com sua autorização, conforme a{" "}
+                      <span className={styles.connectionsDirectoryPolicyLink}>política de privacidade</span> do Messly.
+                    </p>
+                    <div className={styles.connectionsProviderGrid}>
+                      <button
+                        type="button"
+                        className={`${styles.connectionsProviderButton}${
+                          isSpotifyConnected ? ` ${styles.connectionsProviderButtonActive}` : ""
+                        }`}
+                        aria-label={isSpotifyConnected ? "Spotify conectado" : "Conectar Spotify"}
+                        title={isSpotifyConnected ? "Spotify conectado" : "Conectar Spotify"}
+                        onClick={() => {
+                          void handleConnectSpotify();
+                        }}
+                        disabled={isSpotifyConnected || isSpotifyConnecting || !spotifyOAuthEnabled}
+                      >
+                        <img className={styles.connectionsProviderButtonLogoImage} src={spotifyLogoSrc} alt="" loading="lazy" />
+                      </button>
+                    </div>
+
+                    {!isSpotifyConnected && isSpotifyConnecting ? (
+                      <p className={styles.connectionsProviderStatus}>Conectando ao Spotify...</p>
+                    ) : null}
+                    {!isSpotifyConnected && !isSpotifyConnecting && !spotifyOAuthEnabled ? (
+                      <p className={styles.connectionsProviderHint}>
+                        A conexão com o Spotify não está disponível no momento.
+                      </p>
+                    ) : null}
+                    {spotifyConnectionError ? (
+                      <p className={styles.connectionsProviderError} role="alert">
+                        {spotifyConnectionError}
+                      </p>
+                    ) : null}
+                  </section>
+
+                  <div className={styles.connectionsDivider} aria-hidden="true" />
+
+                  {isSpotifyConnected ? (
+                    <article className={styles.connectionsCard} aria-label="Spotify conectado">
+                      <div className={styles.connectionsCardHeader}>
+                        <span className={styles.connectionsProviderIcon} aria-hidden="true">
+                          <img className={styles.connectionsProviderLogoImage} src={spotifyLogoSrc} alt="" loading="lazy" />
+                        </span>
+                        <div className={styles.connectionsProviderMeta}>
+                          <p className={styles.connectionsProviderName}>{spotifyDisplayName}</p>
+                          <p className={styles.connectionsProviderType}>Spotify</p>
+                        </div>
+                        <button
+                          type="button"
+                          className={styles.connectionsDisconnectButton}
+                          onClick={handleDisconnectSpotify}
+                          aria-label="Desconectar Spotify"
+                        >
+                          <MaterialSymbolIcon name="close" size={16} filled={false} />
+                        </button>
+                      </div>
+
+                      <div className={styles.connectionsToggleList}>
+                        <div className={styles.connectionsToggleRow}>
+                          <p className={styles.connectionsToggleTitle}>Exibir no perfil</p>
+                          <button
+                            type="button"
+                            className={`${styles.windowsSwitch}${spotifyConnection.showOnProfile ? ` ${styles.windowsSwitchOn}` : ""}`}
+                            aria-label="Exibir no perfil"
+                            aria-pressed={spotifyConnection.showOnProfile}
+                            onClick={() => handleSpotifyVisibilityToggle("showOnProfile")}
+                          >
+                            <span className={styles.windowsSwitchThumb} />
+                          </button>
+                        </div>
+
+                        <div className={styles.connectionsToggleRow}>
+                          <p className={styles.connectionsToggleTitle}>Exibir Spotify no status</p>
+                          <button
+                            type="button"
+                            className={`${styles.windowsSwitch}${spotifyConnection.showAsStatus ? ` ${styles.windowsSwitchOn}` : ""}`}
+                            aria-label="Alternar status do Spotify"
+                            aria-pressed={spotifyConnection.showAsStatus}
+                            onClick={() => handleSpotifyVisibilityToggle("showAsStatus")}
+                          >
+                            <span className={styles.windowsSwitchThumb} />
+                          </button>
+                        </div>
+
+                      </div>
+                    </article>
+                  ) : null}
+                </div>
+              </section>
+            ) : activeSection === "audio" ? (
+              <section className={styles.audioPanel} aria-label="Configurações de voz e vídeo">
+                <header className={styles.editorHeader}>
+                  <h3 className={styles.editorTitle}>Voz e vídeo</h3>
                 </header>
 
                 <div className={styles.audioContent}>
-                  <section className={styles.audioCard}>
-                    <div className={styles.audioCardHead}>
-                      <h4>Dispositivos</h4>
-                    </div>
+                  <div className={styles.audioScene}>
+                    <section className={styles.audioDeviceGrid} aria-label="Dispositivos de áudio">
+                      <article className={styles.audioDeviceCard}>
+                        <label className={styles.audioField}>
+                          <span>Microfone</span>
+                          <div className={styles.audioDeviceSelect} ref={inputDeviceSelectRef}>
+                            <button
+                              type="button"
+                              className={`${styles.audioDeviceSelectTrigger}${
+                                isInputDeviceSelectOpen ? ` ${styles.audioDeviceSelectTriggerOpen}` : ""
+                              }`}
+                              aria-haspopup="listbox"
+                              aria-expanded={isInputDeviceSelectOpen}
+                              aria-label="Selecionar microfone"
+                              onClick={() => {
+                                setIsOutputDeviceSelectOpen(false);
+                                setIsInputDeviceSelectOpen((current) => !current);
+                              }}
+                            >
+                              <span className={styles.audioDeviceSelectTriggerText}>
+                                <span className={styles.audioDeviceSelectTitle}>
+                                  {selectedInputDeviceOption?.title ?? "Padrão do Windows"}
+                                </span>
+                                {selectedInputDeviceOption?.subtitle ? (
+                                  <span className={styles.audioDeviceSelectSubtitle}>
+                                    {selectedInputDeviceOption.subtitle}
+                                  </span>
+                                ) : null}
+                              </span>
+                              <MaterialSymbolIcon name="expand_more" size={18} />
+                            </button>
 
-                    <div className={styles.audioGrid}>
-                      <label className={styles.audioField}>
-                        <span>Microfone</span>
-                        <select value={selectedInputId} onChange={(event) => setSelectedInputId(event.target.value)}>
-                          {audioInputs.length === 0 ? (
-                            <option value="">Nenhum microfone encontrado</option>
-                          ) : (
-                            audioInputs.map((device, index) => (
-                              <option key={device.deviceId || `input-${index}`} value={device.deviceId}>
-                                {formatDeviceOptionLabel(device.label, `Microfone ${index + 1}`)}
-                              </option>
-                            ))
-                          )}
-                        </select>
-                      </label>
+                            {isInputDeviceSelectOpen ? (
+                              <div className={styles.audioDeviceSelectMenu} role="listbox" aria-label="Lista de microfones">
+                                {inputDeviceOptions.map((option, index) => {
+                                  const optionKey = option.value || `default-input-${index}`;
+                                  const isSelected = option.value === selectedInputId;
+                                  return (
+                                    <button
+                                      key={optionKey}
+                                      type="button"
+                                      className={`${styles.audioDeviceSelectOption}${
+                                        isSelected ? ` ${styles.audioDeviceSelectOptionSelected}` : ""
+                                      }`}
+                                      role="option"
+                                      aria-selected={isSelected}
+                                      onClick={() => handleSelectInputDevice(option.value)}
+                                    >
+                                      <span className={styles.audioDeviceSelectOptionText}>
+                                        <span className={styles.audioDeviceSelectOptionTitle}>{option.title}</span>
+                                        {option.subtitle ? (
+                                          <span className={styles.audioDeviceSelectOptionSubtitle}>{option.subtitle}</span>
+                                        ) : null}
+                                      </span>
+                                      {isSelected ? (
+                                        <span className={styles.audioDeviceSelectOptionCheck} aria-hidden="true">
+                                          <MaterialSymbolIcon name="check" size={14} filled={true} />
+                                        </span>
+                                      ) : null}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            ) : null}
+                          </div>
+                        </label>
 
-                      <label className={styles.audioField}>
-                        <span>Saida</span>
-                        <select value={selectedOutputId} onChange={(event) => setSelectedOutputId(event.target.value)}>
-                          {audioOutputs.length === 0 ? (
-                            <option value="">Saida padrao do sistema</option>
-                          ) : (
-                            audioOutputs.map((device, index) => (
-                              <option key={device.deviceId || `output-${index}`} value={device.deviceId}>
-                                {formatDeviceOptionLabel(device.label, `Saida ${index + 1}`)}
-                              </option>
-                            ))
-                          )}
-                        </select>
-                      </label>
-                    </div>
-
-                    <div className={styles.audioSliders}>
-                      <div className={styles.audioSliderRow}>
-                        <label className={styles.audioSlider}>
-                          <span>Volume de entrada ({normalizedInputGain}%)</span>
+                        <label className={`${styles.audioSlider} ${styles.audioVolumeSlider}`}>
+                          <span className={styles.audioSliderLabelRow}>
+                            <span>Volume de entrada</span>
+                            <strong>{normalizedInputGain}%</strong>
+                          </span>
                           <input
                             type="range"
                             min={0}
                             max={100}
                             step={1}
                             value={normalizedInputGain}
+                            style={inputVolumeSliderStyle}
+                            onInput={(event) => setInputGain(clamp(Number((event.target as HTMLInputElement).value), 0, 100))}
                             onChange={(event) => setInputGain(clamp(Number(event.target.value), 0, 100))}
                           />
                         </label>
-                        <label className={styles.audioSlider}>
-                          <span>Volume de saida ({Math.round(outputVolume)}%)</span>
+                      </article>
+
+                      <article className={styles.audioDeviceCard}>
+                        <label className={styles.audioField}>
+                          <span>Saída</span>
+                          <div className={styles.audioDeviceSelect} ref={outputDeviceSelectRef}>
+                            <button
+                              type="button"
+                              className={`${styles.audioDeviceSelectTrigger}${
+                                isOutputDeviceSelectOpen ? ` ${styles.audioDeviceSelectTriggerOpen}` : ""
+                              }`}
+                              aria-haspopup="listbox"
+                              aria-expanded={isOutputDeviceSelectOpen}
+                              aria-label="Selecionar dispositivo de saída"
+                              onClick={() => {
+                                setIsInputDeviceSelectOpen(false);
+                                setIsOutputDeviceSelectOpen((current) => !current);
+                              }}
+                            >
+                              <span className={styles.audioDeviceSelectTriggerText}>
+                                <span className={styles.audioDeviceSelectTitle}>
+                                  {selectedOutputDeviceOption?.title ?? "Padrão do Windows"}
+                                </span>
+                                {selectedOutputDeviceOption?.subtitle ? (
+                                  <span className={styles.audioDeviceSelectSubtitle}>
+                                    {selectedOutputDeviceOption.subtitle}
+                                  </span>
+                                ) : null}
+                              </span>
+                              <MaterialSymbolIcon name="expand_more" size={18} />
+                            </button>
+
+                            {isOutputDeviceSelectOpen ? (
+                              <div className={styles.audioDeviceSelectMenu} role="listbox" aria-label="Lista de saídas de áudio">
+                                {outputDeviceOptions.map((option, index) => {
+                                  const optionKey = option.value || `default-output-${index}`;
+                                  const isSelected = option.value === selectedOutputId;
+                                  return (
+                                    <button
+                                      key={optionKey}
+                                      type="button"
+                                      className={`${styles.audioDeviceSelectOption}${
+                                        isSelected ? ` ${styles.audioDeviceSelectOptionSelected}` : ""
+                                      }`}
+                                      role="option"
+                                      aria-selected={isSelected}
+                                      onClick={() => handleSelectOutputDevice(option.value)}
+                                    >
+                                      <span className={styles.audioDeviceSelectOptionText}>
+                                        <span className={styles.audioDeviceSelectOptionTitle}>{option.title}</span>
+                                        {option.subtitle ? (
+                                          <span className={styles.audioDeviceSelectOptionSubtitle}>{option.subtitle}</span>
+                                        ) : null}
+                                      </span>
+                                      {isSelected ? (
+                                        <span className={styles.audioDeviceSelectOptionCheck} aria-hidden="true">
+                                          <MaterialSymbolIcon name="check" size={14} filled={true} />
+                                        </span>
+                                      ) : null}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            ) : null}
+                          </div>
+                        </label>
+
+                        <label className={`${styles.audioSlider} ${styles.audioVolumeSlider}`}>
+                          <span className={styles.audioSliderLabelRow}>
+                            <span>Volume de saída</span>
+                            <strong>{normalizedOutputVolume}%</strong>
+                          </span>
                           <input
                             type="range"
                             min={0}
                             max={200}
                             step={1}
                             value={outputVolume}
+                            style={outputVolumeSliderStyle}
+                            onInput={(event) => setOutputVolume(clamp(Number((event.target as HTMLInputElement).value), 0, 200))}
                             onChange={(event) => setOutputVolume(clamp(Number(event.target.value), 0, 200))}
                           />
                         </label>
-                      </div>
-                    </div>
+                      </article>
+                    </section>
 
-                    <div className={styles.audioMeterWrap}>
-                      <div
-                        className={`${styles.audioMeter}${
-                          micMeterHasSignal ? ` ${styles.audioMeterActive}` : ""
-                        }${localMicClipping ? ` ${styles.audioMeterClipping}` : ""}`}
-                      >
-                        <div className={styles.audioMeterBars}>
-                          {micMeterBars.map((scale, index) => (
-                            <span
-                              key={`mic-meter-${index}`}
-                              className={styles.audioMeterBar}
-                              style={{ transform: `scaleY(${scale})` }}
-                            />
-                          ))}
+                    <section className={styles.audioTestCard} aria-label="Teste de microfone">
+                      <div className={styles.audioTestMeterRow}>
+                        <button
+                          type="button"
+                          className={`${styles.audioTestButton} ${styles.audioTestButtonCompact}${
+                            micTestActive ? ` ${styles.audioTestButtonStop}` : ""
+                          }`}
+                          onClick={handleMicTestToggle}
+                        >
+                          {micTestActive ? "Parar teste" : "Teste do microfone"}
+                        </button>
+
+                        <div
+                          className={`${styles.audioSignalIndicator}${
+                            micMeterHasSignal ? ` ${styles.audioSignalIndicatorActive}` : ""
+                          }${localMicClipping ? ` ${styles.audioSignalIndicatorClip}` : ""}`}
+                          aria-hidden="true"
+                        >
+                          <div className={styles.audioSignalBars}>
+                            {micMeterBars.map((scale, index) => (
+                              <span
+                                key={`audio-stage-${index}`}
+                                className={styles.audioSignalBar}
+                                style={{ transform: `scaleY(${scale})` }}
+                              />
+                            ))}
+                          </div>
                         </div>
                       </div>
 
-                      <div className={styles.audioMeterStats}>
-                        <span>Nivel: {Math.round(localMicLevel * 100)}%</span>
-                        <span>Pico: {Math.round(localMicPeak * 100)}%</span>
-                        <span
-                          className={`${styles.audioVadState}${vadState === "speaking" ? ` ${styles.audioVadStateSpeaking}` : ""}`}
-                        >
-                          {vadState === "speaking" ? "Falando" : "Silencio"}
-                        </span>
-                        {localMicClipping ? <span className={styles.audioClipState}>Clipping</span> : null}
-                      </div>
-
                       {micTestError ? <p className={styles.audioError}>{micTestError}</p> : null}
+                    </section>
 
-                      <button
-                        type="button"
-                        className={`${styles.audioTestButton}${micTestActive ? ` ${styles.audioTestButtonStop}` : ""}`}
-                        onClick={handleMicTestToggle}
-                      >
-                        {micTestActive ? "Parar teste do microfone" : "Iniciar teste do microfone"}
-                      </button>
-                    </div>
-                  </section>
-
-                  <section className={`${styles.audioCard} ${styles.audioCardVoice}`}>
-                    <div className={styles.audioCardHead}>
-                      <h4>Processamento de voz</h4>
-                    </div>
-
-                    <div className={styles.voiceLayout}>
-                      <div className={styles.voiceColumn}>
-                        <section className={styles.voiceBlock}>
-                          <h5 className={styles.voiceBlockTitle}>Qualidade de captura</h5>
-                          <div className={styles.audioToggles}>
-                            <label className={styles.audioToggle}>
-                              <span className={styles.audioToggleText}>
-                                <span className={styles.audioToggleTitle}>Reducao de ruido</span>
-                                <span className={styles.audioToggleDesc}>Filtra ruido constante de fundo.</span>
-                              </span>
-                              <input
-                                type="checkbox"
-                                checked={noiseSuppression}
-                                onChange={(event) => setNoiseSuppression(event.target.checked)}
-                              />
-                            </label>
-
-                            <label className={styles.audioToggle}>
-                              <span className={styles.audioToggleText}>
-                                <span className={styles.audioToggleTitle}>Cancelamento de eco</span>
-                                <span className={styles.audioToggleDesc}>Evita retorno do audio para a chamada.</span>
-                              </span>
-                              <input
-                                type="checkbox"
-                                checked={echoCancellation}
-                                onChange={(event) => setEchoCancellation(event.target.checked)}
-                              />
-                            </label>
-
-                            <label className={styles.audioToggle}>
-                              <span className={styles.audioToggleText}>
-                                <span className={styles.audioToggleTitle}>Ganho automatico (AGC)</span>
-                                <span className={styles.audioToggleDesc}>Ajusta o volume do microfone automaticamente.</span>
-                              </span>
-                              <input
-                                type="checkbox"
-                                checked={autoGainControl}
-                                onChange={(event) => setAutoGainControl(event.target.checked)}
-                              />
-                            </label>
-
-                            <label className={styles.audioToggle}>
-                              <span className={styles.audioToggleText}>
-                                <span className={styles.audioToggleTitle}>Deteccao de voz (VAD)</span>
-                                <span className={styles.audioToggleDesc}>Detecta fala e reduz envio de silencio.</span>
-                              </span>
-                              <input
-                                type="checkbox"
-                                checked={vadEnabled}
-                                onChange={(event) => setVadEnabled(event.target.checked)}
-                              />
-                            </label>
-
-                            <label className={styles.audioToggle}>
-                              <span className={styles.audioToggleText}>
-                                <span className={styles.audioToggleTitle}>Foco de voz</span>
-                                <span className={styles.audioToggleDesc}>Prioriza sua voz e corta sons laterais.</span>
-                              </span>
-                              <input
-                                type="checkbox"
-                                checked={voiceFocus}
-                                onChange={(event) => setVoiceFocus(event.target.checked)}
-                              />
-                            </label>
+                    <section className={styles.audioProcessingSection} aria-label="Processamento de voz">
+                      <div className={`${styles.processingCoreRows} ${styles.processingCoreRowsClean}`}>
+                        <div className={`${styles.processingCoreRow} ${styles.processingCoreRowCheckboxLayout}`}>
+                          <ProcessingCheckbox
+                            checked={echoCancellation}
+                            ariaLabel="Alternar cancelamento de eco"
+                            onChange={setEchoCancellation}
+                          />
+                          <div className={styles.processingCoreRowMeta}>
+                            <p className={styles.processingCoreRowTitle}>Cancelamento de eco</p>
+                            <p className={styles.processingCoreRowState}>Filtra retorno acústico do alto-falante.</p>
                           </div>
-                        </section>
+                        </div>
+
+                        <div className={`${styles.processingCoreRow} ${styles.processingCoreRowCheckboxLayout}`}>
+                          <ProcessingCheckbox
+                            checked={noiseSuppression}
+                            ariaLabel="Alternar supressão de ruído"
+                            onChange={setNoiseSuppression}
+                          />
+                          <div className={styles.processingCoreRowMeta}>
+                            <p className={styles.processingCoreRowTitle}>Supressão de ruído</p>
+                            <p className={styles.processingCoreRowState}>Reduz ruído contínuo de fundo.</p>
+                          </div>
+                        </div>
+
+                        <div className={`${styles.processingCoreRow} ${styles.processingCoreRowCheckboxLayout}`}>
+                          <ProcessingCheckbox
+                            checked={vadEnabled}
+                            ariaLabel="Alternar detecção de voz"
+                            onChange={setVadEnabled}
+                          />
+                          <div className={styles.processingCoreRowMeta}>
+                            <p className={styles.processingCoreRowTitle}>Detecção de voz (VAD)</p>
+                            <p className={styles.processingCoreRowState}>Evita envio de silêncio quando não há fala.</p>
+                          </div>
+                        </div>
+                      </div>
+                    </section>
+
+                    <section className={styles.audioModeSection} aria-label="Modo de entrada">
+                      <div className={styles.audioPttHeader}>
+                        <div className={styles.audioPttHeaderMeta}>
+                          <h4 className={styles.audioPttTitle}>Apertar para falar</h4>
+                          <p className={styles.audioPttDescription}>
+                            Ative para transmitir áudio apenas enquanto pressiona uma tecla.
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          className={`${styles.windowsSwitch}${pushToTalkEnabled ? ` ${styles.windowsSwitchOn}` : ""}`}
+                          aria-label="Alternar apertar para falar"
+                          aria-pressed={pushToTalkEnabled}
+                          onClick={() => handlePushToTalkChange(!pushToTalkEnabled)}
+                        >
+                          <span className={styles.windowsSwitchThumb} aria-hidden="true" />
+                        </button>
                       </div>
 
-                      <div className={styles.voiceColumn}>
-                        <section className={styles.voiceBlock}>
-                          <h5 className={styles.voiceBlockTitle}>Sensibilidade</h5>
-                          <label className={`${styles.audioToggle} ${styles.audioToggleCentered}`}>
-                            <span className={styles.audioToggleText}>
-                              <span className={styles.audioToggleTitle}>Sensibilidade automatica</span>
-                              <span className={styles.audioToggleDesc}>Define o nivel ideal sem ajuste manual.</span>
-                            </span>
-                            <input
-                              type="checkbox"
-                              checked={autoMicSensitivity}
-                              onChange={(event) => setAutoMicSensitivity(event.target.checked)}
-                            />
-                          </label>
+                      {pushToTalkEnabled ? (
+                        <div className={styles.audioPttBody}>
+                          <div className={styles.audioPttMeta}>
+                            <p className={styles.audioPttSummaryTitle}>Atalho de teclado</p>
+                            <p className={styles.audioPttDescription}>Tecla usada para ativar o microfone.</p>
+                          </div>
 
-                          <label className={`${styles.audioSlider} ${styles.audioSliderSensitivity}`}>
-                            <span>Sensibilidade ({Math.round(displayedMicSensitivity)} dB)</span>
+                          <div className={styles.audioShortcutRow}>
+                            <span className={styles.audioShortcutKey}>{String(pushToTalkBind).replace(/\s+/g, "").toUpperCase()}</span>
+                            <button
+                              type="button"
+                              className={`${styles.audioShortcutEditButton}${
+                                listeningForBind ? ` ${styles.audioShortcutEditButtonListening}` : ""
+                              }`}
+                              onClick={() => setListeningForBind(true)}
+                            >
+                              <MaterialSymbolIcon name="edit" size={14} filled={false} />
+                              <span>{listeningForBind ? "Pressione uma tecla..." : "Editar"}</span>
+                            </button>
+                          </div>
+                        </div>
+                      ) : null}
+                    </section>
+
+                    <section className={styles.audioProcessingSection} aria-label="Processamento avançado de voz">
+                      <div className={styles.processingCoreRows}>
+                        <div className={styles.processingCoreRow}>
+                          <div className={styles.processingCoreRowMeta}>
+                            <p className={styles.processingCoreRowTitle}>Controle de ganho automático</p>
+                            <p className={styles.processingCoreRowState}>Compensa volume baixo sem ajuste manual.</p>
+                          </div>
+                          <button
+                            type="button"
+                            className={`${styles.windowsSwitch}${autoGainControl ? ` ${styles.windowsSwitchOn}` : ""}`}
+                            aria-label="Alternar controle de ganho automático"
+                            aria-pressed={autoGainControl}
+                            onClick={() => setAutoGainControl(!autoGainControl)}
+                          >
+                            <span className={styles.windowsSwitchThumb} aria-hidden="true" />
+                          </button>
+                        </div>
+
+                        <div className={styles.processingCoreRow}>
+                          <div className={styles.processingCoreRowMeta}>
+                            <p className={styles.processingCoreRowTitle}>Foco de voz</p>
+                            <p className={styles.processingCoreRowState}>Prioriza sua voz e corta sons laterais.</p>
+                          </div>
+                          <button
+                            type="button"
+                            className={`${styles.windowsSwitch}${voiceFocus ? ` ${styles.windowsSwitchOn}` : ""}`}
+                            aria-label="Alternar foco de voz"
+                            aria-pressed={voiceFocus}
+                            onClick={() => setVoiceFocus(!voiceFocus)}
+                          >
+                            <span className={styles.windowsSwitchThumb} aria-hidden="true" />
+                          </button>
+                        </div>
+
+                        <div className={styles.processingCoreRow}>
+                          <div className={styles.processingCoreRowMeta}>
+                            <p className={styles.processingCoreRowTitle}>
+                              Prioridade de áudio em chamadas
+                            </p>
+                            <p className={styles.processingCoreRowState}>
+                              Melhora a estabilidade da voz em conexões sobrecarregadas. Em algumas redes, este ajuste
+                              pode não ter efeito.
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            className={`${styles.windowsSwitch}${qosHighPriority ? ` ${styles.windowsSwitchOn}` : ""}`}
+                            aria-label="Alternar prioridade de áudio em chamadas"
+                            aria-pressed={qosHighPriority}
+                            onClick={() => setQosHighPriority(!qosHighPriority)}
+                          >
+                            <span className={styles.windowsSwitchThumb} aria-hidden="true" />
+                          </button>
+                        </div>
+                      </div>
+
+                      <section className={styles.processingCoreSensitivityBlock} aria-label="Sensibilidade do microfone">
+                        <div className={styles.processingCoreSensitivityHead}>
+                          <div className={styles.processingCoreRowMeta}>
+                            <p className={styles.processingCoreRowTitle}>Ajustar automaticamente a sensibilidade de entrada</p>
+                            <p className={styles.processingCoreRowState}>
+                              {autoMicSensitivity
+                                ? "Ajusta automaticamente a sensibilidade do microfone para manter sua voz clara."
+                                : "Defina manualmente a sensibilidade do microfone."}
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            className={`${styles.windowsSwitch}${autoMicSensitivity ? ` ${styles.windowsSwitchOn}` : ""}`}
+                            aria-label="Alternar ajuste automático da sensibilidade"
+                            aria-pressed={autoMicSensitivity}
+                            onClick={() => setAutoMicSensitivity(!autoMicSensitivity)}
+                          >
+                            <span className={styles.windowsSwitchThumb} aria-hidden="true" />
+                          </button>
+                        </div>
+
+                        <label
+                          className={`${styles.audioSlider} ${styles.audioSliderSensitivity} ${styles.processingCoreSensitivitySlider}${
+                            autoMicSensitivity ? "" : ` ${styles.processingCoreSensitivitySliderManual}`
+                          }`}
+                        >
+                          <span className={styles.audioSrOnly}>Sensibilidade do microfone</span>
                             <input
                               type="range"
                               min={-100}
                               max={0}
                               step={1}
                               value={displayedMicSensitivity}
-                              disabled={autoMicSensitivity}
-                              onChange={(event) => handleManualMicSensitivityChange(Number(event.target.value))}
-                            />
-                          </label>
-                        </section>
-
-                        <section className={styles.voiceBlock}>
-                          <h5 className={styles.voiceBlockTitle}>Push to talk</h5>
-                          <div className={styles.audioPtt}>
-                            <label className={styles.audioToggle}>
-                              <span className={styles.audioToggleText}>
-                                <span className={styles.audioToggleTitle}>Push-to-talk</span>
-                                <span className={styles.audioToggleDesc}>O microfone abre apenas com o atalho.</span>
-                              </span>
-                              <input
-                                type="checkbox"
-                                checked={pushToTalkEnabled}
-                                onChange={(event) => handlePushToTalkChange(event.target.checked)}
-                              />
-                            </label>
-
-                            {pushToTalkEnabled ? (
-                              <button
-                                type="button"
-                                className={`${styles.audioBindButton}${listeningForBind ? ` ${styles.audioBindButtonListening}` : ""}`}
-                                onClick={() => setListeningForBind(true)}
-                              >
-                                {listeningForBind ? "Pressione uma tecla..." : `Atalho: ${pushToTalkBind}`}
-                              </button>
-                            ) : null}
-                          </div>
-                        </section>
-                      </div>
-                    </div>
-                  </section>
+                              style={micSensitivitySliderStyle}
+                              onInput={(event) => {
+                                handleMicSensitivitySliderChange(Number((event.target as HTMLInputElement).value));
+                              }}
+                              onChange={(event) => {
+                                handleMicSensitivitySliderChange(Number(event.target.value));
+                              }}
+                          />
+                        </label>
+                      </section>
+                    </section>
+                  </div>
                 </div>
               </section>
             ) : activeSection === "windows" ? (
-              <section className={styles.windowsPanel} aria-label="Configuracoes do Windows">
+              <section className={styles.windowsPanel} aria-label="Configurações do Windows">
                 <header className={styles.editorHeader}>
                   <h3 className={styles.editorTitle}>Windows</h3>
                 </header>
@@ -3444,7 +6143,7 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
 
                     {!isWindowsDesktopRuntime ? (
                       <p className={styles.windowsSupportNotice}>
-                        Disponivel apenas no aplicativo desktop para Windows.
+                        Disponível apenas no app para Windows.
                       </p>
                     ) : (
                       <div className={styles.windowsSettingList}>
@@ -3453,25 +6152,33 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
                             {
                               key: "startMinimized",
                               title: "Iniciar minimizado",
-                              description: "Abre o Messly minimizado na proxima inicializacao do app.",
+                              description: "Abre o aplicativo minimizado na próxima inicialização do sistema.",
                             },
                             {
                               key: "closeToTray",
                               title: "Ao fechar, minimizar para bandeja",
-                              description: "Mantem o app rodando na bandeja do sistema ao fechar a janela.",
+                              description: "Mantém o aplicativo em segundo plano ao fechar a janela principal.",
                             },
                             {
                               key: "launchAtStartup",
-                              title: "Abrir o Messly na inicializacao",
+                              title: "Abrir na inicialização",
                               description: "Inicia o Messly automaticamente quando o Windows ligar.",
                             },
                           ] as const
                         ).map((item) => {
                           const isSaving = savingWindowsBehaviorKey === item.key;
-                          const disabled = !canManageWindowsBehavior || isWindowsBehaviorLoading || Boolean(isSaving);
+                          const isBlockedByDependency =
+                            item.key === "startMinimized" && !windowsBehaviorSettings.launchAtStartup;
+                          const disabled =
+                            !canManageWindowsBehavior || isWindowsBehaviorLoading || Boolean(isSaving) || isBlockedByDependency;
                           const checked = Boolean(windowsBehaviorSettings[item.key]);
                           return (
-                            <div key={item.key} className={styles.windowsSettingRow}>
+                            <div
+                              key={item.key}
+                              className={`${styles.windowsSettingRow}${
+                                disabled ? ` ${styles.windowsSettingRowDisabled}` : ""
+                              }`}
+                            >
                               <div className={styles.windowsSettingMeta}>
                                 <p className={styles.windowsSettingTitle}>{item.title}</p>
                                 <p className={styles.windowsSettingDesc}>{item.description}</p>
@@ -3506,66 +6213,266 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
                   </section>
                 </div>
               </section>
-            ) : (
-              <section className={styles.socialPanel} aria-label="Conteudo social">
+            ) : activeSection === "devices" ? (
+              <section className={styles.devicesPanel} aria-label="Dispositivos">
                 <header className={styles.editorHeader}>
-                  <h3 className={styles.editorTitle}>Conteudo social</h3>
+                  <h3 className={styles.editorTitle}>Dispositivos</h3>
+                </header>
+
+                <div className={styles.devicesContent}>
+                  <section className={styles.devicesIntro}>
+                    <p className={styles.devicesIntroText}>
+                      Veja os acessos recentes da sua conta neste dispositivo e nos outros clientes conectados.
+                    </p>
+                  </section>
+
+                  {deviceSessionsError ? (
+                    <p className={`${styles.devicesState} ${styles.devicesStateError}`}>{deviceSessionsError}</p>
+                  ) : deviceSessions.length === 0 ? (
+                    isDeviceSessionsLoading ? null : (
+                      <div className={styles.devicesEmptyState}>
+                        <div className={styles.devicesEmptyIcon} aria-hidden="true">
+                          <MaterialSymbolIcon name="devices" size={30} filled={false} />
+                        </div>
+                        <p className={styles.devicesEmptyTitle}>Nenhum dispositivo recente encontrado</p>
+                        <p className={styles.devicesEmptyText}>
+                          Quando houver sessões registradas, elas aparecerão aqui com sistema e localização aproximada.
+                        </p>
+                      </div>
+                    )
+                  ) : (
+                    <>
+                      {currentDeviceSession ? (
+                        <section className={styles.devicesGroup} aria-label="Dispositivo atual">
+                          <h4 className={styles.devicesGroupTitle}>Dispositivo atual</h4>
+
+                          <article className={`${styles.deviceRow} ${styles.deviceRowCurrent}`}>
+                            <div className={styles.deviceIconWrap} aria-hidden="true">
+                              <MaterialSymbolIcon
+                                className={styles.deviceIcon}
+                                name={getDevicePlatformIcon(currentDeviceSession.platform)}
+                                size={24}
+                                filled={false}
+                              />
+                            </div>
+
+                            <div className={styles.deviceMeta}>
+                              <p className={styles.deviceTitle}>
+                                {`${getDevicePlatformLabel(currentDeviceSession.platform)} · ${currentDeviceSession.osName} · ${currentDeviceSession.clientName}`.toUpperCase()}
+                              </p>
+                              {formatDeviceLocationLabel(currentDeviceSession.locationLabel) ? (
+                                <p className={styles.deviceLocation}>
+                                  {formatDeviceLocationLabel(currentDeviceSession.locationLabel)}
+                                </p>
+                              ) : null}
+                            </div>
+                          </article>
+                        </section>
+                      ) : null}
+
+                      {otherDeviceSessions.length > 0 ? (
+                        <section className={styles.devicesGroup} aria-label="Outros dispositivos">
+                          <h4 className={styles.devicesGroupTitle}>Outros dispositivos</h4>
+
+                          <div className={styles.devicesList}>
+                            {otherDeviceSessions.map((session) => {
+                              const lastSeenLabel = formatRelativeLastSeen(session.lastActive ?? session.updatedAt);
+                              const locationLabel = formatDeviceLocationLabel(session.locationLabel);
+                              const subtitle = [locationLabel, lastSeenLabel]
+                                .filter((value): value is string => Boolean(value))
+                                .join(" · ");
+                              const canEndSession = isUuidLike(session.deviceId);
+                              const isEndingSession = endingDeviceSessionId === session.deviceId;
+
+                              return (
+                                <article key={session.deviceId} className={styles.deviceRow}>
+                                  <div className={styles.deviceIconWrap} aria-hidden="true">
+                                    <MaterialSymbolIcon
+                                      className={styles.deviceIcon}
+                                      name={getDevicePlatformIcon(session.platform)}
+                                      size={24}
+                                      filled={false}
+                                    />
+                                  </div>
+
+                                  <div className={styles.deviceMeta}>
+                                    <p className={styles.deviceTitle}>
+                                      {`${getDevicePlatformLabel(session.platform)} · ${session.osName} · ${session.clientName}`.toUpperCase()}
+                                    </p>
+                                    {subtitle ? <p className={styles.deviceLocation}>{subtitle}</p> : null}
+                                  </div>
+
+                                  {canEndSession ? (
+                                    <button
+                                      type="button"
+                                      className={`${styles.deviceEndSessionButton}${
+                                        isEndingSession ? ` ${styles.deviceEndSessionButtonBusy}` : ""
+                                      }`}
+                                      aria-label="Encerrar sessão deste dispositivo"
+                                      disabled={isEndingSession}
+                                      onClick={() => {
+                                        openEndDeviceSessionModal(session);
+                                      }}
+                                    >
+                                      <MaterialSymbolIcon name="close" size={18} filled={false} />
+                                    </button>
+                                  ) : null}
+                                </article>
+                              );
+                            })}
+                          </div>
+                        </section>
+                      ) : null}
+                    </>
+                  )}
+                </div>
+              </section>
+            ) : (
+              <section className={styles.socialPanel} aria-label="Conteúdo social">
+                <header className={styles.editorHeader}>
+                  <h3 className={styles.editorTitle}>Conteúdo social</h3>
                 </header>
 
                 <div className={styles.socialContent}>
-                  <section className={styles.blockedCard} aria-label="Contas bloqueadas">
-                    <header className={styles.blockedCardHeader}>
-                      <div className={styles.blockedCardIconWrap} aria-hidden="true">
-                        <MaterialSymbolIcon name="block" size={18} filled={false} />
-                      </div>
-                      <div className={styles.blockedCardHeading}>
-                        <h4 className={styles.blockedCardTitle}>Contas bloqueadas</h4>
-                        <p className={styles.blockedCardCount}>{blockedAccountsCountLabel}</p>
-                      </div>
-                    </header>
+                  <section className={styles.friendRequestCard} aria-label="Pedidos de amizade">
+                    <div className={styles.friendRequestHeader}>
+                      <h4 className={styles.friendRequestTitle}>Pedidos de amizade</h4>
+                    </div>
 
-                    {isBlockedAccountsLoading ? (
-                      <p className={styles.blockedState}>Carregando contas bloqueadas...</p>
-                    ) : blockedAccountsError ? (
-                      <p className={`${styles.blockedState} ${styles.blockedStateError}`}>{blockedAccountsError}</p>
-                    ) : blockedAccounts.length === 0 ? (
-                      <p className={styles.blockedState}>Voce nao bloqueou nenhum usuario.</p>
-                    ) : (
-                      <div className={styles.blockedList}>
-                        {blockedAccounts.map((account) => (
-                          <article key={account.userId} className={styles.blockedRow}>
-                            <div className={styles.blockedRowMain}>
-                              <img
-                                className={styles.blockedAvatar}
-                                src={account.avatarSrc}
-                                alt={`Avatar de ${account.displayName}`}
-                                loading="lazy"
-                                onError={(event) => {
-                                  event.currentTarget.onerror = null;
-                                  event.currentTarget.src = getNameAvatarUrl(account.displayName || account.username || "U");
-                                }}
-                              />
-                              <div className={styles.blockedMeta}>
-                                <p className={styles.blockedName}>{account.displayName}</p>
-                                <p className={styles.blockedUsername}>{account.username}</p>
-                              </div>
+                    <div className={styles.friendRequestList}>
+                      {(
+                        [
+                          {
+                            key: "allowAll",
+                            title: "Qualquer pessoa",
+                            description: "Permite convites de qualquer conta.",
+                          },
+                          {
+                            key: "allowFriendsOfFriends",
+                            title: "Amigos em comum",
+                            description: "Libera pedidos quando existe ao menos uma amizade compartilhada.",
+                          },
+                        ] as const
+                      ).map((item) => {
+                        const checked = Boolean(friendRequestPrivacy[item.key]);
+                        const disabled = !dbUserId || Boolean(savingFriendRequestPrivacyKey);
+                        const isSaving = savingFriendRequestPrivacyKey === item.key;
+
+                        return (
+                          <div key={item.key} className={styles.friendRequestRow}>
+                            <div className={styles.friendRequestMeta}>
+                              <p className={styles.friendRequestRowTitle}>{item.title}</p>
+                              <p className={styles.friendRequestRowDescription}>
+                                {isSaving ? "Salvando permissão..." : item.description}
+                              </p>
                             </div>
 
                             <button
                               type="button"
-                              className={styles.blockedUnblockButton}
+                              role="switch"
+                              aria-checked={checked}
+                              aria-label={item.title}
+                              disabled={disabled}
+                              className={`${styles.windowsSwitch}${checked ? ` ${styles.windowsSwitchOn}` : ""}${
+                                disabled ? ` ${styles.windowsSwitchDisabled}` : ""
+                              }`}
                               onClick={() => {
-                                void handleUnblockAccount(account.userId);
+                                void handleFriendRequestPrivacyToggle(item.key, !checked);
                               }}
-                              disabled={unblockingUserId === account.userId}
                             >
-                              {unblockingUserId === account.userId ? "Desbloqueando..." : "Desbloquear"}
+                              <span className={styles.windowsSwitchThumb} aria-hidden="true" />
                             </button>
-                          </article>
-                        ))}
-                      </div>
-                    )}
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {friendRequestPrivacyError ? (
+                      <p className={styles.friendRequestError}>{friendRequestPrivacyError}</p>
+                    ) : null}
                   </section>
+
+                  {blockedAccounts.length > 0 ? (
+                    <section className={styles.blockedCard} aria-label="Contas bloqueadas">
+                      <div className={styles.blockedCardHeader}>
+                        <div className={styles.blockedCardHeaderMeta}>
+                          <h4 className={styles.blockedCardTitle}>Contas bloqueadas</h4>
+                          <p className={styles.blockedCardDescription}>
+                            Usuários bloqueados não podem iniciar contato com você até serem removidos desta lista.
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className={styles.blockedTopBar}>
+                        <label className={styles.blockedSearchField} htmlFor="blocked-accounts-search">
+                          <MaterialSymbolIcon className={styles.blockedSearchIcon} name="search" size={16} filled={false} />
+                          <input
+                            id="blocked-accounts-search"
+                            className={styles.blockedSearchInput}
+                            type="search"
+                            inputMode="search"
+                            value={blockedSearchQuery}
+                            onChange={(event) => setBlockedSearchQuery(event.target.value)}
+                            placeholder="Buscar na lista de bloqueios"
+                            autoComplete="off"
+                            spellCheck={false}
+                          />
+                        </label>
+                      </div>
+
+                      {isBlockedAccountsLoading ? (
+                        <p className={styles.blockedState}>Carregando bloqueios...</p>
+                      ) : blockedAccountsError ? (
+                        <p className={`${styles.blockedState} ${styles.blockedStateError}`}>{blockedAccountsError}</p>
+                      ) : filteredBlockedAccounts.length === 0 ? (
+                        <div className={styles.blockedEmptyStateCompact}>
+                          <p className={styles.blockedEmptyTitle}>Nenhum resultado encontrado</p>
+                          <p className={styles.blockedEmptyDescription}>Tente outro termo para buscar na lista.</p>
+                        </div>
+                      ) : (
+                        <>
+                          <div className={styles.blockedList}>
+                            {filteredBlockedAccounts.map((account) => (
+                              <article key={account.userId} className={styles.blockedRow}>
+                                <div className={styles.blockedRowMain}>
+                                  <div className={styles.blockedAvatarWrap}>
+                                    <AvatarImage
+                                      className={styles.blockedAvatar}
+                                      src={account.avatarSrc}
+                                      name={account.displayName || account.username}
+                                      alt={`Avatar de ${account.displayName}`}
+                                      loading="lazy"
+                                    />
+                                    <span className={styles.blockedAvatarStatus} aria-hidden="true" />
+                                  </div>
+
+                                  <div className={styles.blockedMeta}>
+                                    <p className={styles.blockedName}>{account.displayName}</p>
+                                    <p className={styles.blockedUsername}>{account.blockedAtLabel}</p>
+                                  </div>
+                                </div>
+
+                                <button
+                                  type="button"
+                                  className={styles.blockedUnblockButton}
+                                  onClick={() => {
+                                    void handleUnblockAccount(account.userId);
+                                  }}
+                                  disabled={unblockingUserId === account.userId}
+                                >
+                                  {unblockingUserId === account.userId ? "Desbloqueando..." : "Desbloquear"}
+                                </button>
+                              </article>
+                            ))}
+                          </div>
+
+                          <footer className={styles.blockedFooter}>
+                            <p className={styles.blockedFooterCount}>{blockedFooterCountLabel}</p>
+                          </footer>
+                        </>
+                      )}
+                    </section>
+                  ) : null}
                 </div>
               </section>
             )}
@@ -3583,9 +6490,203 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
       />
 
       <Modal
+        isOpen={Boolean(pendingDeviceSession)}
+        title="Encerrar sessão"
+        ariaLabel="Confirmar encerramento de sessão de dispositivo"
+        onClose={closeEndDeviceSessionModal}
+        panelClassName={styles.accountModalPanel}
+        bodyClassName={styles.accountModalBody}
+        closeOnBackdrop={!Boolean(endingDeviceSessionId)}
+        footer={
+          <div className={styles.accountModalFooter}>
+            <button
+              className={styles.accountModalButtonGhost}
+              type="button"
+              onClick={closeEndDeviceSessionModal}
+              disabled={Boolean(endingDeviceSessionId)}
+            >
+              Cancelar
+            </button>
+            <button
+              className={styles.accountModalButtonPrimary}
+              type="button"
+              onClick={() => {
+                void handleConfirmEndDeviceSession();
+              }}
+              disabled={Boolean(endingDeviceSessionId)}
+            >
+              {endingDeviceSessionId ? "Encerrando..." : "Confirmar"}
+            </button>
+          </div>
+        }
+      >
+        <div className={styles.accountModalForm}>
+          <p className={styles.accountModalDescription}>
+            Digite sua senha atual para desconectar este dispositivo da sua conta.
+          </p>
+
+          {pendingDeviceSession ? (
+            <div className={styles.accountModalStepBadge}>
+              <MaterialSymbolIcon name={getDevicePlatformIcon(pendingDeviceSession.platform)} size={14} filled={false} />
+              <span>
+                {`${getDevicePlatformLabel(pendingDeviceSession.platform)} · ${pendingDeviceSession.osName} · ${pendingDeviceSession.clientName}`.toUpperCase()}
+              </span>
+            </div>
+          ) : null}
+
+          <label className={styles.accountModalLabel} htmlFor="device-session-password-input">
+            Senha atual
+          </label>
+          <input
+            id="device-session-password-input"
+            className={styles.accountModalInput}
+            type="password"
+            value={pendingDeviceSessionPasswordInput}
+            onChange={(event) => setPendingDeviceSessionPasswordInput(event.target.value)}
+            placeholder="Digite sua senha"
+            autoComplete="current-password"
+            disabled={Boolean(endingDeviceSessionId)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                void handleConfirmEndDeviceSession();
+              }
+            }}
+          />
+
+          {pendingDeviceSessionFeedback ? (
+            <p
+              className={`${styles.accountModalFeedback}${
+                pendingDeviceSessionFeedback.tone === "error"
+                  ? ` ${styles.accountModalFeedbackError}`
+                  : ` ${styles.accountModalFeedbackSuccess}`
+              }`}
+              role="status"
+              aria-live="polite"
+            >
+              {pendingDeviceSessionFeedback.message}
+            </p>
+          ) : null}
+        </div>
+      </Modal>
+
+      <Modal
+        isOpen={accountModalKind === "username"}
+        title="Alterar nome de usuário"
+        ariaLabel="Alterar nome de usuário da conta"
+        onClose={closeAccountModal}
+        panelClassName={styles.accountModalPanel}
+        bodyClassName={styles.accountModalBody}
+        footer={
+          <div className={styles.accountModalFooter}>
+            <button
+              className={styles.accountModalButtonGhost}
+              type="button"
+              onClick={closeAccountModal}
+              disabled={isAccountActionPending}
+            >
+              Cancelar
+            </button>
+            <button
+              className={styles.accountModalButtonPrimary}
+              type="button"
+              onClick={() => {
+                void handleAccountUsernameUpdate();
+              }}
+              disabled={isAccountActionPending || usernameCooldownState.isLocked || isAccountUsernameAvailabilityPending}
+            >
+              {isAccountActionPending ? "Salvando..." : "Confirmar"}
+            </button>
+          </div>
+        }
+      >
+        <div className={styles.accountModalForm}>
+          <p className={styles.accountModalDescription}>
+            Escolha um novo nome de usuário. Use apenas letras minúsculas, números e underscore.
+          </p>
+          {usernameCooldownMessage ? <p className={styles.accountModalDescription}>{usernameCooldownMessage}</p> : null}
+
+          <label className={styles.accountModalLabel} htmlFor="account-username-input">
+            Novo nome de usuário
+          </label>
+          <input
+            id="account-username-input"
+            className={styles.accountModalInput}
+            type="text"
+            value={accountUsernameInput}
+            onChange={(event) => setAccountUsernameInput(event.target.value.toLowerCase())}
+            placeholder={safeUsername}
+            autoComplete="username"
+            spellCheck={false}
+            maxLength={20}
+            disabled={isAccountActionPending || usernameCooldownState.isLocked}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                if (!usernameCooldownState.isLocked) {
+                  void handleAccountUsernameUpdate();
+                }
+              }
+            }}
+          />
+          {accountUsernameAvailabilityFeedback ? (
+            <p
+              className={`${styles.accountModalFeedback}${
+                accountUsernameAvailabilityFeedback.tone === "error"
+                  ? ` ${styles.accountModalFeedbackError}`
+                  : accountUsernameAvailabilityFeedback.tone === "success"
+                    ? ` ${styles.accountModalFeedbackSuccess}`
+                    : ` ${styles.accountModalFeedbackInfo}`
+              }`}
+              role="status"
+              aria-live="polite"
+            >
+              {accountUsernameAvailabilityFeedback.message}
+            </p>
+          ) : null}
+
+          <label className={styles.accountModalLabel} htmlFor="account-username-password-input">
+            Senha atual
+          </label>
+          <input
+            id="account-username-password-input"
+            className={styles.accountModalInput}
+            type="password"
+            value={accountUsernamePasswordInput}
+            onChange={(event) => setAccountUsernamePasswordInput(event.target.value)}
+            placeholder="Digite sua senha"
+            autoComplete="current-password"
+            disabled={isAccountActionPending || usernameCooldownState.isLocked}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                if (!usernameCooldownState.isLocked) {
+                  void handleAccountUsernameUpdate();
+                }
+              }
+            }}
+          />
+
+          {accountUsernameModalFeedback ? (
+            <p
+              className={`${styles.accountModalFeedback}${
+                accountUsernameModalFeedback.tone === "error"
+                  ? ` ${styles.accountModalFeedbackError}`
+                  : ` ${styles.accountModalFeedbackSuccess}`
+              }`}
+              role="status"
+              aria-live="polite"
+            >
+              {accountUsernameModalFeedback.message}
+            </p>
+          ) : null}
+        </div>
+      </Modal>
+
+      <Modal
         isOpen={accountModalKind === "email"}
-        title="Alterar email"
-        ariaLabel="Alterar email da conta"
+        title="Alterar e-mail"
+        ariaLabel="Alterar e-mail da conta"
         onClose={closeAccountModal}
         panelClassName={styles.accountModalPanel}
         bodyClassName={styles.accountModalBody}
@@ -3608,7 +6709,7 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
                 }}
                 disabled={isAccountActionPending}
               >
-                {isAccountActionPending ? "Verificando..." : "Verificar email atual"}
+                {isAccountActionPending ? "Verificando..." : "Verificar e-mail atual"}
               </button>
             ) : (
               <button
@@ -3619,7 +6720,7 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
                 }}
                 disabled={isAccountActionPending}
               >
-                {isAccountActionPending ? "Enviando..." : "Enviar verificacao"}
+                {isAccountActionPending ? "Enviando..." : "Enviar verificação"}
               </button>
             )}
           </div>
@@ -3628,14 +6729,14 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
         <div className={styles.accountModalForm}>
           <p className={styles.accountModalDescription}>
             {accountEmailModalStep === "verifyCurrent"
-              ? "Primeiro confirme o email atual e sua senha. Depois enviamos a verificacao para o novo email."
-              : "Agora informe o novo email. Um link de verificacao sera enviado para concluir a troca."}
+              ? "Primeiro confirme o e-mail atual e sua senha. Depois enviamos a verificação para o novo e-mail."
+              : "Agora informe o novo e-mail. Um link de verificação será enviado para concluir a troca."}
           </p>
 
           {accountEmailModalStep === "verifyCurrent" ? (
             <>
               <label className={styles.accountModalLabel} htmlFor="account-current-email-input">
-                Email atual
+                E-mail atual
               </label>
               <input
                 id="account-current-email-input"
@@ -3682,7 +6783,7 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
               </div>
 
               <label className={styles.accountModalLabel} htmlFor="account-new-email-input">
-                Novo email
+                Novo e-mail
               </label>
               <input
                 id="account-new-email-input"
@@ -3847,7 +6948,7 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
       >
         <div className={styles.accountModalForm}>
           <p className={styles.accountModalDescription}>
-            Isso vai desconectar sua sessao atual. Para confirmar, digite sua senha e a palavra{" "}
+            Isso vai desconectar sua sessão atual. Para confirmar, digite sua senha e a palavra{" "}
             <strong>{ACCOUNT_DEACTIVATE_CONFIRM_TEXT}</strong>.
           </p>
 
@@ -3932,7 +7033,7 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
       >
         <div className={styles.accountModalForm}>
           <p className={styles.accountModalDescription}>
-            Essa acao e irreversivel. Para confirmar, digite sua senha e a palavra{" "}
+            Essa ação é irreversível. Para confirmar, digite sua senha e a palavra{" "}
             <strong>{ACCOUNT_DELETE_CONFIRM_TEXT}</strong>.
           </p>
 
@@ -3987,7 +7088,7 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
 
       <Modal
         isOpen={Boolean(uploadLimitModal)}
-        title="Seus arquivos sao poderosos demais"
+        title="Arquivo acima do limite"
         ariaLabel="Arquivo acima do limite"
         onClose={() => setUploadLimitModal(null)}
         panelClassName={styles.uploadLimitModalPanel}
@@ -4003,10 +7104,12 @@ export default function AppSettingsView({ onClose, currentUserId = null }: AppSe
         }
       >
         <p className={styles.uploadLimitModalText}>
-          O tamanho maximo de {uploadLimitModal?.kind === "avatar" ? "avatares" : "banners"} e{" "}
+          O tamanho máximo para {uploadLimitModal?.kind === "avatar" ? "avatares" : "banners"} é{" "}
           {(uploadLimitModal?.maxMb ?? 0).toFixed(2)} MB.
         </p>
       </Modal>
     </>
   );
 }
+
+

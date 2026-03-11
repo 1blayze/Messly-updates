@@ -52,12 +52,12 @@ function readFileAsDataUrl(file: File): Promise<string> {
     reader.onload = () => {
       const result = typeof reader.result === "string" ? reader.result : "";
       if (!result) {
-        reject(new Error("Nao foi possivel ler a imagem selecionada."));
+        reject(new Error("Não foi possível ler a imagem selecionada."));
         return;
       }
       resolve(result);
     };
-    reader.onerror = () => reject(new Error("Nao foi possivel ler a imagem selecionada."));
+    reader.onerror = () => reject(new Error("Não foi possível ler a imagem selecionada."));
     reader.readAsDataURL(file);
   });
 }
@@ -71,7 +71,7 @@ function loadImage(src: string): Promise<HTMLImageElement> {
     };
 
     image.onerror = () => {
-      reject(new Error("Nao foi possivel ler a imagem selecionada."));
+      reject(new Error("Não foi possível ler a imagem selecionada."));
     };
 
     image.src = src;
@@ -140,7 +140,7 @@ export default function ImageEditModal({ isOpen, kind, file, isApplying = false,
         if (isActive) {
           setSourceImage(null);
           setSourceUrl("");
-          setErrorMessage(error instanceof Error ? error.message : "Nao foi possivel abrir a imagem.");
+          setErrorMessage(error instanceof Error ? error.message : "Não foi possível abrir a imagem.");
         }
       });
 
@@ -250,7 +250,7 @@ export default function ImageEditModal({ isOpen, kind, file, isApplying = false,
       });
       await onApply(editedFile);
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "Nao foi possivel aplicar a edicao.");
+      setErrorMessage(error instanceof Error ? error.message : "Não foi possível aplicar a edição.");
     } finally {
       setIsPreparing(false);
     }
@@ -317,7 +317,7 @@ export default function ImageEditModal({ isOpen, kind, file, isApplying = false,
           Cancelar
         </button>
         <button className={styles.applyButton} type="button" onClick={() => void handleApply()} disabled={!canApply}>
-          {isApplying || isPreparing ? "Aplicando..." : "Aplicar"}
+          {isApplying || isPreparing ? "Salvando..." : "Salvar"}
         </button>
       </div>
     </div>
@@ -344,12 +344,12 @@ export default function ImageEditModal({ isOpen, kind, file, isApplying = false,
           >
             {sourceUrl ? (
               <div ref={avatarViewportRef} className={styles.avatarViewport}>
-                <img className={`${styles.avatarImage} ${styles.stageImageGray}`} style={imageStyle} src={sourceUrl} alt="Preview da imagem" />
+                <img className={`${styles.avatarImage} ${styles.stageImageGray}`} style={imageStyle} src={sourceUrl} alt="Prévia da imagem" />
                 <img
                   className={`${styles.avatarImage} ${styles.stageImageColorCircle}`}
                   style={imageStyle}
                   src={sourceUrl}
-                  alt="Preview da imagem"
+                  alt="Prévia da imagem"
                 />
                 <span className={styles.circleGuide} aria-hidden="true" />
               </div>

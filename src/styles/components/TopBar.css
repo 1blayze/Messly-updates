@@ -11,12 +11,55 @@
   z-index: 20;
 }
 
+.app-top-bar__context {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1;
+  min-width: 0;
+  max-width: min(320px, 42vw);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 8px;
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.2;
+  font-weight: 600;
+  pointer-events: none;
+}
+
+.app-top-bar__context-icon {
+  flex: 0 0 auto;
+  color: var(--text-primary);
+}
+
+.app-top-bar__context-icon--chat {
+  width: 16px;
+  height: 16px;
+  display: block;
+  object-fit: contain;
+}
+
+.app-top-bar__context-text {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .app-top-bar::after {
+  content: none;
+}
+
+.app-top-bar--desktop::after {
   content: "";
   position: absolute;
   top: 8px;
   bottom: 8px;
-  right: 138px;
+  right: 147px;
   width: 1px;
   background: rgba(255, 255, 255, 0.09);
   pointer-events: none;
@@ -24,6 +67,7 @@
 
 .app-top-bar__drag-region {
   flex: 1 1 auto;
+  min-width: 0;
   height: 100%;
 }
 
@@ -38,8 +82,8 @@
 }
 
 @media (max-width: 900px) {
-  .app-top-bar::after {
-    right: 132px;
+  .app-top-bar--desktop::after {
+    right: 139px;
   }
 
   .app-top-bar__actions {
@@ -49,6 +93,28 @@
 
 .app-top-bar__updater {
   position: relative;
+  display: flex;
+  align-items: stretch;
+  height: 100%;
+}
+
+.app-top-bar__updater::before,
+.app-top-bar__updater::after {
+  content: "";
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  width: 1px;
+  background: rgba(255, 255, 255, 0.08);
+  pointer-events: none;
+}
+
+.app-top-bar__updater::before {
+  left: 0;
+}
+
+.app-top-bar__updater::after {
+  right: 0;
 }
 
 .app-top-bar__icon-btn {
@@ -58,32 +124,109 @@
   align-items: center;
   justify-content: center;
   border-radius: 9px;
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--text-secondary);
+  border: 1px solid var(--button-ghost-border);
+  background: var(--button-ghost-bg);
+  color: var(--button-ghost-text);
   cursor: pointer;
-  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+  transition: var(--button-transition);
 }
 
 .app-top-bar__icon-btn:hover {
-  background: rgba(255, 255, 255, 0.05);
-  border-color: rgba(255, 255, 255, 0.08);
-  color: var(--text-primary);
+  background: var(--button-ghost-bg-hover);
+  border-color: var(--button-ghost-border-hover);
+  color: var(--button-ghost-text-hover);
+}
+
+.app-top-bar__icon-btn:active {
+  background: var(--button-ghost-bg-active);
+  border-color: var(--button-ghost-border-hover);
 }
 
 .app-top-bar__icon-btn:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.35);
+  box-shadow: 0 0 0 2px var(--button-focus-ring);
 }
 
 .app-top-bar__icon-btn--active {
-  background: rgba(255, 255, 255, 0.05);
-  border-color: rgba(255, 255, 255, 0.10);
-  color: var(--text-primary);
+  background: var(--button-ghost-bg-hover);
+  border-color: var(--button-ghost-border-hover);
+  color: var(--button-ghost-text-hover);
 }
 
 .app-top-bar__icon-btn--updater {
   position: relative;
+  width: 42px;
+  height: 100%;
+  min-height: 38px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  color: rgba(241, 245, 249, 0.76);
+}
+
+.app-top-bar__icon-btn--updater::after {
+  content: "";
+  position: absolute;
+  left: 9px;
+  right: 9px;
+  bottom: 0;
+  height: 2px;
+  border-radius: 999px;
+  background: transparent;
+  transition:
+    background-color 160ms ease,
+    opacity 160ms ease;
+}
+
+.app-top-bar__icon-btn--updater:hover,
+.app-top-bar__icon-btn--updater.app-top-bar__icon-btn--active {
+  border: 0;
+  background: rgba(255, 255, 255, 0.045);
+  color: rgba(248, 250, 252, 0.94);
+}
+
+.app-top-bar__icon-btn--updater:active {
+  border: 0;
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.app-top-bar__icon-btn--updater:focus-visible {
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.14);
+}
+
+.app-top-bar__icon-btn--updater-available,
+.app-top-bar__icon-btn--updater-ready {
+  border: 0;
+}
+
+.app-top-bar__icon-btn--updater-available {
+  color: #77e9a7;
+}
+
+.app-top-bar__icon-btn--updater-available::after {
+  background: rgba(78, 221, 130, 0.72);
+}
+
+.app-top-bar__icon-btn--updater-ready {
+  color: #69e7a3;
+  background: rgba(58, 211, 122, 0.08);
+}
+
+.app-top-bar__icon-btn--updater-ready::after {
+  background: #43d77f;
+}
+
+.app-top-bar__icon-btn--updater-ready:hover,
+.app-top-bar__icon-btn--updater-ready:focus-visible {
+  color: #8efdc1;
+  background: rgba(67, 227, 133, 0.14);
+}
+
+.app-top-bar__icon-btn--updater-available:hover,
+.app-top-bar__icon-btn--updater-available:focus-visible {
+  color: #93f7bb;
+  background: rgba(58, 211, 122, 0.11);
 }
 
 .app-top-bar__badge-dot {
@@ -99,6 +242,11 @@
 
 .app-top-bar__spin {
   animation: app-top-bar-spin 1s linear infinite;
+}
+
+.app-top-bar__updater-icon--available,
+.app-top-bar__updater-icon--ready {
+  color: currentColor;
 }
 
 .app-top-bar__updater-panel {
@@ -128,7 +276,7 @@
   margin: 0;
   font-size: 13px;
   line-height: 1.2;
-  font-weight: 700;
+  font-weight: 600;
   color: var(--text-primary);
 }
 
@@ -146,17 +294,22 @@
   align-items: center;
   justify-content: center;
   border-radius: 8px;
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--text-muted);
+  border: 1px solid var(--button-ghost-border);
+  background: var(--button-ghost-bg);
+  color: var(--button-ghost-text);
   cursor: pointer;
   flex: 0 0 auto;
+  transition: var(--button-transition);
 }
 
 .app-top-bar__panel-close:hover {
-  color: var(--text-primary);
-  background: rgba(255, 255, 255, 0.04);
-  border-color: rgba(255, 255, 255, 0.06);
+  color: var(--button-ghost-text-hover);
+  background: var(--button-ghost-bg-hover);
+  border-color: var(--button-ghost-border-hover);
+}
+
+.app-top-bar__panel-close:active {
+  background: var(--button-ghost-bg-active);
 }
 
 .app-top-bar__updater-body {
@@ -216,37 +369,64 @@
   height: 30px;
   padding: 0 10px;
   border-radius: 9px;
-  border: 1px solid rgba(255, 255, 255, 0.10);
-  background: rgba(255, 255, 255, 0.03);
-  color: var(--text-primary);
+  border: 1px solid var(--button-secondary-border);
+  background: var(--button-secondary-bg);
+  color: var(--button-secondary-text);
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
+  box-shadow: var(--button-secondary-shadow);
+  transition: var(--button-transition);
 }
 
 .app-top-bar__panel-btn:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.06);
-  border-color: rgba(255, 255, 255, 0.14);
+  background: var(--button-secondary-bg-hover);
+  border-color: var(--button-secondary-border-hover);
+}
+
+.app-top-bar__panel-btn:active:not(:disabled) {
+  background: var(--button-secondary-bg-active);
+  border-color: var(--button-secondary-border-active);
+}
+
+.app-top-bar__panel-btn:focus-visible {
+  outline: none;
+  box-shadow:
+    var(--button-secondary-shadow),
+    0 0 0 2px var(--button-focus-ring);
 }
 
 .app-top-bar__panel-btn:disabled {
-  opacity: 0.55;
+  opacity: var(--button-disabled-opacity);
   cursor: not-allowed;
+  box-shadow: none;
 }
 
 .app-top-bar__panel-btn--ghost {
-  color: var(--text-secondary);
+  color: var(--button-secondary-text-muted);
 }
 
 .app-top-bar__panel-btn--primary {
-  background: rgba(59, 130, 246, 0.18);
-  border-color: rgba(59, 130, 246, 0.32);
-  color: #dbeafe;
+  background: var(--button-primary-bg);
+  border-color: var(--button-primary-border);
+  color: var(--button-primary-text);
+  box-shadow: var(--button-primary-shadow);
 }
 
 .app-top-bar__panel-btn--primary:hover:not(:disabled) {
-  background: rgba(59, 130, 246, 0.24);
-  border-color: rgba(59, 130, 246, 0.40);
+  background: var(--button-primary-bg-hover);
+  border-color: var(--button-primary-border-hover);
+}
+
+.app-top-bar__panel-btn--primary:active:not(:disabled) {
+  background: var(--button-primary-bg-active);
+  border-color: var(--button-primary-border-active);
+}
+
+.app-top-bar__panel-btn--primary:focus-visible {
+  box-shadow:
+    var(--button-primary-shadow),
+    0 0 0 2px var(--button-focus-ring);
 }
 
 @keyframes app-top-bar-spin {

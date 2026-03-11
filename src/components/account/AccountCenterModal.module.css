@@ -1,0 +1,455 @@
+.panel {
+  width: min(500px, calc(100vw - 24px));
+  --text-primary: #eceff4;
+  --text-secondary: rgba(212, 218, 228, 0.82);
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --border-default: rgba(255, 255, 255, 0.14);
+  --account-entry-surface: #2a2a2a;
+  border-color: rgba(255, 255, 255, 0.12);
+  background: #181818;
+}
+
+.body {
+  padding: 14px 16px 16px;
+  overflow-x: hidden;
+}
+
+.content {
+  display: grid;
+  gap: 14px;
+}
+
+.subtitle {
+  margin: 0;
+  color: rgba(225, 230, 239, 0.72);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.accountList {
+  display: grid;
+  gap: 10px;
+}
+
+.emptyState {
+  margin: 0;
+  padding: 14px;
+  border-radius: 10px;
+  border: 1px dashed rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.03);
+  color: rgba(228, 233, 241, 0.72);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.accountRow {
+  min-height: 62px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--account-entry-surface);
+  padding: 10px 12px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  position: relative;
+  overflow: visible;
+}
+
+.accountMain {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.accountAvatar {
+  width: 38px;
+  height: 38px;
+  border-radius: 999px;
+  object-fit: cover;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.08);
+  flex-shrink: 0;
+}
+
+.accountMeta {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.accountAlias {
+  margin: 0;
+  color: #f4f6fa;
+  font-size: 14px;
+  line-height: 1.2;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.accountEmail {
+  margin: 0;
+  color: rgba(226, 232, 242, 0.72);
+  font-size: 13px;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.accountEmailActive {
+  color: #41d385;
+  font-weight: 600;
+}
+
+.accountActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rowInlineAction {
+  display: inline-flex;
+  align-items: center;
+}
+
+.rowButton {
+  height: 30px;
+  border: 1px solid var(--button-primary-border);
+  border-radius: 8px;
+  background: var(--button-primary-bg);
+  color: var(--button-primary-text);
+  font-size: 12px;
+  line-height: 1;
+  font-weight: 600;
+  padding: 0 12px;
+  cursor: pointer;
+  box-shadow: var(--button-primary-shadow);
+  transition: var(--button-transition);
+}
+
+.rowButton:hover,
+.rowButton:focus-visible {
+  background: var(--button-primary-bg-hover);
+  border-color: var(--button-primary-border-hover);
+}
+
+.rowButton:active {
+  background: var(--button-primary-bg-active);
+  border-color: var(--button-primary-border-active);
+}
+
+.rowButton:focus-visible {
+  outline: none;
+  box-shadow:
+    var(--button-primary-shadow),
+    0 0 0 2px var(--button-focus-ring);
+}
+
+.rowMoreWrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.rowMoreButton {
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--button-ghost-border);
+  border-radius: 8px;
+  background: var(--button-ghost-bg);
+  color: var(--button-ghost-text);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: var(--button-transition);
+}
+
+.rowMoreButton:hover,
+.rowMoreButton:focus-visible {
+  background: var(--button-ghost-bg-hover);
+  border-color: var(--button-ghost-border-hover);
+  color: var(--button-ghost-text-hover);
+}
+
+.rowMoreButton:active {
+  background: var(--button-ghost-bg-active);
+}
+
+.rowMoreButton:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--button-focus-ring);
+}
+
+.rowMoreMenu {
+  position: absolute;
+  left: auto;
+  right: 0;
+  top: calc(100% + 8px);
+  transform: none;
+  min-width: 154px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  background: #181a20;
+  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.46);
+  padding: 6px;
+  display: grid;
+  gap: 2px;
+  z-index: 30;
+}
+
+.rowMoreMenuItem {
+  width: 100%;
+  min-height: 34px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--button-ghost-text-hover);
+  text-align: left;
+  font-size: 14px;
+  line-height: 1.2;
+  font-weight: 500;
+  padding: 8px 10px;
+  cursor: pointer;
+  transition: var(--button-transition);
+}
+
+.rowMoreMenuItem:hover,
+.rowMoreMenuItem:focus-visible {
+  background: var(--button-ghost-bg-hover);
+}
+
+.rowMoreMenuItem:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--button-focus-ring);
+}
+
+.rowMoreMenuItemDanger {
+  color: var(--button-danger-text);
+}
+
+.rowMoreMenuItemDanger:hover,
+.rowMoreMenuItemDanger:focus-visible {
+  background: var(--button-danger-soft-bg-hover);
+  color: var(--button-danger-text);
+}
+
+.bottomActions {
+  display: flex;
+  align-items: center;
+  justify-content: stretch;
+  gap: 8px;
+}
+
+.primaryButton,
+.backButton,
+.secondaryDangerButton {
+  height: 38px;
+  border-radius: 9px;
+  padding: 0 14px;
+  font-size: 13px;
+  line-height: 1;
+  font-weight: 600;
+  cursor: pointer;
+  transition: var(--button-transition);
+}
+
+.primaryButton {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--button-primary-border);
+  background: var(--button-primary-bg);
+  color: var(--button-primary-text);
+  box-shadow: var(--button-primary-shadow);
+}
+
+.backButton {
+  min-width: 120px;
+  border: 1px solid var(--button-secondary-border);
+  background: var(--button-secondary-bg);
+  color: var(--button-secondary-text);
+  box-shadow: var(--button-secondary-shadow);
+}
+
+.secondaryDangerButton {
+  min-width: 140px;
+  border: 1px solid var(--button-danger-soft-border);
+  background: var(--button-danger-soft-bg);
+  color: var(--button-danger-text);
+}
+
+.primaryButton:hover,
+.backButton:hover,
+.secondaryDangerButton:hover,
+.primaryButton:focus-visible,
+.backButton:focus-visible,
+.secondaryDangerButton:focus-visible {
+  outline: none;
+}
+
+.primaryButton:hover,
+.primaryButton:focus-visible {
+  background: var(--button-primary-bg-hover);
+  border-color: var(--button-primary-border-hover);
+}
+
+.primaryButton:active {
+  background: var(--button-primary-bg-active);
+  border-color: var(--button-primary-border-active);
+}
+
+.backButton:hover,
+.backButton:focus-visible {
+  background: var(--button-secondary-bg-hover);
+  border-color: var(--button-secondary-border-hover);
+}
+
+.backButton:active {
+  background: var(--button-secondary-bg-active);
+  border-color: var(--button-secondary-border-active);
+}
+
+.secondaryDangerButton:hover,
+.secondaryDangerButton:focus-visible {
+  background: var(--button-danger-soft-bg-hover);
+  border-color: var(--button-danger-soft-border-hover);
+}
+
+.secondaryDangerButton:active {
+  background: var(--button-danger-soft-bg-active);
+}
+
+.primaryButton:focus-visible {
+  box-shadow:
+    var(--button-primary-shadow),
+    0 0 0 2px var(--button-focus-ring);
+}
+
+.backButton:focus-visible {
+  box-shadow:
+    var(--button-secondary-shadow),
+    0 0 0 2px var(--button-focus-ring);
+}
+
+.secondaryDangerButton:focus-visible {
+  box-shadow: 0 0 0 2px var(--button-focus-ring);
+}
+
+.primaryButton:disabled,
+.backButton:disabled,
+.secondaryDangerButton:disabled {
+  opacity: var(--button-disabled-opacity);
+  cursor: default;
+  box-shadow: none;
+}
+
+.formField {
+  display: grid;
+  gap: 6px;
+}
+
+.fieldLabel {
+  color: rgba(236, 241, 248, 0.9);
+  font-size: 14px;
+  line-height: 1.2;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.fieldInput {
+  width: 100%;
+  height: 42px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: var(--account-entry-surface);
+  color: #f3f6fc;
+  font-size: 14px;
+  line-height: 1.2;
+  padding: 0 12px;
+}
+
+.fieldInput:focus {
+  outline: none;
+  border-color: rgba(121, 162, 255, 0.68);
+  box-shadow: 0 0 0 1px rgba(121, 162, 255, 0.24);
+}
+
+.fieldInput::placeholder {
+  color: rgba(223, 231, 244, 0.6);
+}
+
+.fieldInput:disabled {
+  opacity: 0.72;
+  cursor: default;
+}
+
+.feedbackError {
+  margin: 0;
+  color: #ffb3bf;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.requiredMark {
+  color: #ff6a80;
+}
+
+.authActions {
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.authBackButton {
+  min-width: 0;
+  height: auto;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--button-ghost-text-hover);
+  font-size: 14px;
+  font-weight: 600;
+  padding: 0;
+  box-shadow: inset 0 -1px 0 currentColor;
+  text-decoration: none;
+}
+
+.authBackButton:hover,
+.authBackButton:focus-visible {
+  background: transparent;
+  color: #ffffff;
+}
+
+.authPrimaryButton {
+  width: auto;
+  min-width: 102px;
+  border-color: var(--button-primary-border);
+  background: var(--button-primary-bg);
+}
+
+@media (max-width: 680px) {
+  .panel {
+    width: min(100%, calc(100vw - 16px));
+  }
+
+  .accountRow {
+    grid-template-columns: 1fr auto;
+  }
+
+  .bottomActions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .backButton,
+  .secondaryDangerButton {
+    width: 100%;
+    min-width: 0;
+  }
+}

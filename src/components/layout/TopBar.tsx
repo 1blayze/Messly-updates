@@ -1,10 +1,33 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import MaterialSymbolIcon from "../ui/MaterialSymbolIcon";
+import Tooltip from "../ui/Tooltip";
+import chatIconSrc from "../../assets/icons/ui/Chat.svg";
 import "../../styles/components/TopBar.css";
 
 interface TopBarProps {
+  section?: "friends" | "directMessages";
   isCallActive?: boolean;
   onPrepareForUpdateInstall?: () => Promise<void> | void;
+}
+
+function getSectionIconName(section: TopBarProps["section"]): string {
+  switch (section) {
+    case "directMessages":
+      return "chat";
+    case "friends":
+    default:
+      return "group";
+  }
+}
+
+function getSectionLabel(section: TopBarProps["section"]): string {
+  switch (section) {
+    case "directMessages":
+      return "Mensagens diretas";
+    case "friends":
+    default:
+      return "Amigos";
+  }
 }
 
 function formatBytes(value: number): string {
@@ -29,15 +52,15 @@ function formatBytes(value: number): string {
 
 function getUpdaterTitle(state: AppUpdaterState | null): string {
   if (!state) {
-    return "Atualizacao";
+    return "Atualização";
   }
   switch (state.status) {
     case "checking":
-      return "Verificando atualizacao";
+      return "Verificando atualização";
     case "available":
-      return "Atualizacao disponivel";
+      return "Atualização disponível";
     case "downloading":
-      return "Baixando atualizacao";
+      return "Baixando atualização";
     case "downloaded":
       return "Pronta para instalar";
     case "error":
@@ -45,7 +68,7 @@ function getUpdaterTitle(state: AppUpdaterState | null): string {
     case "disabled":
       return "Atualizador desativado";
     default:
-      return "Atualizacao";
+      return "Atualização";
   }
 }
 
@@ -61,7 +84,7 @@ function getUpdaterActionIcon(state: AppUpdaterState | null): string {
     case "downloading":
       return "downloading";
     case "downloaded":
-      return "system_update_alt";
+      return "download";
     case "error":
       return "error";
     default:
@@ -69,11 +92,53 @@ function getUpdaterActionIcon(state: AppUpdaterState | null): string {
   }
 }
 
+function getUpdaterTooltipLabel(state: AppUpdaterState | null): string {
+  if (!state) {
+    return "";
+  }
+
+  switch (state.status) {
+    case "downloaded":
+      return "Atualiza\u00e7\u00e3o pronta!";
+    case "available":
+      return "Atualiza\u00e7\u00e3o dispon\u00edvel";
+    default:
+      return "";
+  }
+}
+
+function isNoPublishedUpdateErrorMessage(rawMessage: string | null | undefined): boolean {
+  const normalized = String(rawMessage ?? "").trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  if (normalized.includes("no published versions on github")) {
+    return true;
+  }
+  return normalized.includes("latest version on github") && (
+    normalized.includes("production release exists") ||
+    normalized.includes("release exists")
+  );
+}
+
+function shouldSilenceUpdaterState(state: AppUpdaterState | null): boolean {
+  if (!state) {
+    return false;
+  }
+  if (state.status === "unavailable") {
+    return true;
+  }
+  return state.status === "error" && isNoPublishedUpdateErrorMessage(state.errorMessage);
+}
+
 function shouldShowUpdaterButton(state: AppUpdaterState | null, isPanelOpen: boolean): boolean {
   if (typeof window === "undefined" || !window.electronAPI?.updaterGetState) {
     return false;
   }
   if (!state) {
+    return false;
+  }
+  if (shouldSilenceUpdaterState(state)) {
     return false;
   }
   if (isPanelOpen) {
@@ -95,8 +160,8 @@ function getSafeUpdaterUiErrorMessage(rawMessage: string | null | undefined, fal
     return fallbackMessage;
   }
   const normalized = message.toLowerCase();
-  if (normalized.includes("no published versions on github")) {
-    return "Nenhuma versao publicada foi encontrada no repositorio de atualizacoes.";
+  if (isNoPublishedUpdateErrorMessage(message)) {
+    return "Nenhuma versão publicada foi encontrada no repositório de atualizações.";
   }
   if (
     normalized.includes("error invoking remote method") ||
@@ -109,7 +174,8 @@ function getSafeUpdaterUiErrorMessage(rawMessage: string | null | undefined, fal
   return message;
 }
 
-export default function TopBar({ isCallActive = false, onPrepareForUpdateInstall }: TopBarProps) {
+export default function TopBar({ section = "friends", isCallActive = false, onPrepareForUpdateInstall }: TopBarProps) {
+  const isDesktopRuntime = typeof window !== "undefined" && Boolean(window.electronAPI);
   const [updaterState, setUpdaterState] = useState<AppUpdaterState | null>(null);
   const [isUpdaterPanelOpen, setIsUpdaterPanelOpen] = useState(false);
   const [isUpdaterActionPending, setIsUpdaterActionPending] = useState(false);
@@ -164,6 +230,13 @@ export default function TopBar({ isCallActive = false, onPrepareForUpdateInstall
     return () => window.removeEventListener("mousedown", handlePointerDown);
   }, [isUpdaterPanelOpen]);
 
+  useEffect(() => {
+    if (!shouldSilenceUpdaterState(updaterState)) {
+      return;
+    }
+    setIsUpdaterPanelOpen(false);
+  }, [updaterState]);
+
   const handleCheckUpdates = useCallback(async (): Promise<void> => {
     const api = window.electronAPI;
     if (!api?.updaterCheck) {
@@ -176,7 +249,7 @@ export default function TopBar({ isCallActive = false, onPrepareForUpdateInstall
       setUpdaterState(nextState);
     } catch (error) {
       logUpdaterConsoleError("check failed", error);
-      setLocalActionError("Falha ao verificar atualizacao.");
+      setLocalActionError("Falha ao verificar atualização.");
     } finally {
       setIsUpdaterActionPending(false);
     }
@@ -196,7 +269,7 @@ export default function TopBar({ isCallActive = false, onPrepareForUpdateInstall
       }
     } catch (error) {
       logUpdaterConsoleError("download failed", error);
-      setLocalActionError("Falha ao baixar atualizacao.");
+      setLocalActionError("Falha ao baixar atualização.");
     } finally {
       setIsUpdaterActionPending(false);
     }
@@ -211,7 +284,7 @@ export default function TopBar({ isCallActive = false, onPrepareForUpdateInstall
 
     if (isCallActive) {
       const confirmed = window.confirm(
-        "Voce esta em uma chamada. Ao atualizar, voce sera desconectado. Deseja continuar?",
+        "Você está em uma chamada. Ao atualizar, você será desconectado. Deseja continuar?",
       );
       if (!confirmed) {
         return;
@@ -226,7 +299,7 @@ export default function TopBar({ isCallActive = false, onPrepareForUpdateInstall
       await api.updaterInstall();
     } catch (error) {
       logUpdaterConsoleError("install failed", error);
-      setLocalActionError("Falha ao iniciar instalacao.");
+      setLocalActionError("Falha ao iniciar instalação.");
       setIsUpdaterActionPending(false);
     }
   }, [isCallActive, onPrepareForUpdateInstall]);
@@ -235,7 +308,7 @@ export default function TopBar({ isCallActive = false, onPrepareForUpdateInstall
     if (!updaterState || updaterState.status !== "downloading") {
       return "";
     }
-    return `${Math.round(updaterState.progressPercent)}% · ${formatBytes(updaterState.downloadedBytes)} / ${formatBytes(
+    return `${Math.round(updaterState.progressPercent)}% - ${formatBytes(updaterState.downloadedBytes)} / ${formatBytes(
       updaterState.totalBytes,
     )}`;
   }, [updaterState]);
@@ -246,25 +319,25 @@ export default function TopBar({ isCallActive = false, onPrepareForUpdateInstall
     }
     if (updaterState.status === "available") {
       return updaterState.latestVersion
-        ? `Versao ${updaterState.latestVersion} pronta para download.`
-        : "Nova versao disponivel para download.";
+        ? `Versão ${updaterState.latestVersion} pronta para download.`
+        : "Nova versão disponível para download.";
     }
     if (updaterState.status === "downloaded") {
-      return "Atualizacao baixada. Clique para instalar e reiniciar.";
+      return "Atualização baixada. Clique para instalar e reiniciar.";
     }
     if (updaterState.status === "checking") {
-      return "Buscando a ultima versao no repositorio.";
+      return "Buscando a última versão no repositório.";
     }
     if (updaterState.status === "unavailable") {
       return updaterState.latestVersion
-        ? `Voce ja esta na versao ${updaterState.latestVersion}.`
-        : "Nenhuma atualizacao encontrada.";
+        ? `Você já está na versão ${updaterState.latestVersion}.`
+        : "Nenhuma atualização encontrada.";
     }
     if (updaterState.status === "disabled") {
       return getSafeUpdaterUiErrorMessage(updaterState.errorMessage, "Atualizador desativado.");
     }
     if (updaterState.status === "error") {
-      return getSafeUpdaterUiErrorMessage(updaterState.errorMessage, "Falha ao verificar atualizacao.");
+      return getSafeUpdaterUiErrorMessage(updaterState.errorMessage, "Falha ao verificar atualização.");
     }
     if (updaterState.status === "downloading") {
       return updaterProgressText;
@@ -274,44 +347,69 @@ export default function TopBar({ isCallActive = false, onPrepareForUpdateInstall
 
   const showUpdaterButton = shouldShowUpdaterButton(updaterState, isUpdaterPanelOpen);
   const isDownloading = updaterState?.status === "downloading";
+  const isUpdateReady = updaterState?.status === "downloaded";
+  const isUpdateAvailable = updaterState?.status === "available";
   const canDownload = updaterState?.status === "available";
   const canInstall = updaterState?.status === "downloaded";
   const canCheck = updaterState?.status !== "downloading";
+  const updaterTooltipLabel = getUpdaterTooltipLabel(updaterState);
 
   return (
-    <header className="app-top-bar">
+    <header className={`app-top-bar${isDesktopRuntime ? " app-top-bar--desktop" : ""}`}>
+      <div className="app-top-bar__context" aria-label={`Secao atual: ${getSectionLabel(section)}`}>
+        {section === "directMessages" ? (
+          <img className="app-top-bar__context-icon app-top-bar__context-icon--chat" src={chatIconSrc} alt="" aria-hidden="true" />
+        ) : (
+          <MaterialSymbolIcon
+            className="app-top-bar__context-icon"
+            name={getSectionIconName(section)}
+            size={18}
+            filled
+          />
+        )}
+        <span className="app-top-bar__context-text">{getSectionLabel(section)}</span>
+      </div>
       <div className="app-top-bar__drag-region" aria-hidden="true" />
       <div className="app-top-bar__actions">
         {showUpdaterButton ? (
           <div ref={panelRef} className="app-top-bar__updater">
-            <button
-              type="button"
-              className={`app-top-bar__icon-btn app-top-bar__icon-btn--updater${
-                isUpdaterPanelOpen ? " app-top-bar__icon-btn--active" : ""
-              }${isDownloading ? " app-top-bar__icon-btn--busy" : ""}`}
-              onClick={() => {
-                setIsUpdaterPanelOpen((current) => !current);
-              }}
-              aria-label={getUpdaterTitle(updaterState)}
-              title={getUpdaterTitle(updaterState)}
+            <Tooltip
+              text={updaterTooltipLabel}
+              position="bottom"
+              delay={120}
+              disabled={isUpdaterPanelOpen || !updaterTooltipLabel}
             >
-              <MaterialSymbolIcon
-                name={getUpdaterActionIcon(updaterState)}
-                size={18}
-                filled={updaterState?.status !== "error"}
-                className={isDownloading ? "app-top-bar__spin" : undefined}
-              />
-              {updaterState?.status === "available" ? <span className="app-top-bar__badge-dot" aria-hidden="true" /> : null}
-            </button>
+              <button
+                type="button"
+                className={`app-top-bar__icon-btn app-top-bar__icon-btn--updater${
+                  isUpdaterPanelOpen ? " app-top-bar__icon-btn--active" : ""
+                }${isDownloading ? " app-top-bar__icon-btn--busy" : ""}${
+                  isUpdateReady ? " app-top-bar__icon-btn--updater-ready" : ""
+                }${isUpdateAvailable ? " app-top-bar__icon-btn--updater-available" : ""}`}
+                onClick={() => {
+                  setIsUpdaterPanelOpen((current) => !current);
+                }}
+                aria-label={getUpdaterTitle(updaterState)}
+              >
+                <MaterialSymbolIcon
+                  name={getUpdaterActionIcon(updaterState)}
+                  size={18}
+                  filled={updaterState?.status !== "error"}
+                  className={`${isDownloading ? "app-top-bar__spin " : ""}${
+                    isUpdateReady ? "app-top-bar__updater-icon--ready" : ""
+                  }${isUpdateAvailable ? "app-top-bar__updater-icon--available" : ""}`}
+                />
+              </button>
+            </Tooltip>
 
             {isUpdaterPanelOpen ? (
-              <div className="app-top-bar__updater-panel" role="dialog" aria-label="Atualizacao do aplicativo">
+              <div className="app-top-bar__updater-panel" role="dialog" aria-label="Atualização do aplicativo">
                 <div className="app-top-bar__updater-header">
                   <div>
                     <p className="app-top-bar__updater-title">{getUpdaterTitle(updaterState)}</p>
                     {updaterState?.latestVersion ? (
                       <p className="app-top-bar__updater-subtitle">
-                        {updaterState.currentVersion} → {updaterState.latestVersion}
+                        {updaterState.currentVersion} {"->"} {updaterState.latestVersion}
                       </p>
                     ) : null}
                   </div>
@@ -319,7 +417,7 @@ export default function TopBar({ isCallActive = false, onPrepareForUpdateInstall
                     type="button"
                     className="app-top-bar__panel-close"
                     onClick={() => setIsUpdaterPanelOpen(false)}
-                    aria-label="Fechar painel de atualizacao"
+                    aria-label="Fechar painel de atualização"
                   >
                     <MaterialSymbolIcon name="close" size={16} filled={false} />
                   </button>
@@ -338,7 +436,7 @@ export default function TopBar({ isCallActive = false, onPrepareForUpdateInstall
 
                 {isCallActive && canInstall ? (
                   <p className="app-top-bar__updater-warning">
-                    Ao instalar, voce sera desconectado da chamada atual.
+                    Ao instalar, você será desconectado da chamada atual.
                   </p>
                 ) : null}
 

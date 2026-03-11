@@ -8,6 +8,12 @@
   color: var(--text-secondary);
   font-family: var(--font-sans);
   position: relative;
+  --friends-sidebar-section-padding-x: 16px;
+  --friends-sidebar-dm-section-padding-x: 8px;
+  --friends-sidebar-row-height: 44px;
+  --friends-sidebar-row-padding-y: 6px;
+  --friends-sidebar-row-padding-x: 8px;
+  --friends-sidebar-separator-inset-x: 18px;
 }
 
 .friends-sidebar__header {
@@ -41,10 +47,11 @@
   align-items: center;
   justify-content: center;
   border-radius: var(--radius-xs);
-  border: 0;
-  background: transparent;
-  color: var(--text-secondary);
+  border: 1px solid var(--button-ghost-border);
+  background: var(--button-ghost-bg);
+  color: var(--button-ghost-text);
   cursor: pointer;
+  transition: var(--button-transition);
 }
 
 .friends-sidebar__action-button .ms-icon {
@@ -52,17 +59,54 @@
 }
 
 .friends-sidebar__action-button:hover {
-  color: var(--text-primary);
+  background: var(--button-ghost-bg-hover);
+  border-color: var(--button-ghost-border-hover);
+  color: var(--button-ghost-text-hover);
+}
+
+.friends-sidebar__action-button:active {
+  background: var(--button-ghost-bg-active);
+}
+
+.friends-sidebar__action-button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--button-focus-ring);
+  color: var(--button-ghost-text-hover);
 }
 
 .friends-sidebar__content {
   flex: 1;
   overflow-y: auto;
+  overflow-x: hidden;
   padding-bottom: 124px;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--text-muted) 52%, transparent) transparent;
+}
+
+.friends-sidebar__content::-webkit-scrollbar {
+  width: 4px;
+  height: 0;
+}
+
+.friends-sidebar__content::-webkit-scrollbar:horizontal {
+  height: 0;
+}
+
+.friends-sidebar__content::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.friends-sidebar__content::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-muted) 50%, transparent);
+}
+
+.friends-sidebar__content::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--text-primary) 44%, transparent);
 }
 
 .friends-sidebar__section {
-  padding: 14px 16px 0;
+  padding: 14px var(--friends-sidebar-section-padding-x) 0;
 }
 
 .friends-sidebar__section-label {
@@ -88,11 +132,24 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px 12px;
+  min-height: var(--friends-sidebar-row-height);
+  padding: var(--friends-sidebar-row-padding-y) var(--friends-sidebar-row-padding-x);
   border-radius: var(--radius-sm);
   font-size: 14px;
   font-weight: 500;
   cursor: pointer;
+  box-sizing: border-box;
+  transition: background-color 120ms ease, color 120ms ease, box-shadow 120ms ease;
+}
+
+.friends-sidebar__item:hover,
+.friends-sidebar__item:focus-visible {
+  background: var(--hover);
+  color: var(--text-primary);
+}
+
+.friends-sidebar__item:focus-visible {
+  outline: none;
 }
 
 .friends-sidebar__item-icon {
@@ -115,18 +172,30 @@
 }
 
 .friends-sidebar__item--friends {
-  padding-top: 10px;
-  padding-bottom: 10px;
+  min-height: 38px;
+  padding-top: 4px;
+  padding-bottom: 4px;
+  width: calc(100% + (var(--friends-sidebar-section-padding-x) - var(--friends-sidebar-dm-section-padding-x)) * 2);
+  margin-left: calc((var(--friends-sidebar-section-padding-x) - var(--friends-sidebar-dm-section-padding-x)) * -1);
 }
 
 .friends-sidebar__item--active .friends-sidebar__item-icon {
   color: var(--text-primary);
 }
 
+.friends-sidebar__section--direct-messages {
+  position: relative;
+  margin-top: 10px;
+  padding-left: var(--friends-sidebar-dm-section-padding-x);
+  padding-right: var(--friends-sidebar-dm-section-padding-x);
+  padding-top: 14px;
+  border-top: 0;
+}
+
 .friends-sidebar__user-card-wrap {
   position: absolute;
-  left: calc(var(--rail-width) * -1 + 6px);
-  right: 6px;
+  left: calc(var(--rail-width) * -1 + 8px);
+  right: 8px;
   bottom: var(--sidebar-user-card-bottom);
   z-index: 10;
 }
@@ -143,10 +212,15 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 4px 6px;
+  min-height: var(--friends-sidebar-row-height);
+  padding: var(--friends-sidebar-row-padding-y) var(--friends-sidebar-row-padding-x);
   transition: background-color 120ms ease, color 120ms ease;
   text-align: left;
   cursor: pointer;
+  box-sizing: border-box;
+  contain: layout paint style;
+  content-visibility: auto;
+  contain-intrinsic-size: 44px;
 }
 
 .friends-sidebar__dm-item:hover {
@@ -165,8 +239,12 @@
   border: 0;
   background: transparent;
   color: inherit;
+  display: grid;
+  align-content: center;
+  justify-items: flex-start;
+  gap: 2px;
   text-align: left;
-  padding: 2px 0;
+  padding: 1px 0;
   cursor: pointer;
 }
 
@@ -181,6 +259,8 @@
   width: 100%;
   height: 100%;
   border-radius: 999px;
+  border: 0;
+  box-sizing: border-box;
   object-fit: cover;
   display: block;
 }
@@ -208,7 +288,7 @@
   background: #db6262;
 }
 
-.friends-sidebar__dm-presence--offline {
+.friends-sidebar__dm-presence--invisivel {
   background: #8b93a2;
 }
 
@@ -224,20 +304,55 @@
   text-overflow: ellipsis;
 }
 
+.friends-sidebar__dm-spotify-status {
+  min-width: 0;
+  color: #a0a0a0;
+  font-size: 12px;
+  line-height: 1.2;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.friends-sidebar__dm-spotify-icon {
+  width: 13px;
+  height: 13px;
+  display: block;
+  flex-shrink: 0;
+}
+
+.friends-sidebar__dm-spotify-status-text {
+  min-width: 0;
+  color: #8be09b;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.friends-sidebar__dm-spotify-track {
+  min-width: 0;
+  color: rgba(223, 228, 236, 0.82);
+  font-size: 12px;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .friends-sidebar__dm-close {
   width: 22px;
   height: 22px;
-  border: 0;
+  border: 1px solid var(--button-ghost-border);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.1);
-  color: rgba(235, 240, 248, 0.8);
+  background: var(--button-ghost-bg-hover);
+  color: var(--button-ghost-text-hover);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
   opacity: 0;
   pointer-events: none;
-  transition: opacity 120ms ease, background-color 120ms ease, color 120ms ease;
+  transition: var(--button-transition);
 }
 
 .friends-sidebar__dm-item:hover .friends-sidebar__dm-close,
@@ -248,8 +363,14 @@
 
 .friends-sidebar__dm-close:hover,
 .friends-sidebar__dm-close:focus-visible {
-  background: rgba(255, 255, 255, 0.18);
-  color: #ffffff;
+  background: var(--button-ghost-bg-active);
+  border-color: var(--button-ghost-border-hover);
+  color: var(--button-ghost-text-hover);
+}
+
+.friends-sidebar__dm-close:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--button-focus-ring);
 }
 
 .friends-sidebar__add-friend-modal {
@@ -331,32 +452,129 @@
   min-width: 148px;
   height: 38px;
   border-radius: 10px;
-  border: 0;
+  border: 1px solid var(--button-secondary-border);
   padding: 0 22px;
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
-  transition: filter 120ms ease, opacity 120ms ease;
+  transition: var(--button-transition);
 }
 
 .friends-sidebar__add-friend-cancel {
-  background: rgba(255, 255, 255, 0.08);
-  color: #f2f3f5;
+  background: var(--button-secondary-bg);
+  color: var(--button-secondary-text);
+  box-shadow: var(--button-secondary-shadow);
 }
 
 .friends-sidebar__add-friend-submit {
-  background: linear-gradient(180deg, #5b66f6 0%, #5460f0 100%);
-  color: #ffffff;
+  border-color: var(--button-primary-border);
+  background: var(--button-primary-bg);
+  color: var(--button-primary-text);
+  box-shadow: var(--button-primary-shadow);
 }
 
 .friends-sidebar__add-friend-cancel:hover,
-.friends-sidebar__add-friend-submit:hover {
-  filter: brightness(1.06);
+.friends-sidebar__add-friend-cancel:focus-visible {
+  background: var(--button-secondary-bg-hover);
+  border-color: var(--button-secondary-border-hover);
+}
+
+.friends-sidebar__add-friend-cancel:active {
+  background: var(--button-secondary-bg-active);
+  border-color: var(--button-secondary-border-active);
+}
+
+.friends-sidebar__add-friend-submit:hover,
+.friends-sidebar__add-friend-submit:focus-visible {
+  background: var(--button-primary-bg-hover);
+  border-color: var(--button-primary-border-hover);
+}
+
+.friends-sidebar__add-friend-submit:active {
+  background: var(--button-primary-bg-active);
+  border-color: var(--button-primary-border-active);
+}
+
+.friends-sidebar__add-friend-cancel:focus-visible,
+.friends-sidebar__add-friend-submit:focus-visible {
+  outline: none;
+}
+
+.friends-sidebar__add-friend-cancel:focus-visible {
+  box-shadow:
+    var(--button-secondary-shadow),
+    0 0 0 2px var(--button-focus-ring);
+}
+
+.friends-sidebar__add-friend-submit:focus-visible {
+  box-shadow:
+    var(--button-primary-shadow),
+    0 0 0 2px var(--button-focus-ring);
 }
 
 .friends-sidebar__add-friend-cancel:disabled,
 .friends-sidebar__add-friend-submit:disabled {
-  opacity: 0.65;
+  opacity: var(--button-disabled-opacity);
   cursor: not-allowed;
-  filter: none;
+  box-shadow: none;
 }
+
+.friends-sidebar__request-blocked-modal {
+  width: min(400px, calc(100vw - 24px)) !important;
+}
+
+.friends-sidebar__request-blocked-modal-body {
+  display: grid;
+  gap: 10px;
+}
+
+.friends-sidebar__request-blocked-content {
+  display: grid;
+  gap: 10px;
+}
+
+.friends-sidebar__request-blocked-text {
+  margin: 0;
+  color: rgba(226, 232, 241, 0.82);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.friends-sidebar__request-blocked-footer {
+  width: 100%;
+  display: flex;
+}
+
+.friends-sidebar__request-blocked-button {
+  width: 100%;
+  min-height: 40px;
+  border-radius: 10px;
+  border: 1px solid var(--button-primary-border);
+  background: var(--button-primary-bg);
+  color: var(--button-primary-text);
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: var(--button-transition);
+  box-shadow: var(--button-primary-shadow);
+}
+
+.friends-sidebar__request-blocked-button:hover,
+.friends-sidebar__request-blocked-button:focus-visible {
+  background: var(--button-primary-bg-hover);
+  border-color: var(--button-primary-border-hover);
+}
+
+.friends-sidebar__request-blocked-button:active {
+  background: var(--button-primary-bg-active);
+  border-color: var(--button-primary-border-active);
+}
+
+.friends-sidebar__request-blocked-button:focus-visible {
+  outline: none;
+  box-shadow:
+    var(--button-primary-shadow),
+    0 0 0 2px var(--button-focus-ring);
+}
+
+

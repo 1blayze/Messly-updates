@@ -10,8 +10,15 @@ import {
   dispatchSidebarCallToggleSound,
   type SidebarCallStateDetail,
 } from "../../services/calls/callUiPresence";
-import { firebaseAuth } from "../../services/firebase";
+import { useAuthSession } from "../../auth/AuthProvider";
 import { normalizeBannerColor } from "../../services/profile/bannerColor";
+import { createProfileTheme, type ProfileThemeInlineStyle } from "../../services/profile/profileTheme";
+import {
+  isSpotifyPlaybackStillActive,
+  readSpotifyConnection,
+  subscribeSpotifyConnection,
+  type SpotifyConnectionState,
+} from "../../services/connections/spotifyConnection";
 import { supabase } from "../../services/supabase";
 import MaterialSymbolIcon from "../ui/MaterialSymbolIcon";
 import UserCardMini from "../UserCardMini/UserCardMini";
@@ -41,14 +48,14 @@ function buildProfilePlusThemeStorageKey(userUid: string | null | undefined): st
   return `${PROFILE_PLUS_THEME_STORAGE_KEY_PREFIX}${normalizedUid}`;
 }
 
-function readProfilePlusThemeState(): ProfilePlusThemeState {
+function readProfilePlusThemeState(currentUserUid: string | null | undefined): ProfilePlusThemeState {
   if (typeof window === "undefined") {
     return { primary: null, accent: null };
   }
 
   const candidateKeys = Array.from(
     new Set([
-      buildProfilePlusThemeStorageKey(firebaseAuth.currentUser?.uid ?? null),
+      buildProfilePlusThemeStorageKey(currentUserUid),
       buildProfilePlusThemeStorageKey(null),
     ]),
   );
@@ -74,6 +81,7 @@ function readProfilePlusThemeState(): ProfilePlusThemeState {
 
 interface UserCardProps {
   userId?: string | null;
+  currentUserId?: string | null;
   avatarSrc: string;
   bannerSrc?: string;
   bannerColor?: string | null;
@@ -82,12 +90,29 @@ interface UserCardProps {
   aboutText?: string;
   presenceState: PresenceState;
   onChangePresence: (state: PresenceState) => void;
-  onOpenSettings: () => void;
+  onOpenSettings: (section?: "account" | "profile" | "connections" | "social" | "devices" | "audio" | "windows") => void;
   onOpenConversation?: (conversationId: string) => void;
+}
+
+function formatMemberSinceDate(timestamp: string | null | undefined): string {
+  const rawValue = String(timestamp ?? "").trim();
+  if (!rawValue) {
+    return "";
+  }
+  const date = new Date(rawValue);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return new Intl.DateTimeFormat("pt-BR", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  }).format(date);
 }
 
 export default function UserCard({
   userId = null,
+  currentUserId = null,
   avatarSrc,
   bannerSrc,
   bannerColor = null,
@@ -99,11 +124,17 @@ export default function UserCard({
   onOpenSettings,
   onOpenConversation,
 }: UserCardProps) {
+  const { user: authUser } = useAuthSession();
+  const currentAuthUid = authUser?.uid ?? "";
+  const currentAuthCreationTime = authUser?.raw?.created_at ?? "";
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [isProfileOpen, setIsProfileOpen] = useState(false);
   const [isFullProfileOpen, setIsFullProfileOpen] = useState(false);
   const [isVoiceDetailsOpen, setIsVoiceDetailsOpen] = useState(false);
-  const [profileThemeState, setProfileThemeState] = useState<ProfilePlusThemeState>(() => readProfilePlusThemeState());
+  const [profileThemeState, setProfileThemeState] = useState<ProfilePlusThemeState>(() =>
+    readProfilePlusThemeState(authUser?.uid ?? currentUserId),
+  );
+  const [spotifyConnection, setSpotifyConnection] = useState<SpotifyConnectionState>(() => readSpotifyConnection(userId));
   const [sidebarCallState, setSidebarCallState] = useState<SidebarCallStateDetail>({
     active: false,
     conversationId: null,
@@ -118,7 +149,11 @@ export default function UserCard({
     isPopoutOpen: false,
     updatedAt: new Date().toISOString(),
   });
-  const [memberSinceLabel, setMemberSinceLabel] = useState("Data nao disponivel");
+  const fallbackMemberSinceLabel = useMemo(
+    () => formatMemberSinceDate(currentAuthCreationTime) || "Data não disponível",
+    [currentAuthCreationTime, currentAuthUid],
+  );
+  const [memberSinceLabel, setMemberSinceLabel] = useState(fallbackMemberSinceLabel);
 
   const safeDisplayName = useMemo(() => displayName.trim() || "Nome", [displayName]);
   const safeUsername = useMemo(() => username.trim() || "username", [username]);
@@ -135,7 +170,37 @@ export default function UserCard({
     }
     return trimmed;
   }, [avatarSrc, fallbackAvatarSrc]);
+  const profileTheme = useMemo(
+    () =>
+      createProfileTheme({
+        primaryColor: profileThemeState.primary ?? bannerColor ?? "",
+        accentColor: profileThemeState.accent ?? profileThemeState.primary ?? bannerColor ?? "",
+        mode: "dark",
+      }),
+    [bannerColor, profileThemeState.accent, profileThemeState.primary],
+  );
+  const profileThemeInlineStyle = useMemo<ProfileThemeInlineStyle>(() => profileTheme.style, [profileTheme.style]);
   const presenceLabel = PRESENCE_LABELS[presenceState];
+  const spotifyScope = useMemo(
+    () =>
+      String(currentUserId ?? "").trim() ||
+      String(userId ?? "").trim() ||
+      String(authUser?.uid ?? "").trim() ||
+      null,
+    [authUser?.uid, currentUserId, userId],
+  );
+  const hasActiveSpotifyPlayback = useMemo(
+    () => isSpotifyPlaybackStillActive(spotifyConnection.playback, spotifyConnection.updatedAt),
+    [spotifyConnection.playback, spotifyConnection.updatedAt],
+  );
+  const miniSpotifyStatusText = useMemo(() => {
+    if (!spotifyConnection.connected || !spotifyConnection.showAsStatus || !spotifyConnection.playback || !hasActiveSpotifyPlayback) {
+      return "";
+    }
+    const artistNames = String(spotifyConnection.playback.artistNames ?? "").trim();
+    const trackTitle = String(spotifyConnection.playback.trackTitle ?? "").trim();
+    return artistNames || trackTitle;
+  }, [hasActiveSpotifyPlayback, spotifyConnection.connected, spotifyConnection.playback, spotifyConnection.showAsStatus]);
   const voiceStatusTitle = useMemo(() => {
     if (!sidebarCallState.active) {
       return "Aguardando chamada";
@@ -151,9 +216,9 @@ export default function UserCard({
       case "reconnecting":
         return "Reconectando";
       case "disconnected":
-        return modeLabel === "video" ? "Chamada de video" : "Chamada de voz";
+        return modeLabel === "video" ? "Chamada de vídeo" : "Chamada de voz";
       case "active":
-        return modeLabel === "video" ? "Chamada de video" : "Chamada de voz";
+        return modeLabel === "video" ? "Chamada de vídeo" : "Chamada de voz";
       default:
         return "Aguardando chamada";
     }
@@ -165,8 +230,13 @@ export default function UserCard({
   const shouldShowCallStrip = sidebarCallState.active && sidebarCallState.phase !== "incoming";
 
   useEffect(() => {
-    setProfileThemeState(readProfilePlusThemeState());
-  }, [userId]);
+    setProfileThemeState(readProfilePlusThemeState(authUser?.uid ?? currentUserId));
+  }, [authUser?.uid, currentUserId, userId]);
+
+  useEffect(() => {
+    setSpotifyConnection(readSpotifyConnection(spotifyScope));
+    return subscribeSpotifyConnection(spotifyScope, setSpotifyConnection);
+  }, [spotifyScope]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -237,28 +307,11 @@ export default function UserCard({
     let cancelled = false;
     const normalizedUserId = String(userId ?? "").trim();
     const normalizedUsername = String(username ?? "").trim();
-
-    setMemberSinceLabel("Data nao disponivel");
-
-    const formatMemberSinceDate = (timestamp: string | null | undefined): string => {
-      const rawValue = String(timestamp ?? "").trim();
-      if (!rawValue) {
-        return "";
-      }
-      const date = new Date(rawValue);
-      if (Number.isNaN(date.getTime())) {
-        return "";
-      }
-      return new Intl.DateTimeFormat("pt-BR", {
-        day: "numeric",
-        month: "short",
-        year: "numeric",
-      }).format(date);
-    };
+    setMemberSinceLabel(fallbackMemberSinceLabel);
 
     const resolveMemberSince = async (): Promise<void> => {
       try {
-        const query = supabase.from("users").select("created_at").limit(1);
+        const query = supabase.from("profiles").select("created_at").limit(1);
         const result =
           normalizedUserId.length > 0
             ? await query.eq("id", normalizedUserId).maybeSingle()
@@ -285,12 +338,18 @@ export default function UserCard({
     return () => {
       cancelled = true;
     };
-  }, [userId, username]);
+  }, [fallbackMemberSinceLabel, userId, username]);
 
-  const handleOpenSettings = (): void => {
+  const handleOpenSettings = (
+    section: "account" | "profile" | "connections" | "social" | "audio" | "windows" = "account",
+  ): void => {
     setIsProfileOpen(false);
     setIsFullProfileOpen(false);
-    onOpenSettings();
+    onOpenSettings(section);
+  };
+
+  const handleOpenProfileSettings = (): void => {
+    handleOpenSettings("profile");
   };
 
   const handleOpenFullProfile = (): void => {
@@ -310,6 +369,10 @@ export default function UserCard({
     const handlePointerDown = (event: MouseEvent | TouchEvent): void => {
       const target = event.target;
       if (!(target instanceof Node)) {
+        return;
+      }
+
+      if (target instanceof Element && target.closest('[data-messly-modal-root="true"]')) {
         return;
       }
 
@@ -343,20 +406,20 @@ export default function UserCard({
     }
 
     const handleProfileThemeUpdated = (event: Event): void => {
-      const currentAuthUid = String(firebaseAuth.currentUser?.uid ?? "").trim();
+      const currentAuthUid = String(authUser?.uid ?? currentUserId ?? "").trim();
       const detail = (event as CustomEvent<{ userUid?: string | null } | undefined>).detail;
       const updatedUid = String(detail?.userUid ?? "").trim();
       if (updatedUid && currentAuthUid && updatedUid !== currentAuthUid) {
         return;
       }
-      setProfileThemeState(readProfilePlusThemeState());
+      setProfileThemeState(readProfilePlusThemeState(currentAuthUid || null));
     };
 
     window.addEventListener(PROFILE_PLUS_THEME_UPDATED_EVENT, handleProfileThemeUpdated as EventListener);
     return () => {
       window.removeEventListener(PROFILE_PLUS_THEME_UPDATED_EVENT, handleProfileThemeUpdated as EventListener);
     };
-  }, []);
+  }, [authUser?.uid, currentUserId]);
 
   useEffect(() => {
     if (!shouldShowCallStrip) {
@@ -450,7 +513,7 @@ export default function UserCard({
   }, [isFullProfileOpen]);
 
   return (
-    <div className={styles.wrap} ref={rootRef}>
+    <div className={styles.wrap} ref={rootRef} style={profileThemeInlineStyle}>
       {isProfileOpen ? (
         <div className={styles.popoverAnchor}>
           <UserProfilePopover
@@ -461,13 +524,16 @@ export default function UserCard({
             themeAccentColor={profileThemeState.accent}
             displayName={safeDisplayName}
             username={safeUsername}
+            profileUserId={userId}
             aboutText={aboutText}
+            spotifyConnection={spotifyConnection}
             memberSinceLabel={memberSinceLabel}
             presenceState={presenceState}
             presenceLabel={presenceLabel}
             onChangePresence={onChangePresence}
-            onEditProfile={handleOpenSettings}
+            onEditProfile={handleOpenProfileSettings}
             onOpenFullProfile={handleOpenFullProfile}
+            onOpenSettings={onOpenSettings}
           />
         </div>
       ) : null}
@@ -475,8 +541,10 @@ export default function UserCard({
       <UserCardMini
         avatarSrc={safeAvatarSrc}
         displayName={safeDisplayName}
+        username={safeUsername}
         presenceLabel={presenceLabel}
         presenceState={presenceState}
+        spotifyStatusText={miniSpotifyStatusText}
         isMicEnabled={sidebarCallState.micEnabled}
         isSoundEnabled={sidebarCallState.soundEnabled}
         onToggleMic={handleMiniToggleMic}
@@ -488,7 +556,7 @@ export default function UserCard({
                 <div
                   className={styles.voiceDetailsPopover}
                   role="dialog"
-                  aria-label="Diagnostico da chamada"
+                  aria-label="Diagnóstico da chamada"
                   aria-hidden={!isVoiceDetailsOpen}
                   hidden={!isVoiceDetailsOpen}
                 >
@@ -496,14 +564,14 @@ export default function UserCard({
                     <MaterialSymbolIcon name="network_check" size={18} />
                     <p className={styles.voiceDetailsTitle}>Qualidade da chamada</p>
                   </div>
-                  <p className={styles.voiceDetailsSubTitle}>Diagnostico em tempo real da conexao de voz.</p>
+                  <p className={styles.voiceDetailsSubTitle}>Diagnóstico em tempo real da conexão de voz.</p>
                   <div className={styles.voiceDetailsMetrics}>
                     <p className={styles.voiceDetailsMetricRow}>
-                      <span className={styles.voiceDetailsMetricLabel}>Ping medio</span>
+                      <span className={styles.voiceDetailsMetricLabel}>Ping médio</span>
                       <span className={styles.voiceDetailsMetricValue}>{averagePingLabel}</span>
                     </p>
                     <p className={styles.voiceDetailsMetricRow}>
-                      <span className={styles.voiceDetailsMetricLabel}>Ultimo ping</span>
+                      <span className={styles.voiceDetailsMetricLabel}>Último ping</span>
                       <span className={styles.voiceDetailsMetricValue}>{lastPingLabel}</span>
                     </p>
                     <p className={styles.voiceDetailsMetricRow}>
@@ -512,12 +580,12 @@ export default function UserCard({
                     </p>
                   </div>
                   <p className={styles.voiceDetailsHint}>
-                    Valores altos de ping ou perda de pacotes podem causar atrasos, cortes e reconexoes.
+                    Valores altos de ping ou perda de pacotes podem causar atrasos, cortes e reconexões.
                   </p>
                   <div className={styles.voiceDetailsFooter}>
                     <span className={styles.voiceDetailsFooterLock}>
                       <MaterialSymbolIcon name="lock" size={14} />
-                      Chamada criptografada em transito
+                      Chamada criptografada em trânsito
                     </span>
                   </div>
                 </div>
@@ -527,8 +595,7 @@ export default function UserCard({
                   <button
                     type="button"
                     className={styles.voiceNetworkButton}
-                    aria-label="Qualidade da conexao"
-                    title={`Ping medio: ${averagePingLabel}`}
+                    aria-label="Qualidade da conexão"
                     data-ping={averagePingLabel}
                     aria-expanded={isVoiceDetailsOpen}
                     onClick={() => {
@@ -576,14 +643,17 @@ export default function UserCard({
                   themeAccentColor={profileThemeState.accent}
                   displayName={safeDisplayName}
                   username={safeUsername}
+                  profileUserId={userId}
                   aboutText={aboutText}
+                  spotifyConnection={spotifyConnection}
                   memberSinceLabel={memberSinceLabel}
                   presenceState={presenceState}
                   presenceLabel={presenceLabel}
                   viewMode="full"
                   showActions={false}
                   showEditProfileButton
-                  onEditProfile={handleOpenSettings}
+                  onEditProfile={handleOpenProfileSettings}
+                  onOpenSettings={onOpenSettings}
                 />
               </div>
             </div>,

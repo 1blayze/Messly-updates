@@ -1,20 +1,16 @@
-import type { User as FirebaseUser } from "firebase/auth";
-import { supabase, type UserRow } from "./supabase";
-import {
-  escapeLikePattern,
-  isUsernameAvailable,
-  normalizeEmail,
-  sanitizeDisplayName,
-  validateUsernameInput,
-} from "./usernameAvailability";
+import type { User as SupabaseUser } from "@supabase/supabase-js";
+import { supabase } from "./supabase";
+import { ensureProfileForUser, type ProfileRow } from "./profile/profileService";
+import { normalizeEmail } from "./usernameAvailability";
 
 const PENDING_PROFILE_KEY = "messly:pending-profile";
 
 export interface PendingProfile {
-  firebaseUid: string;
+  authUid?: string | null;
   username: string;
   displayName: string;
   createdAt: number;
+  firebaseUid?: string | null;
 }
 
 export interface EnsureUserOptions {
@@ -22,257 +18,149 @@ export interface EnsureUserOptions {
   displayName?: string;
 }
 
-function getErrorCode(error: unknown): string | undefined {
-  if (typeof error === "object" && error !== null && "code" in error) {
-    return String((error as { code?: string }).code);
+type AuthIdentityInput =
+  | SupabaseUser
+  | {
+      uid?: string | null;
+      id?: string | null;
+      email?: string | null;
+      displayName?: string | null;
+      raw?: SupabaseUser | null;
+      user_metadata?: Record<string, unknown> | null;
+    };
+
+function resolveSupabaseUser(identity: AuthIdentityInput): SupabaseUser | null {
+  if ((identity as SupabaseUser)?.id) {
+    return identity as SupabaseUser;
   }
-  return undefined;
+  const raw = (identity as { raw?: SupabaseUser | null }).raw;
+  if (raw?.id) {
+    return raw;
+  }
+  return null;
 }
 
-function getErrorMessage(error: unknown): string {
-  if (typeof error === "object" && error !== null && "message" in error) {
-    return String((error as { message?: string }).message ?? "");
+function resolveDisplayName(identity: AuthIdentityInput): string | null {
+  const direct = (identity as { displayName?: string | null }).displayName;
+  if (direct && direct.trim()) {
+    return direct.trim();
   }
-  return "";
+  const raw = resolveSupabaseUser(identity);
+  const metadata = (identity as { user_metadata?: Record<string, unknown> | null }).user_metadata ?? raw?.user_metadata;
+  const candidate =
+    (metadata as { display_name?: string | null })?.display_name ??
+    (metadata as { name?: string | null })?.name ??
+    raw?.email ??
+    null;
+  const normalized = String(candidate ?? "").trim();
+  return normalized || null;
 }
 
-function deriveUsernameFromUid(firebaseUid: string): string {
-  const compactUid = firebaseUid
-    .toLowerCase()
-    .replace(/[^a-z0-9]/g, "")
-    .slice(0, 12);
-
-  const candidate = `user_${compactUid}`;
-  if (candidate.length >= 3) {
-    return candidate.slice(0, 20);
+function resolvePreferredUsername(identity: AuthIdentityInput): string | null {
+  const raw = resolveSupabaseUser(identity);
+  const direct = (identity as { username?: string | null }).username;
+  if (direct && direct.trim()) {
+    return direct.trim();
   }
-
-  return "user_000";
+  const metadata = (identity as { user_metadata?: Record<string, unknown> | null }).user_metadata ?? raw?.user_metadata;
+  const candidate =
+    (metadata as { username?: string | null })?.username ??
+    (metadata as { preferred_username?: string | null })?.preferred_username ??
+    null;
+  const normalized = String(candidate ?? "").trim().toLowerCase();
+  return normalized || null;
 }
 
-function normalizeUsernameSeed(username: string): string {
-  const normalized = username
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_]/g, "_")
-    .replace(/_+/g, "_")
-    .replace(/^_+|_+$/g, "");
-
-  if (!normalized) {
-    return "user";
-  }
-
-  if (normalized.length < 3) {
-    return `${normalized}user`.slice(0, 20);
-  }
-
-  return normalized.slice(0, 20);
-}
-
-async function getUserByFirebaseUid(firebaseUid: string): Promise<UserRow | null> {
-  const { data, error } = await supabase
-    .from("users")
-    .select("*")
-    .eq("firebase_uid", firebaseUid)
-    .limit(1);
-
-  if (error) {
-    throw error;
-  }
-
-  return data?.[0] ?? null;
-}
-
-async function getUserByEmail(email: string): Promise<UserRow | null> {
-  const escapedEmail = escapeLikePattern(email);
-  const { data, error } = await supabase.from("users").select("*").ilike("email", escapedEmail).limit(1);
-
-  if (error) {
-    throw error;
-  }
-
-  return data?.[0] ?? null;
-}
-
-async function updateUserById(id: string, values: Partial<UserRow>): Promise<UserRow> {
-  const { data, error } = await supabase.from("users").update(values).eq("id", id).select("*").single();
-  if (error) {
-    throw error;
-  }
-  return data;
-}
-
-async function resolveAvailableUsername(usernameSeed: string): Promise<string> {
-  const baseSeed = normalizeUsernameSeed(usernameSeed);
-
-  const maxAttempts = 50;
-  for (let index = 0; index < maxAttempts; index += 1) {
-    const suffix = index === 0 ? "" : `_${index + 1}`;
-    const maxBaseLength = 20 - suffix.length;
-    const candidateBase = baseSeed.slice(0, Math.max(3, maxBaseLength));
-    const candidate = `${candidateBase}${suffix}`;
-    const validation = validateUsernameInput(candidate);
-
-    if (!validation.isValid) {
-      continue;
-    }
-
-    const available = await isUsernameAvailable(candidate);
-    if (available) {
-      return candidate;
-    }
-  }
-
-  throw new Error("Unable to resolve a unique username.");
+function getAuthUid(identity: AuthIdentityInput): string {
+  const raw = resolveSupabaseUser(identity);
+  const fallbackUid =
+    (identity as { uid?: string | null }).uid ?? (identity as { id?: string | null }).id ?? raw?.id ?? "";
+  return String(fallbackUid ?? "").trim();
 }
 
 export function savePendingProfile(profile: PendingProfile): void {
-  localStorage.setItem(PENDING_PROFILE_KEY, JSON.stringify(profile));
+  const payload: PendingProfile = {
+    authUid: profile.authUid ?? null,
+    username: profile.username.trim(),
+    displayName: profile.displayName.trim(),
+    createdAt: profile.createdAt || Date.now(),
+  };
+
+  try {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(PENDING_PROFILE_KEY, JSON.stringify(payload));
+    }
+  } catch {
+    // ignore storage issues
+  }
 }
 
 export function loadPendingProfile(): PendingProfile | null {
-  const raw = localStorage.getItem(PENDING_PROFILE_KEY);
-  if (!raw) {
+  if (typeof window === "undefined") {
     return null;
   }
-
   try {
-    const parsed = JSON.parse(raw) as PendingProfile;
-    if (!parsed.firebaseUid || !parsed.username || !parsed.displayName) {
+    const raw = window.localStorage.getItem(PENDING_PROFILE_KEY);
+    if (!raw) {
       return null;
     }
-    return parsed;
+    const parsed = JSON.parse(raw) as Partial<PendingProfile> | null;
+    const username = String(parsed?.username ?? "").trim();
+    const displayName = String(parsed?.displayName ?? "").trim();
+    if (!username || !displayName) {
+      return null;
+    }
+    return {
+      authUid: parsed?.authUid ?? null,
+      username,
+      displayName,
+      createdAt: Number(parsed?.createdAt ?? Date.now()),
+    };
   } catch {
     return null;
   }
 }
 
-export function clearPendingProfile(firebaseUid?: string): void {
-  const current = loadPendingProfile();
-  if (!current) {
+export function clearPendingProfile(authUid?: string): void {
+  if (typeof window === "undefined") {
     return;
   }
-
-  if (!firebaseUid || current.firebaseUid === firebaseUid) {
-    localStorage.removeItem(PENDING_PROFILE_KEY);
+  try {
+    const existing = loadPendingProfile();
+    if (authUid && existing?.authUid && existing.authUid !== authUid) {
+      return;
+    }
+    window.localStorage.removeItem(PENDING_PROFILE_KEY);
+  } catch {
+    // ignore
   }
 }
 
-export async function ensureUser(firebaseUser: FirebaseUser, options: EnsureUserOptions = {}): Promise<UserRow> {
-  const firebaseUid = firebaseUser.uid;
-  const normalizedEmail = normalizeEmail(firebaseUser.email ?? "");
-
-  if (!firebaseUid || !normalizedEmail) {
-    throw new Error("Invalid Firebase user session.");
+export async function ensureUser(identity: AuthIdentityInput, options: EnsureUserOptions = {}): Promise<ProfileRow> {
+  const authUser = resolveSupabaseUser(identity);
+  const uid = getAuthUid(identity);
+  if (!authUser || !uid) {
+    throw new Error("Sessão de usuário indisponível.");
   }
 
-  const pendingProfile = loadPendingProfile();
-  const pendingForCurrentUser =
-    pendingProfile && pendingProfile.firebaseUid === firebaseUid ? pendingProfile : null;
+  const preferredUsername = resolvePreferredUsername(identity) ?? options.username ?? null;
+  const displayName =
+    options.displayName ?? resolveDisplayName(identity) ?? normalizeEmail(authUser.email ?? "") ?? authUser.id;
 
-  const desiredDisplayName = sanitizeDisplayName(
-    options.displayName ?? pendingForCurrentUser?.displayName ?? firebaseUser.displayName ?? "",
-  );
-  const usernameSeed =
-    options.username ??
-    pendingForCurrentUser?.username ??
-    deriveUsernameFromUid(firebaseUid);
+  const profile = await ensureProfileForUser(authUser, {
+    preferredUsername,
+    displayName,
+  });
 
-  const existingByUid = await getUserByFirebaseUid(firebaseUid);
-  if (existingByUid) {
-    const updates: Partial<UserRow> = {
-      last_active: new Date().toISOString(),
-    };
-
-    if ((!existingByUid.display_name || !existingByUid.display_name.trim()) && desiredDisplayName) {
-      updates.display_name = desiredDisplayName;
-    }
-
-    if ((!existingByUid.email || !existingByUid.email.trim()) && normalizedEmail) {
-      updates.email = normalizedEmail;
-    }
-
-    if (Object.keys(updates).length > 1 || updates.email || updates.display_name) {
-      const updated = await updateUserById(existingByUid.id, updates);
-      clearPendingProfile(firebaseUid);
-      return updated;
-    }
-
-    clearPendingProfile(firebaseUid);
-    return existingByUid;
+  if (!profile) {
+    throw new Error("Não foi possível criar/atualizar o perfil.");
   }
 
-  const existingByEmail = await getUserByEmail(normalizedEmail);
-  if (existingByEmail) {
-    if (existingByEmail.firebase_uid && existingByEmail.firebase_uid !== firebaseUid) {
-      throw new Error("Email already linked to another account.");
-    }
-
-    const updates: Partial<UserRow> = {
-      firebase_uid: firebaseUid,
-      last_active: new Date().toISOString(),
-    };
-
-    if ((!existingByEmail.display_name || !existingByEmail.display_name.trim()) && desiredDisplayName) {
-      updates.display_name = desiredDisplayName;
-    }
-
-    if (!existingByEmail.username || !existingByEmail.username.trim()) {
-      updates.username = await resolveAvailableUsername(usernameSeed);
-    }
-
-    const updated = await updateUserById(existingByEmail.id, updates);
-    clearPendingProfile(firebaseUid);
-    return updated;
+  // update cached email if changed
+  const normalizedEmail = normalizeEmail(authUser.email ?? "");
+  if (normalizedEmail && profile.email !== normalizedEmail) {
+    await supabase.from("profiles").update({ email: normalizedEmail }).eq("id", profile.id);
   }
 
-  let resolvedUsername = await resolveAvailableUsername(usernameSeed);
-  const insertBase = {
-    firebase_uid: firebaseUid,
-    email: normalizedEmail,
-    display_name: desiredDisplayName || null,
-    status: "offline",
-    last_active: new Date().toISOString(),
-  };
-
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const { data, error } = await supabase
-      .from("users")
-      .insert({
-        ...insertBase,
-        username: resolvedUsername,
-      })
-      .select("*")
-      .single();
-
-    if (!error && data) {
-      clearPendingProfile(firebaseUid);
-      return data;
-    }
-
-    const code = getErrorCode(error);
-    const message = getErrorMessage(error).toLowerCase();
-    const isUniqueViolation = code === "23505" || message.includes("duplicate key");
-
-    if (!isUniqueViolation) {
-      throw error;
-    }
-
-    if (message.includes("username")) {
-      resolvedUsername = await resolveAvailableUsername(`${resolvedUsername}_${attempt + 2}`);
-      continue;
-    }
-
-    if (message.includes("email") || message.includes("firebase_uid")) {
-      const recovered = (await getUserByFirebaseUid(firebaseUid)) ?? (await getUserByEmail(normalizedEmail));
-      if (recovered) {
-        clearPendingProfile(firebaseUid);
-        return recovered;
-      }
-    }
-
-    throw error;
-  }
-
-  throw new Error("Could not ensure user record.");
+  return profile;
 }

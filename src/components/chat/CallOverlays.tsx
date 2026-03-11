@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import MaterialSymbolIcon from "../ui/MaterialSymbolIcon";
+import AvatarImage from "../ui/AvatarImage";
 import type { CallMode } from "../../services/calls/callApi";
 
 interface StreamVideoProps {
@@ -58,8 +59,8 @@ export function IncomingCallOverlay({
   return (
     <div className="dm-call dm-call--incoming" role="dialog" aria-modal="true" aria-label="Chamada recebida">
       <div className="dm-call__panel">
-        <p className="dm-call__eyebrow">{mode === "video" ? "Chamada de video recebida" : "Chamada de voz recebida"}</p>
-        <img className="dm-call__avatar" src={callerAvatarSrc} alt={`Avatar de ${callerName}`} />
+        <p className="dm-call__eyebrow">{mode === "video" ? "Chamada de vídeo recebida" : "Chamada de voz recebida"}</p>
+        <AvatarImage className="dm-call__avatar" src={callerAvatarSrc} name={callerName} alt={`Avatar de ${callerName}`} />
         <h3 className="dm-call__name">{callerName}</h3>
         <div className="dm-call__actions">
           <button type="button" className="dm-call__btn dm-call__btn--accept" onClick={onAccept}>
@@ -98,8 +99,8 @@ export function OutgoingCallOverlay({
   return (
     <div className="dm-call dm-call--outgoing" role="dialog" aria-modal="true" aria-label="Chamada em andamento">
       <div className="dm-call__panel">
-        <p className="dm-call__eyebrow">{mode === "video" ? "Chamando em video..." : "Chamando em voz..."}</p>
-        <img className="dm-call__avatar" src={calleeAvatarSrc} alt={`Avatar de ${calleeName}`} />
+        <p className="dm-call__eyebrow">{mode === "video" ? "Chamando por vídeo..." : "Chamando por voz..."}</p>
+        <AvatarImage className="dm-call__avatar" src={calleeAvatarSrc} name={calleeName} alt={`Avatar de ${calleeName}`} />
         <h3 className="dm-call__name">{calleeName}</h3>
         <div className="dm-call__actions">
           <button type="button" className="dm-call__btn dm-call__btn--decline" onClick={onCancel}>
@@ -176,7 +177,7 @@ export function InCallOverlay({
             className={`dm-call__control${isMicEnabled ? "" : " dm-call__control--off"}`}
             onClick={onToggleMute}
             aria-label={isMicEnabled ? "Silenciar microfone" : "Ativar microfone"}
-            title={isMicEnabled ? "Silenciar microfone" : "Ativar microfone"}
+            data-tooltip={isMicEnabled ? "Silenciar" : "Ativar"}
           >
             <MaterialSymbolIcon name={isMicEnabled ? "mic" : "mic_off"} size={20} />
           </button>
@@ -186,8 +187,8 @@ export function InCallOverlay({
               type="button"
               className={`dm-call__control${isCameraEnabled ? "" : " dm-call__control--off"}`}
               onClick={onToggleCamera}
-              aria-label={isCameraEnabled ? "Desligar camera" : "Ligar camera"}
-              title={isCameraEnabled ? "Desligar camera" : "Ligar camera"}
+              aria-label={isCameraEnabled ? "Desligar câmera" : "Ligar câmera"}
+              data-tooltip={isCameraEnabled ? "Desligar câmera" : "Ligar câmera"}
             >
               <MaterialSymbolIcon name={isCameraEnabled ? "videocam" : "videocam_off"} size={20} />
             </button>
@@ -198,8 +199,8 @@ export function InCallOverlay({
               type="button"
               className={`dm-call__control${isScreenSharing ? " dm-call__control--active" : ""}`}
               onClick={onToggleScreenShare}
-              aria-label={isScreenSharing ? "Parar compartilhamento de tela" : "Compartilhar tela"}
-              title={isScreenSharing ? "Parar compartilhamento de tela" : "Compartilhar tela"}
+              aria-label={isScreenSharing ? "Parar transmissão" : "Compartilhar tela"}
+              data-tooltip={isScreenSharing ? "Parar transmissão" : "Compartilhar tela"}
             >
               <MaterialSymbolIcon name={isScreenSharing ? "stop_screen_share" : "screen_share"} size={20} />
             </button>
@@ -210,7 +211,7 @@ export function InCallOverlay({
             className="dm-call__control dm-call__control--hangup"
             onClick={onHangup}
             aria-label="Desconectar"
-            title="Desconectar"
+            data-tooltip="Desconectar"
           >
             <MaterialSymbolIcon name="call_end" size={20} />
           </button>

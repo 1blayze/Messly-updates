@@ -1,3 +1,4 @@
+/// <reference path="./edge-runtime.d.ts" />
 import { HttpError } from "./http.ts";
 
 interface UpstashResultItem {
@@ -79,12 +80,12 @@ async function consumeUpstash(
   const payload = (await response.json()) as UpstashResultItem[];
   const counter = payload?.[0];
   if (!counter || counter.error) {
-    throw new HttpError(502, "RATE_LIMIT_BACKEND_ERROR", "Resposta invalida do backend de rate limit.");
+    throw new HttpError(502, "RATE_LIMIT_BACKEND_ERROR", "Resposta inválida do backend de rate limit.");
   }
 
   const count = Number(counter.result);
   if (!Number.isFinite(count) || count < 0) {
-    throw new HttpError(502, "RATE_LIMIT_BACKEND_ERROR", "Contador de rate limit invalido.");
+    throw new HttpError(502, "RATE_LIMIT_BACKEND_ERROR", "Contador de rate limit inválido.");
   }
 
   return { count };
@@ -115,7 +116,7 @@ export async function consumeRateLimit(
   prefix = "ratelimit",
 ): Promise<RateLimitDecision> {
   if (!Number.isFinite(limit) || limit <= 0 || !Number.isFinite(windowMs) || windowMs <= 0) {
-    throw new HttpError(500, "SERVER_CONFIG_ERROR", "Parametros de rate limit invalidos.");
+    throw new HttpError(500, "SERVER_CONFIG_ERROR", "Parâmetros de rate limit inválidos.");
   }
 
   const now = getNowMs();
@@ -139,7 +140,7 @@ export async function consumeRateLimit(
       JSON.stringify({
         timestamp: new Date().toISOString(),
         level: "warn",
-        message: "Upstash indisponivel, usando rate limit em memoria por instancia.",
+        message: "Upstash indisponível, usando rate limit em memória por instância.",
       }),
     );
   }

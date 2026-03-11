@@ -109,3 +109,45 @@ export async function deleteCachedValue(key: string): Promise<void> {
     1200,
   );
 }
+
+export async function setPersistentValue<T>(key: string, value: T): Promise<void> {
+  const db = await createTimeoutPromise(openCacheDatabase(), 1200);
+  await createTimeoutPromise(
+    new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(CACHE_STORE_NAME, "readwrite");
+      const store = tx.objectStore(CACHE_STORE_NAME);
+      const payload: CacheRecord<T> = {
+        value,
+        expiresAt: Number.POSITIVE_INFINITY,
+      };
+
+      const request = store.put(payload, key);
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error ?? new Error("IndexedDB write failed"));
+    }),
+    1200,
+  );
+}
+
+export async function getPersistentValue<T>(key: string): Promise<T | null> {
+  const db = await createTimeoutPromise(openCacheDatabase(), 1200);
+  const record = await createTimeoutPromise(
+    new Promise<CacheRecord<T> | null>((resolve, reject) => {
+      const tx = db.transaction(CACHE_STORE_NAME, "readonly");
+      const store = tx.objectStore(CACHE_STORE_NAME);
+      const request = store.get(key);
+      request.onsuccess = () => {
+        const result = (request.result as CacheRecord<T> | undefined) ?? null;
+        resolve(result);
+      };
+      request.onerror = () => reject(request.error ?? new Error("IndexedDB read failed"));
+    }),
+    1200,
+  );
+
+  return record?.value ?? null;
+}
+
+export async function deletePersistentValue(key: string): Promise<void> {
+  await deleteCachedValue(key);
+}

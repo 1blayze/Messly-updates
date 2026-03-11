@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { onValue, ref } from "firebase/database";
 import MaterialSymbolIcon from "../ui/MaterialSymbolIcon";
+import AvatarImage from "../ui/AvatarImage";
 import UserCard from "../UserCard/UserCard";
 import Modal from "../ui/Modal";
 import { useAuthSession } from "../../auth/AuthProvider";
@@ -14,12 +14,37 @@ import {
   isDefaultBannerUrl,
 } from "../../services/cdn/mediaUrls";
 import { supabase } from "../../services/supabase";
-import { firebaseAuth, firebaseDatabase } from "../../services/firebase";
-import { escapeLikePattern, normalizeEmail } from "../../services/usernameAvailability";
 import { friendRequestsEnabled } from "../../services/friends/friendRequests";
-import { preloadChatMessages } from "../../services/chat/chatApi";
+import { listFriendRequests } from "../../services/friends/friendRequestsApi";
+import { useConversationsRealtime, type ConversationMessageInsertEvent } from "../../hooks/useConversationsRealtime";
+import {
+  FRIEND_REQUEST_BLOCKED_EVENT,
+  buildFriendRequestBlockedNotice,
+  dispatchFriendRequestBlockedNotice,
+  evaluateFriendRequestPermission,
+  queryFriendRequestTargetByUsername,
+  type FriendRequestBlockedNoticeDetail,
+} from "../../services/friends/friendRequestPrivacy";
+import {
+  preloadChatMessages,
+  removeCachedInitialChatMessageByClientId,
+  type ChatMessageServer,
+  upsertCachedInitialChatMessages,
+} from "../../services/chat/chatApi";
+import {
+  buildHiddenDirectMessageStorageScopes,
+  persistHiddenDirectMessageConversationIds,
+  readHiddenDirectMessageConversationIds,
+} from "../../services/chat/hiddenDirectMessages";
 import { normalizeBannerColor } from "../../services/profile/bannerColor";
-import type { PresenceState } from "../../services/presence/presenceTypes";
+import { loadPendingProfile } from "../../services/userSync";
+import type { PresenceSpotifyActivity, PresenceState } from "../../services/presence/presenceTypes";
+import { presenceStore } from "../../services/presence/presenceStore";
+import { hydrateSpotifyConnectionFromProfile } from "../../services/connections/spotifyConnection";
+import { notificationsActions } from "../../stores/notificationsSlice";
+import { useAppDispatch } from "../../stores/store";
+import { createClientNonce } from "../../utils/ids";
+import musicalIcon from "../../assets/icons/ui/musical.svg";
 import "../../styles/components/DirectMessagesSidebar.css";
 
 interface SidebarIdentity {
@@ -44,6 +69,7 @@ export interface SidebarDirectMessageSelection {
   displayName: string;
   avatarSrc: string;
   presenceState: PresenceState;
+  spotifyActivity?: PresenceSpotifyActivity | null;
   firebaseUid?: string;
   aboutText?: string;
   bannerColor?: string | null;
@@ -57,9 +83,10 @@ export interface SidebarDirectMessageSelection {
 
 interface DirectMessagesSidebarProps {
   currentUserId?: string | null;
+  isWindowFocused?: boolean;
   presenceState: PresenceState;
   onChangePresence: (state: PresenceState) => void;
-  onOpenSettings: () => void;
+  onOpenSettings: (section?: "account" | "profile" | "connections" | "social" | "devices" | "audio" | "windows") => void;
   activeConversationId?: string | null;
   onSelectDirectMessage?: (dm: SidebarDirectMessageSelection) => void;
   onOpenFriends?: () => void;
@@ -90,6 +117,10 @@ interface ProfileUpdatedDetail {
   profile_theme_accent_color?: string | null;
 }
 
+const DM_PRESENCE_DEVICE_STALE_MS = 90_000;
+const DM_SPOTIFY_ACTIVITY_END_GRACE_MS = 8_000;
+const DM_SPOTIFY_ACTIVITY_NO_DURATION_STALE_MS = 60_000;
+
 interface DmUserRow {
   id: string;
   username?: string | null;
@@ -106,6 +137,7 @@ interface DmUserRow {
   banner_key?: string | null;
   banner_hash?: string | null;
   created_at?: string | null;
+  spotify_connection?: unknown | null;
 }
 
 interface LegacyAvatarRow {
@@ -127,6 +159,7 @@ interface DirectMessageItem {
   displayName: string;
   avatarSrc: string;
   presenceState: PresenceState;
+  spotifyActivity?: PresenceSpotifyActivity | null;
   firebaseUid?: string;
   aboutText?: string;
   bannerColor?: string | null;
@@ -136,6 +169,35 @@ interface DirectMessageItem {
   bannerHash?: string | null;
   bannerSrc?: string;
   memberSinceAt?: string | null;
+}
+
+interface BroadcastChatMessageItem {
+  id?: string;
+  conversationId?: string;
+  senderId?: string;
+  clientId?: string | null;
+  content?: string;
+  type?: string;
+  createdAt?: string;
+  editedAt?: string | null;
+  deletedAt?: string | null;
+  replyToId?: string | null;
+  replyToSnapshot?: Record<string, unknown> | null;
+  callId?: string | null;
+  payload?: Record<string, unknown> | null;
+  attachment?: {
+    fileKey: string;
+    originalKey?: string | null;
+    thumbKey?: string | null;
+    mimeType?: string | null;
+    fileSize?: number | null;
+    width?: number | null;
+    height?: number | null;
+    thumbWidth?: number | null;
+    thumbHeight?: number | null;
+    codec?: string | null;
+    durationMs?: number | null;
+  } | null;
 }
 
 interface CachedDmAvatarEntry {
@@ -166,11 +228,33 @@ const DM_PRELOAD_LIMIT = 30;
 const DM_PRELOAD_HOVER_DEBOUNCE_MS = 150; 
 const DM_PRELOAD_MAX_AGE_MS = 90_000;
 const DM_PRELOAD_LIST_WARMUP_COUNT = 6;
+const DM_PRELOAD_LIST_WARMUP_ENABLED = import.meta.env.PROD;
+
+function areHiddenDmConversationIdsEqual(current: string[], next: string[]): boolean {
+  if (current.length !== next.length) {
+    return false;
+  }
+
+  for (let index = 0; index < current.length; index += 1) {
+    if (current[index] !== next[index]) {
+      return false;
+    }
+  }
+
+  return true;
+}
 
 
 interface CachedDirectMessagesPayload {
   version: number;
   items: DirectMessageItem[];
+}
+
+interface FriendRequestRow {
+  id?: string | null;
+  requester_id?: string | null;
+  addressee_id?: string | null;
+  status?: string | null;
 }
 
 interface CachedSidebarResolvedMedia {
@@ -191,6 +275,7 @@ function toSidebarSelection(dm: DirectMessageItem): SidebarDirectMessageSelectio
     displayName: resolvedDisplayName,
     avatarSrc: dm.avatarSrc,
     presenceState: dm.presenceState,
+    spotifyActivity: dm.spotifyActivity ?? null,
     firebaseUid: dm.firebaseUid,
     aboutText: dm.aboutText,
     bannerColor: dm.bannerColor ?? null,
@@ -333,6 +418,9 @@ function readDirectMessagesCache(userId: string | null | undefined): DirectMessa
         const bannerHash = String((casted as { bannerHash?: string | null }).bannerHash ?? "").trim() || null;
         const bannerSrc = String((casted as { bannerSrc?: string | null }).bannerSrc ?? "").trim();
         const memberSinceAt = String((casted as { memberSinceAt?: string | null }).memberSinceAt ?? "").trim() || null;
+        const spotifyActivity = normalizePresenceSpotifyActivity(
+          (casted as { spotifyActivity?: unknown }).spotifyActivity ?? null,
+        );
         const parsedItem: DirectMessageItem = {
           conversationId,
           userId: userIdValue,
@@ -340,6 +428,7 @@ function readDirectMessagesCache(userId: string | null | undefined): DirectMessa
           displayName,
           avatarSrc,
           presenceState: normalizePresenceState((casted as { presenceState?: unknown }).presenceState ?? null),
+          ...(spotifyActivity ? { spotifyActivity } : {}),
           ...(firebaseUid ? { firebaseUid } : {}),
           ...(aboutText ? { aboutText } : {}),
           ...(bannerColor ? { bannerColor } : {}),
@@ -373,6 +462,60 @@ function writeDirectMessagesCache(userId: string | null | undefined, items: Dire
   } catch {
     // ignore storage write failures
   }
+}
+
+function mapBroadcastMessageToServerMessage(
+  conversationIdRaw: string,
+  message: BroadcastChatMessageItem | null | undefined,
+): ChatMessageServer | null {
+  const conversationId = String(conversationIdRaw ?? "").trim();
+  if (!conversationId || !message) {
+    return null;
+  }
+
+  const id = String(message.id ?? "").trim();
+  const senderId = String(message.senderId ?? "").trim();
+  const createdAt = String(message.createdAt ?? "").trim();
+  if (!id || !senderId || !createdAt) {
+    return null;
+  }
+
+  return {
+    id,
+    conversation_id: conversationId,
+    sender_id: senderId,
+    client_id: String(message.clientId ?? "").trim() || null,
+    content: String(message.content ?? ""),
+    type: (String(message.type ?? "text").trim() || "text") as ChatMessageServer["type"],
+    created_at: createdAt,
+    edited_at: String(message.editedAt ?? "").trim() || null,
+    deleted_at: String(message.deletedAt ?? "").trim() || null,
+    reply_to_id: String(message.replyToId ?? "").trim() || null,
+    reply_to_snapshot:
+      message.replyToSnapshot && typeof message.replyToSnapshot === "object" && !Array.isArray(message.replyToSnapshot)
+        ? { ...message.replyToSnapshot }
+        : null,
+    call_id: String(message.callId ?? "").trim() || null,
+    payload:
+      message.payload && typeof message.payload === "object" && !Array.isArray(message.payload)
+        ? { ...message.payload }
+        : null,
+    attachment: message.attachment
+      ? {
+          fileKey: String(message.attachment.fileKey ?? "").trim(),
+          originalKey: String(message.attachment.originalKey ?? "").trim() || null,
+          thumbKey: String(message.attachment.thumbKey ?? "").trim() || null,
+          mimeType: String(message.attachment.mimeType ?? "").trim() || null,
+          fileSize: typeof message.attachment.fileSize === "number" ? message.attachment.fileSize : null,
+          width: typeof message.attachment.width === "number" ? message.attachment.width : null,
+          height: typeof message.attachment.height === "number" ? message.attachment.height : null,
+          thumbWidth: typeof message.attachment.thumbWidth === "number" ? message.attachment.thumbWidth : null,
+          thumbHeight: typeof message.attachment.thumbHeight === "number" ? message.attachment.thumbHeight : null,
+          codec: String(message.attachment.codec ?? "").trim() || null,
+          durationMs: typeof message.attachment.durationMs === "number" ? message.attachment.durationMs : null,
+        }
+      : null,
+  };
 }
 
 function isInlineMediaUrl(url: string): boolean {
@@ -510,6 +653,9 @@ function mergeDirectMessagesWithoutAvatarDowngrade(
     if (isDmFallbackAvatar(item.avatarSrc) && !isDmFallbackAvatar(currentItem.avatarSrc)) {
       mergedItem.avatarSrc = currentItem.avatarSrc;
     }
+    if (typeof mergedItem.spotifyActivity === "undefined" && currentItem.spotifyActivity) {
+      mergedItem.spotifyActivity = currentItem.spotifyActivity;
+    }
     if (!mergedItem.aboutText && currentItem.aboutText) {
       mergedItem.aboutText = currentItem.aboutText;
     }
@@ -558,6 +704,7 @@ function areDirectMessageListsEqual(current: DirectMessageItem[], next: DirectMe
       currentItem.displayName !== nextItem.displayName ||
       currentItem.avatarSrc !== nextItem.avatarSrc ||
       currentItem.presenceState !== nextItem.presenceState ||
+      !areSpotifyActivitiesEqual(currentItem.spotifyActivity ?? null, nextItem.spotifyActivity ?? null) ||
       (currentItem.firebaseUid ?? "") !== (nextItem.firebaseUid ?? "") ||
       (currentItem.aboutText ?? "") !== (nextItem.aboutText ?? "") ||
       (currentItem.bannerColor ?? "") !== (nextItem.bannerColor ?? "") ||
@@ -578,7 +725,7 @@ function areDirectMessageListsEqual(current: DirectMessageItem[], next: DirectMe
 function normalizePresenceState(value: unknown): PresenceState {
   const raw = String(value ?? "").trim().toLowerCase();
   if (!raw) {
-    return "offline";
+    return "invisivel";
   }
   if (raw === "online" || raw === "disponivel" || raw === "available") {
     return "online";
@@ -589,47 +736,215 @@ function normalizePresenceState(value: unknown): PresenceState {
   if (raw === "dnd" || raw === "nao perturbar" || raw === "busy") {
     return "dnd";
   }
-  if (raw === "offline" || raw === "invisible") {
-    return "offline";
+  if (raw === "invisivel" || raw === "invisible") {
+    return "invisivel";
   }
-  return "offline";
+  return "invisivel";
 }
 
-function resolvePresenceFromRealtimeNode(value: unknown): PresenceState {
+function normalizePresenceSpotifyActivity(value: unknown): PresenceSpotifyActivity | null {
   if (!value || typeof value !== "object") {
-    return "offline";
+    return null;
   }
+
+  const casted = value as Partial<PresenceSpotifyActivity>;
+  const providerRaw = String(casted.provider ?? "spotify").trim().toLowerCase();
+  if (providerRaw && providerRaw !== "spotify") {
+    return null;
+  }
+
+  const trackTitle = String(casted.trackTitle ?? "").trim();
+  const artistNames = String(casted.artistNames ?? "").trim();
+  if (!trackTitle || !artistNames) {
+    return null;
+  }
+
+  const trackId = String(casted.trackId ?? "").trim();
+  const trackUrl = String(casted.trackUrl ?? "").trim();
+  const coverUrl = String(casted.coverUrl ?? "").trim();
+  const durationSecondsRaw = Number(casted.durationSeconds ?? 0);
+  const safeDurationSeconds = Number.isFinite(durationSecondsRaw)
+    ? Math.max(0, Math.round(durationSecondsRaw))
+    : 0;
+  const progressSecondsRaw = Number(casted.progressSeconds ?? 0);
+  const safeProgressSeconds = Number.isFinite(progressSecondsRaw)
+    ? Math.max(0, Math.round(progressSecondsRaw))
+    : 0;
+  const updatedAtRaw = Number(casted.updatedAt ?? 0);
+  const updatedAt = Number.isFinite(updatedAtRaw) && updatedAtRaw > 0 ? updatedAtRaw : Date.now();
+  const showOnProfile =
+    typeof (casted as { showOnProfile?: unknown }).showOnProfile === "boolean"
+      ? Boolean((casted as { showOnProfile?: unknown }).showOnProfile)
+      : true;
+
+  return {
+    provider: "spotify",
+    showOnProfile,
+    trackId,
+    trackTitle,
+    artistNames,
+    trackUrl,
+    coverUrl,
+    progressSeconds: safeDurationSeconds > 0 ? Math.min(safeProgressSeconds, safeDurationSeconds) : safeProgressSeconds,
+    durationSeconds: safeDurationSeconds,
+    updatedAt,
+  };
+}
+
+function parsePresenceTimestamp(value: unknown): number | null {
+  if (typeof value === "number") {
+    return Number.isFinite(value) && value > 0 ? value : null;
+  }
+  if (typeof value === "string") {
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  if (value instanceof Date) {
+    const parsed = value.getTime();
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function isPresenceNodeFresh(value: unknown, nowMs: number = Date.now()): boolean {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const updatedAtMs = parsePresenceTimestamp((value as { updatedAt?: unknown }).updatedAt);
+  if (updatedAtMs == null) {
+    return true;
+  }
+
+  return nowMs - updatedAtMs <= DM_PRESENCE_DEVICE_STALE_MS;
+}
+
+function isSpotifyActivityFresh(
+  activity: PresenceSpotifyActivity | null | undefined,
+  nowMs: number = Date.now(),
+): activity is PresenceSpotifyActivity {
+  if (!activity) {
+    return false;
+  }
+
+  const updatedAtMs = parsePresenceTimestamp(activity.updatedAt);
+  if (updatedAtMs == null) {
+    return false;
+  }
+
+  const durationSeconds = Math.max(0, Number(activity.durationSeconds ?? 0));
+  const progressSeconds = Math.max(0, Math.min(durationSeconds || Number.MAX_SAFE_INTEGER, Number(activity.progressSeconds ?? 0)));
+  const projectedEndMs =
+    durationSeconds > 0
+      ? updatedAtMs + Math.max(0, durationSeconds - progressSeconds) * 1000 + DM_SPOTIFY_ACTIVITY_END_GRACE_MS
+      : updatedAtMs + DM_SPOTIFY_ACTIVITY_NO_DURATION_STALE_MS;
+
+  return nowMs <= projectedEndMs;
+}
+
+function areSpotifyActivitiesEqual(
+  left: PresenceSpotifyActivity | null,
+  right: PresenceSpotifyActivity | null,
+): boolean {
+  if (!left && !right) {
+    return true;
+  }
+  if (!left || !right) {
+    return false;
+  }
+  return (
+    left.provider === right.provider &&
+    (left.showOnProfile ?? true) === (right.showOnProfile ?? true) &&
+    left.trackId === right.trackId &&
+    left.trackTitle === right.trackTitle &&
+    left.artistNames === right.artistNames &&
+    left.trackUrl === right.trackUrl &&
+    left.coverUrl === right.coverUrl &&
+    left.progressSeconds === right.progressSeconds &&
+    left.durationSeconds === right.durationSeconds
+  );
+}
+
+function resolvePresenceSnapshotFromRealtimeNode(
+  value: unknown,
+): { presenceState: PresenceState; spotifyActivity: PresenceSpotifyActivity | null } {
+  if (!value || typeof value !== "object") {
+    return { presenceState: "invisivel", spotifyActivity: null };
+  }
+
+  const nowMs = Date.now();
 
   const directStateRaw = (value as { state?: unknown }).state;
   if (directStateRaw !== undefined) {
-    return normalizePresenceState(directStateRaw);
+    const directPresenceState = normalizePresenceState(directStateRaw);
+    const directActivityRaw = normalizePresenceSpotifyActivity((value as { activity?: unknown }).activity ?? null);
+    return {
+      presenceState: isPresenceNodeFresh(value, nowMs) ? directPresenceState : "invisivel",
+      spotifyActivity:
+        directPresenceState === "invisivel" || !isSpotifyActivityFresh(directActivityRaw, nowMs)
+          ? null
+          : directActivityRaw,
+    };
   }
 
   const devices = Object.values(value as Record<string, unknown>);
   let hasIdle = false;
   let hasOnline = false;
+  let hasDnd = false;
+  let bestSpotifyActivity: PresenceSpotifyActivity | null = null;
 
   for (const device of devices) {
+    if (!isPresenceNodeFresh(device, nowMs)) {
+      continue;
+    }
     const state = normalizePresenceState((device as { state?: unknown } | null)?.state ?? null);
     if (state === "dnd") {
-      return "dnd";
+      hasDnd = true;
     }
     if (state === "online") {
       hasOnline = true;
+    } else if (state === "idle") {
+      hasIdle = true;
+    }
+
+    const candidateActivityRaw = normalizePresenceSpotifyActivity(
+      (device as { activity?: unknown } | null)?.activity ?? null,
+    );
+    const candidateActivity = isSpotifyActivityFresh(candidateActivityRaw, nowMs) ? candidateActivityRaw : null;
+    if (!candidateActivity || state === "invisivel") {
       continue;
     }
-    if (state === "idle") {
-      hasIdle = true;
+
+    if (!bestSpotifyActivity || candidateActivity.updatedAt > bestSpotifyActivity.updatedAt) {
+      bestSpotifyActivity = candidateActivity;
     }
   }
 
+  const resolvedPresenceState: PresenceState = hasDnd
+    ? "dnd"
+    : hasOnline
+      ? "online"
+      : hasIdle
+        ? "idle"
+        : "invisivel";
+
+  if (resolvedPresenceState === "invisivel") {
+    return {
+      presenceState: resolvedPresenceState,
+      spotifyActivity: null,
+    };
+  }
+
   if (hasOnline) {
-    return "online";
+    return {
+      presenceState: resolvedPresenceState,
+      spotifyActivity: bestSpotifyActivity,
+    };
   }
-  if (hasIdle) {
-    return "idle";
-  }
-  return "offline";
+  return {
+    presenceState: resolvedPresenceState,
+    spotifyActivity: bestSpotifyActivity,
+  };
 }
 
 function isFriendRequestsUnavailableError(error: unknown): boolean {
@@ -637,42 +952,23 @@ function isFriendRequestsUnavailableError(error: unknown): boolean {
     return false;
   }
   const candidate = error as { code?: string; message?: string; details?: string };
+  const code = String(candidate.code ?? "").trim().toLowerCase();
   const message = String(candidate.message ?? "").toLowerCase();
   const details = String(candidate.details ?? "").toLowerCase();
   return (
     candidate.code === "42P01" ||
     candidate.code === "PGRST205" ||
+    code === "not_found" ||
+    code === "function_not_found" ||
     message.includes("could not find the table") ||
-    details.includes("could not find the table")
+    details.includes("could not find the table") ||
+    message.includes("function was not found") ||
+    message.includes("requested function was not found")
   );
 }
 
 async function loadLegacyAvatarMap(userIds: string[]): Promise<Map<string, string>> {
-  if (userIds.length === 0) {
-    return new Map();
-  }
-
-  try {
-    const { data, error } = await supabase
-      .from("users_legacy_media_backup")
-      .select("user_id,avatar_url")
-      .in("user_id", userIds);
-
-    if (error || !data) {
-      return new Map();
-    }
-
-    const map = new Map<string, string>();
-    (data as LegacyAvatarRow[]).forEach((row) => {
-      const url = String(row.avatar_url ?? "").trim();
-      if (row.user_id && url.length > 0) {
-        map.set(row.user_id, url);
-      }
-    });
-    return map;
-  } catch {
-    return new Map();
-  }
+  return new Map();
 }
 
 async function ensureDirectConversation(userA: string, userB: string): Promise<void> {
@@ -707,8 +1003,8 @@ async function ensureDirectConversation(userA: string, userB: string): Promise<v
 
 const DEFAULT_IDENTITY: SidebarIdentity = {
   userId: null,
-  displayName: "Nome",
-  username: "username",
+  displayName: "Usuário",
+  username: "usuario",
   about: "",
   bannerColor: null,
   themePrimaryColor: null,
@@ -721,120 +1017,66 @@ const DEFAULT_IDENTITY: SidebarIdentity = {
 };
 
 const USER_PROFILE_SELECT_COLUMNS =
-  "id,username,display_name,email,firebase_uid,about,banner_color,profile_theme_primary_color,profile_theme_accent_color,avatar_key,avatar_hash,avatar_url,banner_key,banner_hash";
-const USER_PROFILE_SELECT_COLUMNS_WITHOUT_AVATAR_URL =
-  "id,username,display_name,email,firebase_uid,about,banner_color,profile_theme_primary_color,profile_theme_accent_color,avatar_key,avatar_hash,banner_key,banner_hash";
-const USER_PROFILE_SELECT_COLUMNS_FALLBACK = "id,username,display_name,email,firebase_uid,about";
-
-function isUsersSchemaColumnCacheError(message: string): boolean {
-  return message.includes("column of 'users' in the schema cache");
-}
-
-function isMissingAvatarUrlColumnError(message: string): boolean {
-  const normalized = message.toLowerCase();
-  return normalized.includes("avatar_url") && normalized.includes("users");
-}
+  "id,username,display_name,email,avatar_url,avatar_key,avatar_hash,banner_url,banner_key,banner_hash,banner_color,profile_theme_primary_color,profile_theme_accent_color,bio,about:bio,firebase_uid:id,created_at,updated_at";
 
 async function queryUserById(userId: string) {
-  const primary = await supabase.from("users").select(USER_PROFILE_SELECT_COLUMNS).eq("id", userId).limit(1).maybeSingle();
-
-  if (primary.error && isMissingAvatarUrlColumnError(primary.error.message ?? "")) {
-    const withoutLegacyAvatar = await supabase
-      .from("users")
-      .select(USER_PROFILE_SELECT_COLUMNS_WITHOUT_AVATAR_URL)
-      .eq("id", userId)
-      .limit(1)
-      .maybeSingle();
-    if (!withoutLegacyAvatar.error) {
-      return withoutLegacyAvatar;
-    }
-  }
-
-  if (primary.error && isUsersSchemaColumnCacheError(primary.error.message ?? "")) {
-    return supabase
-      .from("users")
-      .select(USER_PROFILE_SELECT_COLUMNS_FALLBACK)
-      .eq("id", userId)
-      .limit(1)
-      .maybeSingle();
-  }
-
-  return primary;
+  return supabase.from("profiles").select(USER_PROFILE_SELECT_COLUMNS).eq("id", userId).limit(1).maybeSingle();
 }
 
 async function queryUserByFirebaseUid(firebaseUid: string) {
-  const primary = await supabase
-    .from("users")
-    .select(USER_PROFILE_SELECT_COLUMNS)
-    .eq("firebase_uid", firebaseUid)
-    .limit(1)
-    .maybeSingle();
-
-  if (primary.error && isMissingAvatarUrlColumnError(primary.error.message ?? "")) {
-    const withoutLegacyAvatar = await supabase
-      .from("users")
-      .select(USER_PROFILE_SELECT_COLUMNS_WITHOUT_AVATAR_URL)
-      .eq("firebase_uid", firebaseUid)
-      .limit(1)
-      .maybeSingle();
-    if (!withoutLegacyAvatar.error) {
-      return withoutLegacyAvatar;
-    }
-  }
-
-  if (primary.error && isUsersSchemaColumnCacheError(primary.error.message ?? "")) {
-    return supabase
-      .from("users")
-      .select(USER_PROFILE_SELECT_COLUMNS_FALLBACK)
-      .eq("firebase_uid", firebaseUid)
-      .limit(1)
-      .maybeSingle();
-  }
-
-  return primary;
+  return supabase.from("profiles").select(USER_PROFILE_SELECT_COLUMNS).eq("id", firebaseUid).limit(1).maybeSingle();
 }
 
-async function queryUserByEmail(email: string) {
-  const escapedEmail = escapeLikePattern(email);
-  const primary = await supabase
-    .from("users")
-    .select(USER_PROFILE_SELECT_COLUMNS)
-    .ilike("email", escapedEmail)
-    .limit(1)
-    .maybeSingle();
-
-  if (primary.error && isMissingAvatarUrlColumnError(primary.error.message ?? "")) {
-    const withoutLegacyAvatar = await supabase
-      .from("users")
-      .select(USER_PROFILE_SELECT_COLUMNS_WITHOUT_AVATAR_URL)
-      .ilike("email", escapedEmail)
-      .limit(1)
-      .maybeSingle();
-    if (!withoutLegacyAvatar.error) {
-      return withoutLegacyAvatar;
-    }
+function deriveFallbackUsername(seed: string | null | undefined): string {
+  const normalized = String(seed ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_]/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  if (!normalized) {
+    return "";
   }
-
-  if (primary.error && isUsersSchemaColumnCacheError(primary.error.message ?? "")) {
-    return supabase
-      .from("users")
-      .select(USER_PROFILE_SELECT_COLUMNS_FALLBACK)
-      .ilike("email", escapedEmail)
-      .limit(1)
-      .maybeSingle();
+  if (normalized.length >= 3) {
+    return normalized.slice(0, 20);
   }
-
-  return primary;
+  return `${normalized}user`.slice(0, 20);
 }
 
-function buildIdentityFromSession(_email: string | null | undefined, displayName: string | null | undefined): SidebarIdentity {
-  const cleanedDisplayName = displayName?.trim();
-  const fallbackDisplayName = cleanedDisplayName || DEFAULT_IDENTITY.displayName;
+function buildIdentityFromSession(displayName: string | null | undefined, firebaseUid: string | null | undefined): SidebarIdentity {
+  const pendingProfile =
+    typeof window === "undefined"
+      ? null
+      : (() => {
+          try {
+            return loadPendingProfile();
+          } catch {
+            return null;
+          }
+        })();
+  const pendingForCurrentUser =
+    pendingProfile && pendingProfile.firebaseUid === String(firebaseUid ?? "").trim() ? pendingProfile : null;
+
+  const uidSeed = String(firebaseUid ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "")
+    .slice(0, 12);
+
+  const resolvedUsername =
+    deriveFallbackUsername(pendingForCurrentUser?.username) ||
+    deriveFallbackUsername(uidSeed ? `user_${uidSeed}` : "") ||
+    DEFAULT_IDENTITY.username;
+  const resolvedDisplayName =
+    String(pendingForCurrentUser?.displayName ?? "").trim() ||
+    String(displayName ?? "").trim() ||
+    resolvedUsername ||
+    DEFAULT_IDENTITY.displayName;
 
   return {
     userId: null,
-    displayName: fallbackDisplayName,
-    username: DEFAULT_IDENTITY.username,
+    displayName: resolvedDisplayName,
+    username: resolvedUsername,
     about: "",
     bannerColor: null,
     themePrimaryColor: null,
@@ -849,6 +1091,7 @@ function buildIdentityFromSession(_email: string | null | undefined, displayName
 
 export default function DirectMessagesSidebar({
   currentUserId,
+  isWindowFocused = true,
   presenceState,
   onChangePresence,
   onOpenSettings,
@@ -857,10 +1100,19 @@ export default function DirectMessagesSidebar({
   onOpenFriends,
   onDirectMessagesChange,
 }: DirectMessagesSidebarProps) {
-  const { user } = useAuthSession();
-  const sessionUid = user?.uid ?? firebaseAuth.currentUser?.uid ?? null;
+  const dispatch = useAppDispatch();
+  const { user, authReady, session } = useAuthSession();
+  const sessionUid = user?.uid ?? null;
+  const initialDirectMessagesCacheOwnerId = useMemo(
+    () =>
+      String(currentUserId ?? "").trim() ||
+      String(readSidebarIdentityCache(sessionUid)?.userId ?? "").trim() ||
+      null,
+    [currentUserId, sessionUid],
+  );
+  const canPreloadMessages = authReady && Boolean(user?.uid) && Boolean(session?.access_token);
   const [identity, setIdentity] = useState<SidebarIdentity>(() => {
-    const base = buildIdentityFromSession(user?.email, user?.displayName);
+    const base = buildIdentityFromSession(user?.displayName, sessionUid);
     const cached = readSidebarIdentityCache(sessionUid);
     if (!cached) {
       return base;
@@ -885,7 +1137,7 @@ export default function DirectMessagesSidebar({
   });
   const [avatarSrc, setAvatarSrc] = useState<string>(() => {
     const cached = readSidebarResolvedMediaCache(sessionUid);
-    return cached?.avatarSrc || getDefaultAvatarUrl();
+    return cached?.avatarSrc || getDefaultAvatarUrl(sessionUid);
   });
   const [bannerSrc, setBannerSrc] = useState<string>(() => {
     const cached = readSidebarResolvedMediaCache(sessionUid);
@@ -895,11 +1147,222 @@ export default function DirectMessagesSidebar({
   const [friendIdentifier, setFriendIdentifier] = useState("");
   const [isAddingFriend, setIsAddingFriend] = useState(false);
   const [addFriendFeedback, setAddFriendFeedback] = useState<AddFriendFeedbackState | null>(null);
+  const [friendRequestBlockedNotice, setFriendRequestBlockedNotice] = useState<FriendRequestBlockedNoticeDetail | null>(null);
   const [isFriendRequestsAvailable, setIsFriendRequestsAvailable] = useState(friendRequestsEnabled);
   const [isIdentityLoaded, setIsIdentityLoaded] = useState(false);
-  const [directMessages, setDirectMessages] = useState<DirectMessageItem[]>([]);
+  const [directMessages, setDirectMessages] = useState<DirectMessageItem[]>(() => {
+    if (!initialDirectMessagesCacheOwnerId) {
+      return [];
+    }
+
+    return readDirectMessagesCache(initialDirectMessagesCacheOwnerId) ?? [];
+  });
+  const directMessagesRef = useRef<DirectMessageItem[]>(directMessages);
   const [hiddenDmConversationIds, setHiddenDmConversationIds] = useState<string[]>([]);
+  const [isHiddenDmStateHydrated, setIsHiddenDmStateHydrated] = useState(false);
+  const hiddenDmStorageCandidates = useMemo(
+    () => buildHiddenDirectMessageStorageScopes(identity.userId, currentUserId, sessionUid),
+    [currentUserId, identity.userId, sessionUid],
+  );
+  const effectiveIdentityUserId = useMemo(() => {
+    const preferredUserId = String(currentUserId ?? "").trim();
+    if (preferredUserId) {
+      return preferredUserId;
+    }
+
+    const identityUserId = String(identity.userId ?? "").trim();
+    return identityUserId || null;
+  }, [currentUserId, identity.userId]);
+
+  // Recarrega DMs ocultas ao trocar de usuário.
+  useEffect(() => {
+    directMessagesRef.current = directMessages;
+  }, [directMessages]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setIsHiddenDmStateHydrated(false);
+
+    if (hiddenDmStorageCandidates.length === 0) {
+      setHiddenDmConversationIds((current) => (current.length === 0 ? current : []));
+      setIsHiddenDmStateHydrated(true);
+      return;
+    }
+
+    void readHiddenDirectMessageConversationIds(hiddenDmStorageCandidates)
+      .then((nextHiddenIds) => {
+        if (cancelled) {
+          return;
+        }
+
+        setHiddenDmConversationIds((current) =>
+          areHiddenDmConversationIdsEqual(current, nextHiddenIds) ? current : nextHiddenIds,
+        );
+        setIsHiddenDmStateHydrated(true);
+      })
+      .catch(() => {
+        if (cancelled) {
+          return;
+        }
+
+        setHiddenDmConversationIds((current) => (current.length === 0 ? current : []));
+        setIsHiddenDmStateHydrated(true);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [hiddenDmStorageCandidates]);
+
+  // Persiste DMs ocultas.
+  useEffect(() => {
+    if (!isHiddenDmStateHydrated || hiddenDmStorageCandidates.length === 0) {
+      return;
+    }
+
+    void persistHiddenDirectMessageConversationIds(hiddenDmConversationIds, hiddenDmStorageCandidates)
+      .then((persistedIds) => {
+        setHiddenDmConversationIds((current) =>
+          areHiddenDmConversationIdsEqual(current, persistedIds) ? current : persistedIds,
+        );
+      })
+      .catch(() => undefined);
+  }, [hiddenDmConversationIds, hiddenDmStorageCandidates, isHiddenDmStateHydrated]);
+
+  // Recarrega DMs ocultas ao trocar de usuário.
+
+  // Persiste DMs ocultas.
+
+  // Cria a conversa automaticamente quando um pedido de amizade é aceito (realtime).
+  useEffect(() => {
+    const uid = identity.userId;
+    if (!uid) {
+      return;
+    }
+
+    const channel = supabase
+      .channel(`realtime:friend-requests:${uid}`)
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "friend_requests" },
+        async (payload) => {
+          const eventType = String(payload?.eventType ?? "").toUpperCase();
+          const row = (payload?.new ?? {}) as FriendRequestRow;
+          const status = String(row.status ?? "").trim().toLowerCase();
+          const requesterId = String(row.requester_id ?? "").trim();
+          const addresseeId = String(row.addressee_id ?? "").trim();
+          if (requesterId !== uid && addresseeId !== uid) {
+            return;
+          }
+          const otherId = requesterId === uid ? addresseeId : requesterId;
+          if (!otherId) {
+            return;
+          }
+
+          // Se o request foi aceito, garante que a conversa exista.
+          if (status === "accepted") {
+            try {
+              await ensureDirectConversation(uid, otherId);
+            } catch {
+              // silencioso: erros já são tratados no fluxo de conversa
+            }
+            return;
+          }
+
+          // Se a amizade foi desfeita (DELETE) ou voltou a não-aceita, removemos o card da DM.
+          if (eventType === "DELETE" || status !== "accepted") {
+            setDirectMessages((current) => current.filter((dm) => dm.userId !== otherId));
+          }
+        },
+      )
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [identity.userId]);
+
+  const handleConversationMessageInsert = useCallback((event: ConversationMessageInsertEvent): void => {
+    const normalizedCurrentUserId = String(effectiveIdentityUserId ?? "").trim();
+    if (!normalizedCurrentUserId) {
+      return;
+    }
+
+    const authorId = String(event.authorId ?? "").trim();
+    if (!authorId || authorId === normalizedCurrentUserId) {
+      return;
+    }
+
+    const conversationId = String(event.conversationId ?? "").trim();
+    const messageId = String(event.messageId ?? "").trim();
+    if (!conversationId || !messageId) {
+      return;
+    }
+
+    const relatedDirectMessage =
+      directMessagesRef.current.find((item) => item.conversationId === conversationId) ??
+      directMessagesRef.current.find((item) => item.userId === authorId) ??
+      null;
+    const authorName =
+      String(relatedDirectMessage?.displayName ?? "").trim() ||
+      String(relatedDirectMessage?.username ?? "").trim() ||
+      "Nova mensagem";
+    const avatarUrl = String(relatedDirectMessage?.avatarSrc ?? "").trim() || null;
+
+    dispatch(
+      notificationsActions.notificationQueued({
+        id: createClientNonce("notification"),
+        eventId: messageId,
+        source: "realtime",
+        type: "message",
+        conversationId,
+        messageId,
+        authorId,
+        title: authorName,
+        body: String(event.contentPreview ?? "").trim(),
+        avatarUrl,
+        conversationType: "dm",
+        contextLabel: null,
+        messageType: event.messageType ?? null,
+        attachmentMimeType: event.attachmentMimeType ?? null,
+        attachmentCount: event.attachmentCount,
+        muted: false,
+        createdAt: String(event.createdAt ?? "").trim() || new Date().toISOString(),
+        deliveredAt: null,
+      }),
+    );
+
+    if (import.meta.env.DEV) {
+      console.debug("[notifications:realtime-fallback] queued", {
+        conversationId,
+        messageId,
+        authorId,
+      });
+    }
+  }, [dispatch, effectiveIdentityUserId]);
+
+  const conversationsQuery = useConversationsRealtime(effectiveIdentityUserId, {
+    onMessageInsert: handleConversationMessageInsert,
+  });
+  const realtimeConversations = useMemo(
+    () => (conversationsQuery.data ?? []) as ConversationRow[],
+    [conversationsQuery.data],
+  );
   const hoverPreloadTimersRef = useRef<Map<string, number>>(new Map());
+
+  useEffect(() => {
+    const normalizedActiveConversationId = String(activeConversationId ?? "").trim();
+    if (!normalizedActiveConversationId) {
+      return;
+    }
+
+    setHiddenDmConversationIds((current) =>
+      current.includes(normalizedActiveConversationId)
+        ? current.filter((conversationId) => conversationId !== normalizedActiveConversationId)
+        : current,
+    );
+  }, [activeConversationId, directMessages]);
+
   const effectiveIdentityBannerColor = useMemo(() => {
     if (!isIdentityLoaded) {
       return null;
@@ -911,7 +1374,26 @@ export default function DirectMessagesSidebar({
     return identity.bannerColor;
   }, [bannerSrc, identity.bannerColor, identity.bannerHash, identity.bannerKey, isIdentityLoaded]);
 
+  useEffect(() => {
+    const handleFriendRequestBlocked = (event: Event): void => {
+      const detail = (event as CustomEvent<FriendRequestBlockedNoticeDetail>).detail;
+      if (!detail) {
+        return;
+      }
+      setFriendRequestBlockedNotice(detail);
+    };
+
+    window.addEventListener(FRIEND_REQUEST_BLOCKED_EVENT, handleFriendRequestBlocked);
+    return () => {
+      window.removeEventListener(FRIEND_REQUEST_BLOCKED_EVENT, handleFriendRequestBlocked);
+    };
+  }, []);
+
   const scheduleConversationPreload = useCallback((conversationId: string): void => {
+    if (!canPreloadMessages) {
+      return;
+    }
+
     const normalizedConversationId = String(conversationId ?? "").trim();
     if (!normalizedConversationId) {
       return;
@@ -933,7 +1415,7 @@ export default function DirectMessagesSidebar({
     }, DM_PRELOAD_HOVER_DEBOUNCE_MS);
 
     timers.set(normalizedConversationId, timerId);
-  }, []);
+  }, [canPreloadMessages]);
 
   const cancelConversationPreload = useCallback((conversationId: string): void => {
     const normalizedConversationId = String(conversationId ?? "").trim();
@@ -952,7 +1434,7 @@ export default function DirectMessagesSidebar({
   }, []);
 
   useEffect(() => {
-    const base = buildIdentityFromSession(user?.email, user?.displayName);
+    const base = buildIdentityFromSession(user?.displayName, sessionUid);
     const cached = readSidebarIdentityCache(sessionUid);
     if (!cached) {
       setIdentity(base);
@@ -976,7 +1458,7 @@ export default function DirectMessagesSidebar({
       bannerKey: cached.bannerKey,
       bannerHash: cached.bannerHash,
     });
-  }, [sessionUid, user?.displayName, user?.email]);
+  }, [sessionUid, user?.displayName]);
 
   useEffect(() => {
     if (!currentUserId) {
@@ -999,9 +1481,9 @@ export default function DirectMessagesSidebar({
       setBannerSrc(cached.bannerSrc);
       return;
     }
-    setAvatarSrc(getDefaultAvatarUrl());
+    setAvatarSrc(getDefaultAvatarUrl(identity.userId || sessionUid));
     setBannerSrc(getDefaultBannerUrl());
-  }, [sessionUid]);
+  }, [identity.userId, sessionUid]);
 
   useEffect(() => {
     const firebaseUid = sessionUid;
@@ -1058,6 +1540,7 @@ export default function DirectMessagesSidebar({
               avatar_url?: string | null;
               banner_key?: string | null;
               banner_hash?: string | null;
+              spotify_connection?: unknown | null;
             }
           | null = null;
 
@@ -1081,23 +1564,27 @@ export default function DirectMessagesSidebar({
           data = byUidResult.data as typeof data;
         }
 
-        if (!data && stableFirebaseUid) {
-          const normalizedEmail = normalizeEmail(user?.email ?? "");
-          if (normalizedEmail) {
-            const { data: byEmail, error: emailError } = await queryUserByEmail(normalizedEmail);
-
-            if (emailError) {
-              return;
-            }
-
-            data = byEmail;
-          }
-        }
-
         if (!data) {
           return;
         }
-        const row = data;
+        const row = data as {
+          id?: string | null;
+          display_name?: string | null;
+          username?: string | null;
+          about?: string | null;
+          banner_color?: string | null;
+          profile_theme_primary_color?: string | null;
+          profile_theme_accent_color?: string | null;
+          avatar_key?: string | null;
+          avatar_hash?: string | null;
+          avatar_url?: string | null;
+          banner_key?: string | null;
+          banner_hash?: string | null;
+          spotify_connection?: unknown | null;
+        };
+        if (Object.prototype.hasOwnProperty.call(row, "spotify_connection")) {
+          hydrateSpotifyConnectionFromProfile(row.id ?? stablePreferredUserId ?? stableFirebaseUid, row.spotify_connection ?? null);
+        }
 
         const resolvedUsername = normalizeIdentityUsername(row.username);
         const fallbackDisplayName = (user?.displayName ?? "").trim();
@@ -1129,7 +1616,7 @@ export default function DirectMessagesSidebar({
     return () => {
       isMounted = false;
     };
-  }, [currentUserId, sessionUid, user?.email]);
+  }, [currentUserId, sessionUid, user?.displayName]);
 
   useEffect(() => {
     const handleProfileMediaUpdated = (event: Event): void => {
@@ -1307,7 +1794,7 @@ export default function DirectMessagesSidebar({
     const hasAvatarSource = Boolean(String(avatarSource ?? "").trim());
     void getAvatarUrl(identity.userId, avatarSource, identity.avatarHash).then((url) => {
       if (isMounted) {
-        const resolvedUrl = String(url ?? "").trim() || getDefaultAvatarUrl();
+        const resolvedUrl = String(url ?? "").trim() || getDefaultAvatarUrl(identity.userId || sessionUid);
         setAvatarSrc((current) => {
           if (current === resolvedUrl) {
             return current;
@@ -1360,9 +1847,12 @@ export default function DirectMessagesSidebar({
   }, [avatarSrc, bannerSrc, sessionUid]);
 
   useEffect(() => {
-    const currentUserId = identity.userId;
+    const currentUserId = effectiveIdentityUserId;
     if (!currentUserId) {
       setDirectMessages((current) => (current.length === 0 ? current : []));
+      return;
+    }
+    if (conversationsQuery.error) {
       return;
     }
 
@@ -1371,24 +1861,23 @@ export default function DirectMessagesSidebar({
       setDirectMessages((current) =>
         areDirectMessageListsEqual(current, cachedDirectMessages) ? current : cachedDirectMessages,
       );
+    } else {
+      setDirectMessages((current) => (current.length === 0 ? current : []));
+    }
+
+    if (conversationsQuery.isLoading && !conversationsQuery.data) {
+      return;
     }
 
     let isMounted = true;
     let loadInFlight = false;
     let hasQueuedLoad = false;
 
-    async function loadDirectMessages(): Promise<void> {
-      const { data: conversations, error: conversationsError } = await supabase
-        .from("conversations")
-        .select("id,user1_id,user2_id,created_at")
-        .or(`user1_id.eq.${currentUserId},user2_id.eq.${currentUserId}`)
-        .order("created_at", { ascending: false });
-
-      if (conversationsError || !isMounted) {
+    async function loadDirectMessages(rows: ConversationRow[]): Promise<void> {
+      if (!isMounted) {
         return;
       }
 
-      const rows = (conversations ?? []) as ConversationRow[];
       if (rows.length === 0) {
         setDirectMessages((current) => (current.length === 0 ? current : []));
         writeDirectMessagesCache(currentUserId, []);
@@ -1403,35 +1892,10 @@ export default function DirectMessagesSidebar({
         ),
       );
 
-      const usersWithLegacyAvatar = await supabase
-        .from("users")
-        .select(
-          "id,username,display_name,avatar_key,avatar_hash,avatar_url,status,firebase_uid,about,banner_color,profile_theme_primary_color,profile_theme_accent_color,banner_key,banner_hash,created_at",
-        )
+      const { data: users, error: usersError } = await supabase
+        .from("profiles")
+        .select(USER_PROFILE_SELECT_COLUMNS)
         .in("id", otherUserIds);
-
-      let users = usersWithLegacyAvatar.data as DmUserRow[] | null;
-      let usersError = usersWithLegacyAvatar.error;
-
-      if (usersError && isMissingAvatarUrlColumnError(usersError.message ?? "")) {
-        const usersWithoutLegacyAvatar = await supabase
-          .from("users")
-          .select(
-            "id,username,display_name,avatar_key,avatar_hash,status,firebase_uid,about,banner_color,profile_theme_primary_color,profile_theme_accent_color,banner_key,banner_hash,created_at",
-          )
-          .in("id", otherUserIds);
-        users = usersWithoutLegacyAvatar.data as DmUserRow[] | null;
-        usersError = usersWithoutLegacyAvatar.error;
-      }
-
-      if (usersError && isUsersSchemaColumnCacheError(usersError.message ?? "")) {
-        const usersFallback = await supabase
-          .from("users")
-          .select("id,username,display_name,avatar_key,avatar_hash,status,firebase_uid,about,created_at")
-          .in("id", otherUserIds);
-        users = usersFallback.data as DmUserRow[] | null;
-        usersError = usersFallback.error;
-      }
 
       if (usersError || !isMounted) {
         return;
@@ -1457,10 +1921,11 @@ export default function DirectMessagesSidebar({
         const memberSinceAt = String(targetUser?.created_at ?? "").trim() || null;
         const hasAvatarSource = hasDmAvatarSource(targetUser, "");
         const placeholderAvatar = hasAvatarSource
-          ? getDefaultAvatarUrl()
+          ? getDefaultAvatarUrl(otherUserId)
           : getDmDisplayAvatar(displayName, username);
         const cachedAvatar = getCachedDmAvatar(otherUserId, buildDmAvatarSignature(targetUser, ""));
-        const basePresence = normalizePresenceState(targetUser?.status ?? null);
+        const presenceSnapshot = presenceStore.getPresenceSnapshot(otherUserId);
+        const basePresence = presenceSnapshot.presenceState;
         const cachedPresence = dmPresenceCache.get(otherUserId) ?? basePresence;
 
         return {
@@ -1470,6 +1935,7 @@ export default function DirectMessagesSidebar({
           displayName,
           avatarSrc: cachedAvatar ?? placeholderAvatar,
           presenceState: cachedPresence,
+          spotifyActivity: presenceSnapshot.spotifyActivity ?? null,
           firebaseUid: String(targetUser?.firebase_uid ?? "").trim() || undefined,
           aboutText,
           bannerColor,
@@ -1579,7 +2045,7 @@ export default function DirectMessagesSidebar({
             return [otherUserId, resolvedAvatar] as const;
           } catch {
             const fallbackAvatar = hasAvatarSource
-              ? getDefaultAvatarUrl()
+              ? getDefaultAvatarUrl(otherUserId)
               : getDmDisplayAvatar(displayName, username);
             setCachedDmAvatar(otherUserId, signature, fallbackAvatar);
             return [otherUserId, fallbackAvatar] as const;
@@ -1593,18 +2059,22 @@ export default function DirectMessagesSidebar({
 
       const avatarMap = new Map<string, string>(avatarEntries);
       const presenceByUserId = new Map<string, PresenceState>();
+      const spotifyActivityByUserId = new Map<string, PresenceSpotifyActivity | null>();
       usersById.forEach((targetUser, otherUserId) => {
+        const presenceSnapshot = presenceStore.getPresenceSnapshot(otherUserId);
         const resolvedPresence =
           dmPresenceCache.get(otherUserId) ??
-          normalizePresenceState(targetUser.status ?? null);
+          presenceSnapshot.presenceState;
         dmPresenceCache.set(otherUserId, resolvedPresence);
         presenceByUserId.set(otherUserId, resolvedPresence);
+        spotifyActivityByUserId.set(otherUserId, presenceSnapshot.spotifyActivity ?? null);
       });
 
       const hydratedItems = initialItems.map((item) => ({
         ...item,
         avatarSrc: avatarMap.get(item.userId) ?? item.avatarSrc,
         presenceState: presenceByUserId.get(item.userId) ?? item.presenceState,
+        spotifyActivity: spotifyActivityByUserId.get(item.userId) ?? item.spotifyActivity ?? null,
       }));
 
       if (isMounted) {
@@ -1629,7 +2099,7 @@ export default function DirectMessagesSidebar({
       try {
         do {
           hasQueuedLoad = false;
-          await loadDirectMessages();
+          await loadDirectMessages(realtimeConversations);
         } while (isMounted && hasQueuedLoad);
       } finally {
         loadInFlight = false;
@@ -1638,148 +2108,286 @@ export default function DirectMessagesSidebar({
 
     void requestLoadDirectMessages();
 
-    const intervalId = window.setInterval(() => {
-      void requestLoadDirectMessages();
-    }, 15000);
-
-    const handleFriendRequestsChanged = (): void => {
-      void requestLoadDirectMessages();
-    };
-
-    const handleWindowFocus = (): void => {
-      void requestLoadDirectMessages();
-    };
-
-    const handleVisibilityChange = (): void => {
-      if (document.visibilityState === "visible") {
-        void requestLoadDirectMessages();
-      }
-    };
-
-    window.addEventListener("messly:friend-requests-changed", handleFriendRequestsChanged);
-    window.addEventListener("focus", handleWindowFocus);
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-
     return () => {
       isMounted = false;
-      window.clearInterval(intervalId);
-      window.removeEventListener("messly:friend-requests-changed", handleFriendRequestsChanged);
-      window.removeEventListener("focus", handleWindowFocus);
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [identity.userId]);
+  }, [conversationsQuery.data, conversationsQuery.error, conversationsQuery.isLoading, effectiveIdentityUserId, realtimeConversations]);
 
-  const dmPresenceSubscriptionKey = useMemo(() => {
-    const uniqueEntries = new Map<string, string>();
+  const dmRealtimeConversationKey = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          directMessages
+            .map((dm) => String(dm.conversationId ?? "").trim())
+            .filter((conversationId) => Boolean(conversationId)),
+        ),
+      )
+        .sort((left, right) => left.localeCompare(right))
+        .join("|"),
+    [directMessages],
+  );
+
+  const dmUsersRealtimeKey = useMemo(() => {
+    const userIds = new Set<string>();
+    const identityUserId = String(identity.userId ?? "").trim();
+    if (identityUserId) {
+      userIds.add(identityUserId);
+    }
     directMessages.forEach((dm) => {
-      const firebaseUid = String(dm.firebaseUid ?? "").trim();
-      if (!firebaseUid || uniqueEntries.has(firebaseUid)) {
-        return;
+      const userId = String(dm.userId ?? "").trim();
+      if (userId) {
+        userIds.add(userId);
       }
-      uniqueEntries.set(firebaseUid, dm.userId);
     });
-
-    return Array.from(uniqueEntries.entries())
-      .sort(([uidA], [uidB]) => uidA.localeCompare(uidB))
-      .map(([firebaseUid, userId]) => `${firebaseUid}:${userId}`)
-      .join("|");
-  }, [directMessages]);
+    return Array.from(userIds).sort((left, right) => left.localeCompare(right)).join("|");
+  }, [directMessages, identity.userId]);
 
   useEffect(() => {
-    if (!dmPresenceSubscriptionKey) {
+    if (!dmUsersRealtimeKey) {
       return;
     }
 
-    const entries = dmPresenceSubscriptionKey
-      .split("|")
-      .map((token) => {
-        const separatorIndex = token.lastIndexOf(":");
-        if (separatorIndex <= 0) {
-          return null;
-        }
-        return {
-          firebaseUid: token.slice(0, separatorIndex),
-          userId: token.slice(separatorIndex + 1),
-        };
-      })
-      .filter((entry): entry is { firebaseUid: string; userId: string } => entry !== null);
+    return presenceStore.watchUsers(dmUsersRealtimeKey.split("|"));
+  }, [dmUsersRealtimeKey]);
 
-    const unsubscribers = entries.map(({ firebaseUid }) =>
-      onValue(
-        ref(firebaseDatabase, `presence/${firebaseUid}`),
-        (snapshot) => {
-          if (!snapshot.exists()) {
-            // Transient empty snapshots can happen; keep last known state to avoid flicker.
-            return;
+  useEffect(() => {
+    if (!dmUsersRealtimeKey) {
+      return;
+    }
+
+    const applyDirectMessagePresences = (): void => {
+      setDirectMessages((current) => {
+        let changed = false;
+        const next = current.map((dm) => {
+          const nextPresenceSnapshot = presenceStore.getPresenceSnapshot(dm.userId);
+          const nextPresenceState = nextPresenceSnapshot.presenceState;
+          const nextSpotifyActivity = nextPresenceSnapshot.spotifyActivity ?? null;
+          if (
+            dm.presenceState === nextPresenceState &&
+            areSpotifyActivitiesEqual(dm.spotifyActivity ?? null, nextSpotifyActivity)
+          ) {
+            return dm;
           }
-          const nextPresence = resolvePresenceFromRealtimeNode(snapshot.val());
-          setDirectMessages((current) => {
-            let changed = false;
-            const updated = current.map((item) => {
-              const itemFirebaseUid = String(item.firebaseUid ?? "").trim();
-              if (itemFirebaseUid !== firebaseUid) {
-                return item;
-              }
-              dmPresenceCache.set(item.userId, nextPresence);
-              if (item.presenceState === nextPresence) {
-                return item;
-              }
-              changed = true;
-              return {
-                ...item,
-                presenceState: nextPresence,
-              };
-            });
 
-            if (!changed) {
-              return current;
-            }
+          dmPresenceCache.set(dm.userId, nextPresenceState);
+          changed = true;
+          return {
+            ...dm,
+            presenceState: nextPresenceState,
+            spotifyActivity: nextSpotifyActivity,
+          };
+        });
 
-            writeDirectMessagesCache(identity.userId, updated);
-            return updated;
-          });
-        },
-        () => {
-          const nextPresence: PresenceState = "offline";
-          setDirectMessages((current) => {
-            let changed = false;
-            const updated = current.map((item) => {
-              const itemFirebaseUid = String(item.firebaseUid ?? "").trim();
-              if (itemFirebaseUid !== firebaseUid) {
-                return item;
-              }
-              dmPresenceCache.set(item.userId, nextPresence);
-              if (item.presenceState === nextPresence) {
-                return item;
-              }
-              changed = true;
-              return {
-                ...item,
-                presenceState: nextPresence,
-              };
-            });
+        if (!changed) {
+          return current;
+        }
 
-            if (!changed) {
-              return current;
-            }
-
-            writeDirectMessagesCache(identity.userId, updated);
-            return updated;
-          });
-        },
-      ),
-    );
-
-    return () => {
-      unsubscribers.forEach((unsubscribe) => {
-        unsubscribe();
+        writeDirectMessagesCache(currentUserId, next);
+        return next;
       });
     };
-  }, [dmPresenceSubscriptionKey, identity.userId]);
+
+    applyDirectMessagePresences();
+    return presenceStore.subscribe(applyDirectMessagePresences);
+  }, [currentUserId, dmUsersRealtimeKey]);
+
+  useEffect(() => {
+    if (!dmUsersRealtimeKey) {
+      return;
+    }
+
+    const trackedUserIds = new Set(
+      dmUsersRealtimeKey
+        .split("|")
+        .map((userId) => String(userId ?? "").trim())
+        .filter((userId) => Boolean(userId)),
+    );
+    if (trackedUserIds.size === 0) {
+      return;
+    }
+
+    const toNullableTrimmedString = (value: unknown): string | null => {
+      const normalized = String(value ?? "").trim();
+      return normalized || null;
+    };
+
+    const channel = supabase
+      .channel(`realtime:dm-users:${identity.userId ?? "anon"}`)
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "users" },
+        (payload) => {
+          const nextRow =
+            payload && typeof payload.new === "object" && payload.new !== null
+              ? (payload.new as Record<string, unknown>)
+              : null;
+          if (!nextRow) {
+            return;
+          }
+
+          const rowUserId = toNullableTrimmedString(nextRow.id);
+          if (!rowUserId || !trackedUserIds.has(rowUserId)) {
+            return;
+          }
+
+          const profileDetail: ProfileUpdatedDetail = { userId: rowUserId };
+          let hasProfilePayload = false;
+
+          if (Object.prototype.hasOwnProperty.call(nextRow, "display_name")) {
+            profileDetail.display_name = toNullableTrimmedString(nextRow.display_name);
+            hasProfilePayload = true;
+          }
+          if (Object.prototype.hasOwnProperty.call(nextRow, "username")) {
+            profileDetail.username = toNullableTrimmedString(nextRow.username);
+            hasProfilePayload = true;
+          }
+          if (Object.prototype.hasOwnProperty.call(nextRow, "about")) {
+            profileDetail.about = toNullableTrimmedString(nextRow.about);
+            hasProfilePayload = true;
+          }
+          if (Object.prototype.hasOwnProperty.call(nextRow, "banner_color")) {
+            profileDetail.banner_color = normalizeBannerColor(toNullableTrimmedString(nextRow.banner_color)) ?? null;
+            hasProfilePayload = true;
+          }
+          if (Object.prototype.hasOwnProperty.call(nextRow, "profile_theme_primary_color")) {
+            profileDetail.profile_theme_primary_color =
+              normalizeBannerColor(toNullableTrimmedString(nextRow.profile_theme_primary_color)) ?? null;
+            hasProfilePayload = true;
+          }
+          if (Object.prototype.hasOwnProperty.call(nextRow, "profile_theme_accent_color")) {
+            profileDetail.profile_theme_accent_color =
+              normalizeBannerColor(toNullableTrimmedString(nextRow.profile_theme_accent_color)) ?? null;
+            hasProfilePayload = true;
+          }
+
+          if (hasProfilePayload) {
+            window.dispatchEvent(new CustomEvent<ProfileUpdatedDetail>("messly:profile-updated", { detail: profileDetail }));
+          }
+
+          const mediaDetail: ProfileMediaUpdatedDetail = { userId: rowUserId };
+          let hasMediaPayload = false;
+
+          if (Object.prototype.hasOwnProperty.call(nextRow, "avatar_key")) {
+            mediaDetail.avatar_key = toNullableTrimmedString(nextRow.avatar_key);
+            hasMediaPayload = true;
+          }
+          if (Object.prototype.hasOwnProperty.call(nextRow, "avatar_hash")) {
+            mediaDetail.avatar_hash = toNullableTrimmedString(nextRow.avatar_hash);
+            hasMediaPayload = true;
+          }
+          if (Object.prototype.hasOwnProperty.call(nextRow, "banner_key")) {
+            mediaDetail.banner_key = toNullableTrimmedString(nextRow.banner_key);
+            hasMediaPayload = true;
+          }
+          if (Object.prototype.hasOwnProperty.call(nextRow, "banner_hash")) {
+            mediaDetail.banner_hash = toNullableTrimmedString(nextRow.banner_hash);
+            hasMediaPayload = true;
+          }
+          if (Object.prototype.hasOwnProperty.call(nextRow, "banner_color")) {
+            mediaDetail.banner_color = normalizeBannerColor(toNullableTrimmedString(nextRow.banner_color)) ?? null;
+            hasMediaPayload = true;
+          }
+
+          if (hasMediaPayload) {
+            window.dispatchEvent(
+              new CustomEvent<ProfileMediaUpdatedDetail>("messly:profile-media-updated", {
+                detail: mediaDetail,
+              }),
+            );
+          }
+        },
+      )
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [dmUsersRealtimeKey, identity.userId]);
+
+  useEffect(() => {
+    if (!dmRealtimeConversationKey) {
+      return;
+    }
+
+    const conversationIds = dmRealtimeConversationKey.split("|").filter((conversationId) => Boolean(conversationId));
+    const channels = conversationIds.map((conversationId) =>
+      supabase
+        .channel(`dm-chat:${conversationId}`, {
+          config: {
+            broadcast: {
+              ack: false,
+              self: false,
+            },
+          },
+        })
+        .on(
+          "broadcast",
+          {
+            event: "message",
+          },
+          (payload) => {
+            const data = payload.payload as {
+              conversationId?: string;
+              message?: BroadcastChatMessageItem | null;
+            } | null;
+            const incomingConversationId = String(data?.conversationId ?? "").trim();
+            if (!incomingConversationId || incomingConversationId !== conversationId) {
+              return;
+            }
+
+            const serverMessage = mapBroadcastMessageToServerMessage(incomingConversationId, data?.message ?? null);
+            if (!serverMessage) {
+              return;
+            }
+
+            upsertCachedInitialChatMessages(incomingConversationId, serverMessage);
+          },
+        )
+        .on(
+          "broadcast",
+          {
+            event: "message_retract",
+          },
+          (payload) => {
+            const data = payload.payload as { conversationId?: string; clientId?: string | null } | null;
+            const incomingConversationId = String(data?.conversationId ?? "").trim();
+            const clientId = String(data?.clientId ?? "").trim();
+            if (!incomingConversationId || incomingConversationId !== conversationId || !clientId) {
+              return;
+            }
+
+            removeCachedInitialChatMessageByClientId(incomingConversationId, clientId);
+          },
+        ),
+    );
+
+    channels.forEach((channel) => {
+      void channel.subscribe();
+    });
+
+    return () => {
+      channels.forEach((channel) => {
+        void supabase.removeChannel(channel);
+      });
+    };
+  }, [dmRealtimeConversationKey]);
 
   const visibleDirectMessages = useMemo(
-    () => directMessages.filter((dm) => !hiddenDmConversationIds.includes(dm.conversationId)),
-    [directMessages, hiddenDmConversationIds],
+    () => {
+      const normalizedActiveConversationId = String(activeConversationId ?? "").trim();
+      if (!isHiddenDmStateHydrated) {
+        return normalizedActiveConversationId
+          ? directMessages.filter((dm) => dm.conversationId === normalizedActiveConversationId)
+          : [];
+      }
+
+      return directMessages.filter(
+        (dm) =>
+          dm.conversationId === normalizedActiveConversationId ||
+          !hiddenDmConversationIds.includes(dm.conversationId),
+      );
+    },
+    [activeConversationId, directMessages, hiddenDmConversationIds, isHiddenDmStateHydrated],
   );
 
   useEffect(
@@ -1800,6 +2408,14 @@ export default function DirectMessagesSidebar({
   }, [directMessages, onDirectMessagesChange]);
 
   useEffect(() => {
+    if (!DM_PRELOAD_LIST_WARMUP_ENABLED) {
+      return;
+    }
+
+    if (!canPreloadMessages) {
+      return;
+    }
+
     if (visibleDirectMessages.length === 0) {
       return;
     }
@@ -1828,10 +2444,10 @@ export default function DirectMessagesSidebar({
     return () => {
       window.clearTimeout(timerId);
     };
-  }, [visibleDirectMessages]);
+  }, [canPreloadMessages, visibleDirectMessages]);
 
   const userCardAvatarSrc = isDefaultAvatarUrl(avatarSrc)
-    ? getNameAvatarUrl(identity.displayName || identity.username || "U")
+    ? getDefaultAvatarUrl(identity.userId || identity.username || identity.displayName)
     : avatarSrc;
 
   const handleOpenAddFriendModal = (): void => {
@@ -1856,7 +2472,7 @@ export default function DirectMessagesSidebar({
     if (!currentUserId) {
       setAddFriendFeedback({
         tone: "error",
-        message: "Usuario atual ainda nao sincronizado.",
+        message: "Usuário atual ainda não sincronizado.",
       });
       return;
     }
@@ -1864,7 +2480,7 @@ export default function DirectMessagesSidebar({
     if (!rawIdentifier) {
       setAddFriendFeedback({
         tone: "error",
-        message: "Informe o username do amigo.",
+        message: "Informe o nome de usuário do amigo.",
       });
       return;
     }
@@ -1873,15 +2489,9 @@ export default function DirectMessagesSidebar({
     setAddFriendFeedback(null);
 
     try {
-      const cleanedIdentifier = rawIdentifier.replace(/^@+/, "").trim();
-      const escapedIdentifier = escapeLikePattern(cleanedIdentifier);
+      const cleanedIdentifier = rawIdentifier.replace(/^@+/, "").trim().toLowerCase();
 
-      const { data: targetUser, error: targetError } = await supabase
-        .from("users")
-        .select("id,username,display_name,email")
-        .ilike("username", escapedIdentifier)
-        .limit(1)
-        .maybeSingle();
+      const { data: targetUser, error: targetError } = await queryFriendRequestTargetByUsername(cleanedIdentifier);
 
       if (targetError) {
         throw targetError;
@@ -1890,7 +2500,7 @@ export default function DirectMessagesSidebar({
       if (!targetUser?.id) {
         setAddFriendFeedback({
           tone: "error",
-          message: "Usuario nao encontrado.",
+          message: "Usuário não encontrado.",
         });
         return;
       }
@@ -1898,7 +2508,7 @@ export default function DirectMessagesSidebar({
       if (targetUser.id === currentUserId) {
         setAddFriendFeedback({
           tone: "error",
-          message: "Voce nao pode adicionar a si mesmo.",
+          message: "Você não pode adicionar a si mesmo.",
         });
         return;
       }
@@ -1914,23 +2524,23 @@ export default function DirectMessagesSidebar({
         return;
       }
 
-      const pairFilter = `and(requester_id.eq.${currentUserId},addressee_id.eq.${targetUser.id}),and(requester_id.eq.${targetUser.id},addressee_id.eq.${currentUserId})`;
-      const { data: existingRequest, error: existingRequestError } = await supabase
-        .from("friend_requests")
-        .select("id,status")
-        .or(pairFilter)
-        .in("status", ["pending", "accepted"])
-        .limit(1)
-        .maybeSingle();
-
-      if (existingRequestError) {
-        throw existingRequestError;
-      }
+      const [pendingRequests, acceptedRequests] = await Promise.all([
+        listFriendRequests("pending"),
+        listFriendRequests("accepted"),
+      ]);
+      const existingRequest = [...pendingRequests, ...acceptedRequests].find((request) => {
+        const requesterId = String(request.requester_id ?? "").trim();
+        const addresseeId = String(request.addressee_id ?? "").trim();
+        return (
+          (requesterId === currentUserId && addresseeId === targetUser.id) ||
+          (requesterId === targetUser.id && addresseeId === currentUserId)
+        );
+      });
 
       if (existingRequest?.status === "accepted") {
         setAddFriendFeedback({
           tone: "error",
-          message: "Voce ja e amigo dessa pessoa.",
+          message: "Você já é amigo dessa pessoa.",
         });
         return;
       }
@@ -1938,8 +2548,16 @@ export default function DirectMessagesSidebar({
       if (existingRequest?.status === "pending") {
         setAddFriendFeedback({
           tone: "error",
-          message: "Ja existe uma solicitacao pendente entre voces.",
+          message: "Já existe uma solicitação pendente entre vocês.",
         });
+        return;
+      }
+
+      const permission = await evaluateFriendRequestPermission(currentUserId, targetUser);
+      if (!permission.allowed) {
+        if (permission.reason === "disabled" || permission.reason === "friends_of_friends_only") {
+          dispatchFriendRequestBlockedNotice(buildFriendRequestBlockedNotice(targetUser, permission.reason));
+        }
         return;
       }
 
@@ -1957,21 +2575,15 @@ export default function DirectMessagesSidebar({
       const targetDisplayName = normalizeIdentityDisplayName(targetUser.display_name, targetUser.username, "usuario");
       setAddFriendFeedback({
         tone: "success",
-        message: `Solicitacao enviada para ${targetDisplayName}.`,
+        message: `Solicitação enviada para ${targetDisplayName}.`,
       });
       setFriendIdentifier("");
     } catch (error) {
       if (isFriendRequestsUnavailableError(error)) {
         setIsFriendRequestsAvailable(false);
         try {
-          const cleanedIdentifier = rawIdentifier.replace(/^@+/, "").trim();
-          const escapedIdentifier = escapeLikePattern(cleanedIdentifier);
-          const { data: targetUser } = await supabase
-            .from("users")
-            .select("id,username,display_name")
-            .ilike("username", escapedIdentifier)
-            .limit(1)
-            .maybeSingle();
+          const cleanedIdentifier = rawIdentifier.replace(/^@+/, "").trim().toLowerCase();
+          const { data: targetUser } = await queryFriendRequestTargetByUsername(cleanedIdentifier);
           if (targetUser?.id && targetUser.id !== currentUserId) {
             await ensureDirectConversation(currentUserId, targetUser.id);
             const targetDisplayName = normalizeIdentityDisplayName(targetUser.display_name, targetUser.username, "usuario");
@@ -1987,13 +2599,13 @@ export default function DirectMessagesSidebar({
         }
         setAddFriendFeedback({
           tone: "error",
-          message: "Solicitacoes pendentes indisponiveis; rode a migracao friend_requests.",
+          message: "Solicitações pendentes indisponíveis; execute a migração friend_requests.",
         });
         return;
       }
       setAddFriendFeedback({
         tone: "error",
-        message: "Nao foi possivel adicionar agora. Tente novamente.",
+        message: "Não foi possível adicionar agora. Tente novamente.",
       });
     } finally {
       setIsAddingFriend(false);
@@ -2018,11 +2630,13 @@ export default function DirectMessagesSidebar({
     );
 
     cancelConversationPreload(normalizedConversationId);
-    void preloadChatMessages({
-      conversationId: normalizedConversationId,
-      limit: DM_PRELOAD_LIMIT,
-      maxAgeMs: DM_PRELOAD_MAX_AGE_MS,
-    });
+    if (canPreloadMessages) {
+      void preloadChatMessages({
+        conversationId: normalizedConversationId,
+        limit: DM_PRELOAD_LIMIT,
+        maxAgeMs: DM_PRELOAD_MAX_AGE_MS,
+      });
+    }
     if (dm.bannerKey) {
       void getBannerUrl(dm.userId, dm.bannerKey, dm.bannerHash ?? null);
     }
@@ -2045,7 +2659,8 @@ export default function DirectMessagesSidebar({
       bannerSrc: dm.bannerSrc,
       memberSinceAt: dm.memberSinceAt ?? null,
     });
-  }, [cancelConversationPreload, directMessages, onSelectDirectMessage]);
+  }, [canPreloadMessages, cancelConversationPreload, directMessages, onSelectDirectMessage]);
+  const isFriendsShortcutActive = !String(activeConversationId ?? "").trim();
 
   return (
     <>
@@ -2067,10 +2682,12 @@ export default function DirectMessagesSidebar({
         <div className="friends-sidebar__content">
           <div className="friends-sidebar__section">
             <div className="friends-sidebar__section-label friends-sidebar__section-label--large">
-              Acesso rapido
+              Acesso rápido
             </div>
             <button
-              className="friends-sidebar__item friends-sidebar__item--active friends-sidebar__item--friends"
+              className={`friends-sidebar__item friends-sidebar__item--friends${
+                isFriendsShortcutActive ? " friends-sidebar__item--active" : ""
+              }`}
               type="button"
               onClick={() => {
                 onOpenFriends?.();
@@ -2081,14 +2698,14 @@ export default function DirectMessagesSidebar({
             </button>
           </div>
 
-          <div className="friends-sidebar__section">
+          <div className="friends-sidebar__section friends-sidebar__section--direct-messages">
             <div className="friends-sidebar__section-label friends-sidebar__section-label--large">
               Mensagens diretas
             </div>
             <div className="friends-sidebar__dm-list" role="list" aria-label="Mensagens diretas">
               {visibleDirectMessages.map((dm) => {
                 const resolvedDisplayName = normalizeIdentityDisplayName(dm.displayName, dm.username, dm.username);
-                const fallbackNameAvatar = getNameAvatarUrl(resolvedDisplayName);
+                const fallbackNameAvatar = getDefaultAvatarUrl(dm.userId || dm.username || resolvedDisplayName);
                 const safeDmAvatarSrc = (() => {
                   const raw = String(dm.avatarSrc ?? "").trim();
                   if (!raw || isDefaultAvatarUrl(raw)) {
@@ -2117,11 +2734,13 @@ export default function DirectMessagesSidebar({
                     }}
                     onClick={() => {
                       cancelConversationPreload(dm.conversationId);
-                      void preloadChatMessages({
-                        conversationId: dm.conversationId,
-                        limit: DM_PRELOAD_LIMIT,
-                        maxAgeMs: DM_PRELOAD_MAX_AGE_MS,
-                      });
+                      if (canPreloadMessages) {
+                        void preloadChatMessages({
+                          conversationId: dm.conversationId,
+                          limit: DM_PRELOAD_LIMIT,
+                          maxAgeMs: DM_PRELOAD_MAX_AGE_MS,
+                        });
+                      }
                       if (dm.bannerKey) {
                         void getBannerUrl(dm.userId, dm.bannerKey, dm.bannerHash ?? null);
                       }
@@ -2132,6 +2751,7 @@ export default function DirectMessagesSidebar({
                         displayName: resolvedDisplayName,
                         avatarSrc: safeDmAvatarSrc,
                         presenceState: dm.presenceState,
+                        spotifyActivity: dm.spotifyActivity ?? null,
                         firebaseUid: dm.firebaseUid,
                         aboutText: dm.aboutText,
                         bannerColor: dm.bannerColor ?? null,
@@ -2145,15 +2765,12 @@ export default function DirectMessagesSidebar({
                     }}
                   >
                     <div className="friends-sidebar__dm-avatar-wrap">
-                      <img
+                      <AvatarImage
                         className="friends-sidebar__dm-avatar"
                         src={safeDmAvatarSrc}
+                        name={resolvedDisplayName}
                         alt={`Avatar de ${resolvedDisplayName}`}
                         loading="lazy"
-                        onError={(event) => {
-                          event.currentTarget.onerror = null;
-                          event.currentTarget.src = fallbackNameAvatar;
-                        }}
                       />
                       <span
                         className={`friends-sidebar__dm-presence friends-sidebar__dm-presence--${dm.presenceState}`}
@@ -2162,6 +2779,14 @@ export default function DirectMessagesSidebar({
                     </div>
                     <button className="friends-sidebar__dm-main" type="button">
                       <span className="friends-sidebar__dm-name">{resolvedDisplayName}</span>
+                      {dm.spotifyActivity && dm.userId !== identity.userId ? (
+                        <span className="friends-sidebar__dm-spotify-status">
+                          <img className="friends-sidebar__dm-spotify-icon" src={musicalIcon} alt="" aria-hidden="true" />
+                          <span className="friends-sidebar__dm-spotify-track">
+                            {dm.spotifyActivity.artistNames || dm.spotifyActivity.trackTitle}
+                          </span>
+                        </span>
+                      ) : null}
                     </button>
                     <button
                       className="friends-sidebar__dm-close"
@@ -2192,6 +2817,7 @@ export default function DirectMessagesSidebar({
         <div className="friends-sidebar__user-card-wrap">
           <UserCard
             userId={identity.userId}
+            currentUserId={currentUserId}
             avatarSrc={userCardAvatarSrc}
             bannerSrc={bannerSrc}
             bannerColor={effectiveIdentityBannerColor}
@@ -2238,10 +2864,10 @@ export default function DirectMessagesSidebar({
       >
         <div className="friends-sidebar__add-friend-form">
           <p className="friends-sidebar__add-friend-description">
-            Digite o username para enviar um pedido e iniciar uma conversa direta.
+            Digite o nome de usuário para enviar uma solicitação e iniciar uma conversa.
           </p>
           <label className="friends-sidebar__add-friend-label" htmlFor="add-friend-input">
-            Username
+            Nome de usuário
           </label>
           <input
             id="add-friend-input"
@@ -2249,7 +2875,7 @@ export default function DirectMessagesSidebar({
             type="text"
             value={friendIdentifier}
             onChange={(event) => setFriendIdentifier(event.target.value)}
-            placeholder="@username"
+            placeholder="@usuario"
             autoComplete="off"
             disabled={isAddingFriend}
             onKeyDown={(event) => {
@@ -2272,6 +2898,32 @@ export default function DirectMessagesSidebar({
           ) : null}
         </div>
       </Modal>
+
+      <Modal
+        isOpen={Boolean(friendRequestBlockedNotice)}
+        title={friendRequestBlockedNotice?.title ?? "Pedido indisponível"}
+        ariaLabel="Aviso sobre pedido de amizade"
+        onClose={() => setFriendRequestBlockedNotice(null)}
+        panelClassName="friends-sidebar__request-blocked-modal"
+        bodyClassName="friends-sidebar__request-blocked-modal-body"
+        footer={
+          <div className="friends-sidebar__request-blocked-footer">
+            <button
+              className="friends-sidebar__request-blocked-button"
+              type="button"
+              onClick={() => setFriendRequestBlockedNotice(null)}
+            >
+              Ok
+            </button>
+          </div>
+        }
+      >
+        <div className="friends-sidebar__request-blocked-content">
+          <p className="friends-sidebar__request-blocked-text">{friendRequestBlockedNotice?.description}</p>
+        </div>
+      </Modal>
     </>
   );
 }
+
+

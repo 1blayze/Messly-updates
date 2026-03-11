@@ -24,7 +24,7 @@ function assertAvatarByteLimit(buffer) {
   }
 }
 
-async function processStaticAvatar(buffer) {
+async function processStaticAvatar(buffer, detectedMime) {
   let metadata;
   try {
     metadata = await sharp(buffer, { failOn: "error", limitInputPixels: IMAGE_MAX_INPUT_PIXELS }).metadata();
@@ -38,6 +38,22 @@ async function processStaticAvatar(buffer) {
     throw createMediaUploadError("INVALID_IMAGE", {
       allowedTypes: [...AVATAR_ALLOWED_TYPES],
     });
+  }
+
+  // Fast path for editor output: avoid an extra re-encode when already 512x512 WebP.
+  if (
+    detectedMime === "image/webp" &&
+    metadata.width === AVATAR_TARGET_WIDTH &&
+    metadata.height === AVATAR_TARGET_HEIGHT &&
+    (metadata.pages == null || metadata.pages <= 1)
+  ) {
+    return {
+      buffer,
+      contentType: "image/webp",
+      ext: "webp",
+      hash: getHash(buffer),
+      size: buffer.length,
+    };
   }
 
   let normalized;
@@ -123,7 +139,7 @@ async function processAvatarUpload(buffer) {
     return processGifAvatar(buffer);
   }
 
-  return processStaticAvatar(buffer);
+  return processStaticAvatar(buffer, detectedType.mime);
 }
 
 module.exports = {

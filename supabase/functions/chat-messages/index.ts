@@ -1,5 +1,6 @@
+/// <reference path="../_shared/edge-runtime.d.ts" />
 import { z } from "npm:zod@3.25.76";
-import { validateFirebaseToken } from "../_shared/auth.ts";
+import { validateSupabaseToken } from "../_shared/auth.ts";
 import { enforceRateLimit } from "../_shared/rateLimit.ts";
 import {
   assertMethod,
@@ -11,19 +12,35 @@ import {
   responseError,
   responseJson,
   responseNoContent,
+  type RequestContext,
 } from "../_shared/http.ts";
-import { parseAttachmentConversationId, sanitizeMediaKey } from "../_shared/mediaSecurity.ts";
+import { sanitizeMediaKey } from "../_shared/mediaSecurity.ts";
 import { getSupabaseAdminClient } from "../_shared/supabaseAdmin.ts";
-import { assertConversationMembership, resolveUserIdByFirebaseUid } from "../_shared/user.ts";
+import { assertConversationCanSendMessages, assertConversationMembership, resolveUserId } from "../_shared/user.ts";
 
 const ROUTE = "chat-messages";
+const MESSAGE_TYPES = ["text", "image", "video", "file"] as const;
 const MAX_TEXT_LENGTH = 4000;
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 100;
+const MAX_ATTACHMENT_BATCH_SIZE = 100;
+const EDIT_WINDOW_MINUTES = 15;
+const DELETE_WINDOW_HOURS = 24;
+const EDIT_WINDOW_MS = EDIT_WINDOW_MINUTES * 60 * 1000;
+const DELETE_WINDOW_MS = DELETE_WINDOW_HOURS * 60 * 60 * 1000;
+const REPLY_SNAPSHOT_MAX_KEYS = 6;
+const REPLY_SNAPSHOT_MAX_BYTES = 2048;
+const EDIT_HISTORY_LIMIT = 5;
+const EDIT_HISTORY_MAX_BYTES = 8192;
 const MESSAGE_SELECT_COLUMNS =
   "id,conversation_id,sender_id,client_id,content,type,created_at,edited_at,deleted_at,reply_to_id,reply_to_snapshot,call_id,payload";
 const ATTACHMENT_SELECT_COLUMNS =
   "message_id,file_key,original_key,thumb_key,mime_type,file_size,width,height,thumb_width,thumb_height,codec,duration_ms";
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const BLOCKED_MEDIA_KEY_SEQUENCES = ["..", "%2e", "%2f", "%5c", "\\", "//"];
+const textEncoder = new TextEncoder();
+
+type MessageType = (typeof MESSAGE_TYPES)[number];
 
 const replySnapshotSchema = z
   .object({
@@ -31,10 +48,10 @@ const replySnapshotSchema = z
     author_name: z.string().max(120).optional().nullable(),
     author_avatar: z.string().max(1024).optional().nullable(),
     snippet: z.string().max(240).optional().nullable(),
-    message_type: z.string().max(24).optional().nullable(),
+    message_type: z.enum(MESSAGE_TYPES).optional().nullable(),
     created_at: z.string().max(64).optional().nullable(),
   })
-  .passthrough()
+  .strict()
   .nullable()
   .optional();
 
@@ -54,16 +71,25 @@ const attachmentPayloadSchema = z
   })
   .strict();
 
+const messagePayloadSchema = z
+  .object({
+    fileName: z.string().max(240).optional().nullable(),
+  })
+  .strict()
+  .optional()
+  .nullable();
+
 const sendPayloadSchema = z
   .object({
     action: z.literal("send"),
     conversationId: z.string().uuid(),
     clientId: z.string().min(8).max(128),
     content: z.string().max(MAX_TEXT_LENGTH).optional().nullable(),
-    type: z.enum(["text", "image", "video", "file"]).default("text"),
+    type: z.enum(MESSAGE_TYPES).default("text"),
     replyToId: z.string().uuid().optional().nullable(),
     replyToSnapshot: replySnapshotSchema,
     attachment: attachmentPayloadSchema.optional().nullable(),
+    payload: messagePayloadSchema,
   })
   .strict();
 
@@ -87,13 +113,8 @@ const listPayloadSchema = z
     action: z.literal("list"),
     conversationId: z.string().uuid(),
     limit: z.number().int().min(1).max(MAX_PAGE_SIZE).optional(),
-    cursorCreatedAt: z
-      .string()
-      .max(64)
-      .refine((value) => Number.isFinite(Date.parse(value)), "cursorCreatedAt invalido.")
-      .optional()
-      .nullable(),
-    cursorId: z.string().uuid().optional().nullable(),
+    cursorCreatedAt: z.string().max(64).optional().nullable(),
+    cursorId: z.string().max(64).optional().nullable(),
   })
   .strict();
 
@@ -111,7 +132,7 @@ interface MessageRow {
   sender_id: string;
   client_id: string | null;
   content: string | null;
-  type: string | null;
+  type: MessageType;
   created_at: string;
   edited_at: string | null;
   deleted_at: string | null;
@@ -142,7 +163,7 @@ interface MessageWithAttachment {
   sender_id: string;
   client_id: string | null;
   content: string;
-  type: string;
+  type: MessageType;
   created_at: string;
   edited_at: string | null;
   deleted_at: string | null;
@@ -165,11 +186,46 @@ interface MessageWithAttachment {
   } | null;
 }
 
+interface ListCursor {
+  createdAt: string;
+  id: string;
+}
+
+interface NormalizedAttachmentPayload {
+  fileKey: string;
+  originalKey: string | null;
+  thumbKey: string | null;
+  mimeType: string | null;
+  fileSize: number | null;
+  width: number | null;
+  height: number | null;
+  thumbWidth: number | null;
+  thumbHeight: number | null;
+  codec: string | null;
+  durationMs: number | null;
+}
+
+interface NormalizedMessagePayload {
+  fileName: string | null;
+}
+
 function normalizeTextContent(rawContent: string | null | undefined): string {
   const value = String(rawContent ?? "");
   const withoutNullBytes = value.replace(/\u0000/g, "");
   const sanitized = withoutNullBytes.replace(/[\u0001-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
   return sanitized.slice(0, MAX_TEXT_LENGTH);
+}
+
+function getSafeElapsedMs(context: RequestContext): number {
+  return Math.max(0, Date.now() - context.startedAt);
+}
+
+function sanitizeFreeformString(rawValue: unknown, maxLength: number): string | null {
+  if (rawValue == null) {
+    return null;
+  }
+  const normalized = normalizeTextContent(String(rawValue)).trim().slice(0, maxLength);
+  return normalized ? normalized : null;
 }
 
 function toOptionalString(value: unknown): string | null {
@@ -201,6 +257,51 @@ function toOptionalObject(value: unknown): Record<string, unknown> | null {
   return null;
 }
 
+function byteLength(value: string): number {
+  return textEncoder.encode(value).length;
+}
+
+function isValidUuid(value: string | null | undefined): boolean {
+  return Boolean(value) && UUID_REGEX.test(String(value).trim());
+}
+
+function normalizeMessageType(rawType: unknown): MessageType {
+  const normalized = String(rawType ?? "").trim().toLowerCase();
+  return MESSAGE_TYPES.includes(normalized as MessageType) ? (normalized as MessageType) : "text";
+}
+
+function sanitizeReplySnapshot(value: SendPayload["replyToSnapshot"]): Record<string, unknown> | null {
+  if (!value) {
+    return null;
+  }
+
+  const snapshot = value as Record<string, unknown>;
+  if (Object.keys(snapshot).length > REPLY_SNAPSHOT_MAX_KEYS) {
+    throw new HttpError(400, "INVALID_REPLY_SNAPSHOT", "replyToSnapshot excede o tamanho permitido.");
+  }
+
+  const sanitized: Record<string, unknown> = {};
+  const authorId = sanitizeFreeformString(snapshot.author_id, 64);
+  const authorName = sanitizeFreeformString(snapshot.author_name, 120);
+  const authorAvatar = sanitizeFreeformString(snapshot.author_avatar, 1024);
+  const snippet = sanitizeFreeformString(snapshot.snippet, 240);
+  const messageType = sanitizeFreeformString(snapshot.message_type, 24);
+  const createdAt = sanitizeFreeformString(snapshot.created_at, 64);
+
+  if (authorId) sanitized.author_id = authorId;
+  if (authorName) sanitized.author_name = authorName;
+  if (authorAvatar) sanitized.author_avatar = authorAvatar;
+  if (snippet) sanitized.snippet = snippet;
+  if (messageType) sanitized.message_type = normalizeMessageType(messageType);
+  if (createdAt) sanitized.created_at = createdAt;
+
+  if (byteLength(JSON.stringify(sanitized)) > REPLY_SNAPSHOT_MAX_BYTES) {
+    throw new HttpError(400, "INVALID_REPLY_SNAPSHOT", "replyToSnapshot excede o tamanho permitido.");
+  }
+
+  return Object.keys(sanitized).length > 0 ? sanitized : null;
+}
+
 function parsePayload(payload: unknown): InputPayload {
   const result = inputSchema.safeParse(payload);
   if (result.success) {
@@ -208,12 +309,38 @@ function parsePayload(payload: unknown): InputPayload {
   }
 
   throw new HttpError(400, "INVALID_PAYLOAD", "Payload invalido.", {
-    issues: result.error.issues.map((issue) => ({
+    issues: result.error.issues.map((issue: { path: PropertyKey[]; message: string; code: string }) => ({
       path: issue.path.join("."),
       message: issue.message,
       code: issue.code,
     })),
   });
+}
+
+function parseListCursor(payload: ListPayload): ListCursor | null {
+  const rawCreatedAt = String(payload.cursorCreatedAt ?? "").trim();
+  const rawCursorId = String(payload.cursorId ?? "").trim();
+
+  if (!rawCreatedAt && !rawCursorId) {
+    return null;
+  }
+  if (!rawCreatedAt || !rawCursorId) {
+    throw new HttpError(400, "INVALID_CURSOR", "Cursor invalido.");
+  }
+
+  const createdAtMs = Date.parse(rawCreatedAt);
+  if (!Number.isFinite(createdAtMs) || !isValidUuid(rawCursorId)) {
+    throw new HttpError(400, "INVALID_CURSOR", "Cursor invalido.");
+  }
+
+  return {
+    createdAt: new Date(createdAtMs).toISOString(),
+    id: rawCursorId,
+  };
+}
+
+function buildSeekCursorFilter(cursor: ListCursor): string {
+  return `created_at.lt.${cursor.createdAt},and(created_at.eq.${cursor.createdAt},id.lt.${cursor.id})`;
 }
 
 function normalizeMessageRow(raw: unknown): MessageRow | null {
@@ -232,7 +359,7 @@ function normalizeMessageRow(raw: unknown): MessageRow | null {
   }
 
   const senderId = toOptionalString(row.sender_id) ?? toOptionalString(row.author_id) ?? "";
-  const messageType = toOptionalString(row.type) ?? toOptionalString(row.message_type) ?? "text";
+  const messageType = normalizeMessageType(toOptionalString(row.type) ?? toOptionalString(row.message_type) ?? "text");
 
   return {
     id,
@@ -281,22 +408,11 @@ function normalizeAttachmentRow(raw: unknown): AttachmentRow | null {
 }
 
 function mapMessage(row: MessageRow, attachmentRow: AttachmentRow | null): MessageWithAttachment {
-  return {
-    id: row.id,
-    conversation_id: row.conversation_id,
-    sender_id: row.sender_id,
-    client_id: row.client_id ?? null,
-    content: String(row.content ?? ""),
-    type: String(row.type ?? "text"),
-    created_at: row.created_at,
-    edited_at: row.edited_at ?? null,
-    deleted_at: row.deleted_at ?? null,
-    reply_to_id: row.reply_to_id ?? null,
-    reply_to_snapshot: row.reply_to_snapshot ?? null,
-    call_id: row.call_id ?? null,
-    payload: row.payload ?? null,
-    attachment: attachmentRow
-      ? {
+  const messageType = normalizeMessageType(row.type);
+  const attachment =
+    messageType === "text" || !attachmentRow
+      ? null
+      : {
           fileKey: String(attachmentRow.file_key ?? ""),
           originalKey: attachmentRow.original_key ? String(attachmentRow.original_key) : null,
           thumbKey: attachmentRow.thumb_key ? String(attachmentRow.thumb_key) : null,
@@ -308,8 +424,23 @@ function mapMessage(row: MessageRow, attachmentRow: AttachmentRow | null): Messa
           thumbHeight: typeof attachmentRow.thumb_height === "number" ? attachmentRow.thumb_height : null,
           codec: attachmentRow.codec ? String(attachmentRow.codec) : null,
           durationMs: typeof attachmentRow.duration_ms === "number" ? attachmentRow.duration_ms : null,
-        }
-      : null,
+        };
+
+  return {
+    id: row.id,
+    conversation_id: row.conversation_id,
+    sender_id: row.sender_id,
+    client_id: row.client_id ?? null,
+    content: String(row.content ?? ""),
+    type: messageType,
+    created_at: row.created_at,
+    edited_at: row.edited_at ?? null,
+    deleted_at: row.deleted_at ?? null,
+    reply_to_id: row.reply_to_id ?? null,
+    reply_to_snapshot: row.reply_to_snapshot ?? null,
+    call_id: row.call_id ?? null,
+    payload: row.payload ?? null,
+    attachment,
   };
 }
 
@@ -327,42 +458,62 @@ function compareAsc(a: MessageWithAttachment, b: MessageWithAttachment): number 
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }
 
-async function loadAttachmentMap(messageIds: string[]): Promise<Map<string, AttachmentRow>> {
+function chunkArray<T>(values: readonly T[], size: number): T[][] {
+  if (values.length === 0) {
+    return [];
+  }
+
+  const chunkSize = Math.max(1, size);
+  const chunks: T[][] = [];
+  for (let index = 0; index < values.length; index += chunkSize) {
+    chunks.push(values.slice(index, index + chunkSize));
+  }
+  return chunks;
+}
+
+async function loadAttachmentMap(
+  messageIds: string[],
+  context: RequestContext,
+  extras?: Record<string, unknown>,
+): Promise<Map<string, AttachmentRow>> {
   const uniqueIds = [...new Set(messageIds.filter((id) => Boolean(id)))];
   if (uniqueIds.length === 0) {
     return new Map();
   }
 
-  const supabase = getSupabaseAdminClient();
-  const { data, error } = await supabase.from("attachments").select(ATTACHMENT_SELECT_COLUMNS).in("message_id", uniqueIds);
-
-  if (error) {
-    console.warn(
-      JSON.stringify({
-        timestamp: new Date().toISOString(),
-        level: "warn",
-        route: ROUTE,
-        message: "attachments_lookup_failed",
-        code: error.code ?? null,
-        hint: error.hint ?? null,
-      }),
-    );
-    return new Map();
-  }
-
   const mapped = new Map<string, AttachmentRow>();
-  for (const rawRow of data ?? []) {
-    const row = normalizeAttachmentRow(rawRow);
-    if (!row || mapped.has(row.message_id)) {
+  const supabase = getSupabaseAdminClient();
+
+  for (const batch of chunkArray(uniqueIds, MAX_ATTACHMENT_BATCH_SIZE)) {
+    const batchStartedAt = Date.now();
+    const { data, error } = await supabase
+      .from("attachments")
+      .select(ATTACHMENT_SELECT_COLUMNS)
+      .in("message_id", batch);
+
+    if (error) {
+      logStructured("warn", "chat_message_attachments_lookup_failed", context, {
+        ...extras,
+        batchSize: batch.length,
+        queryMs: Date.now() - batchStartedAt,
+        supabaseCode: error.code ?? null,
+      });
       continue;
     }
-    mapped.set(row.message_id, row);
+
+    for (const rawRow of data ?? []) {
+      const row = normalizeAttachmentRow(rawRow);
+      if (!row || mapped.has(row.message_id)) {
+        continue;
+      }
+      mapped.set(row.message_id, row);
+    }
   }
 
   return mapped;
 }
 
-async function loadMessageById(messageId: string): Promise<MessageWithAttachment | null> {
+async function loadMessageRowById(messageId: string): Promise<MessageRow | null> {
   const supabase = getSupabaseAdminClient();
   const { data, error } = await supabase
     .from("messages")
@@ -375,13 +526,62 @@ async function loadMessageById(messageId: string): Promise<MessageWithAttachment
     throw new HttpError(500, "MESSAGE_FETCH_FAILED", "Falha ao carregar mensagem.");
   }
 
-  const normalized = normalizeMessageRow(data);
-  if (!normalized) {
+  return normalizeMessageRow(data);
+}
+
+async function loadHydratedMessages(
+  rows: MessageRow[],
+  context: RequestContext,
+  extras?: Record<string, unknown>,
+): Promise<MessageWithAttachment[]> {
+  if (rows.length === 0) {
+    return [];
+  }
+
+  const attachmentMessageIds = rows
+    .filter((row) => row.type !== "text")
+    .map((row) => row.id);
+  if (attachmentMessageIds.length === 0) {
+    return rows.map((row) => mapMessage(row, null));
+  }
+
+  const attachmentMap = await loadAttachmentMap(
+    attachmentMessageIds,
+    context,
+    extras,
+  );
+
+  return rows.map((row) => mapMessage(row, attachmentMap.get(row.id) ?? null));
+}
+
+async function loadHydratedMessageByConversationAndClientId(
+  conversationId: string,
+  clientId: string,
+  context: RequestContext,
+): Promise<MessageWithAttachment | null> {
+  const supabase = getSupabaseAdminClient();
+  const { data, error } = await supabase
+    .from("messages")
+    .select(MESSAGE_SELECT_COLUMNS)
+    .eq("conversation_id", conversationId)
+    .eq("client_id", clientId)
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    throw new HttpError(500, "MESSAGE_FETCH_FAILED", "Falha ao carregar mensagem.");
+  }
+
+  const row = normalizeMessageRow(data);
+  if (!row) {
     return null;
   }
 
-  const attachmentMap = await loadAttachmentMap([normalized.id]);
-  return mapMessage(normalized, attachmentMap.get(normalized.id) ?? null);
+  const [message] = await loadHydratedMessages([row], context, {
+    conversationId,
+    messageId: row.id,
+  });
+  return message ?? null;
 }
 
 interface ListMessagesMetrics {
@@ -392,7 +592,7 @@ interface ListMessagesMetrics {
   returnedRows: number;
 }
 
-async function listMessages(payload: ListPayload, userId: string): Promise<{
+async function listMessages(payload: ListPayload, userId: string, context: RequestContext): Promise<{
   messages: MessageWithAttachment[];
   nextCursor: null | { createdAt: string; id: string };
   metrics: ListMessagesMetrics;
@@ -401,7 +601,7 @@ async function listMessages(payload: ListPayload, userId: string): Promise<{
   await assertConversationMembership(payload.conversationId, userId);
 
   const limit = payload.limit ?? DEFAULT_PAGE_SIZE;
-  const paginationSlack = payload.cursorCreatedAt && payload.cursorId ? 60 : 1;
+  const cursor = parseListCursor(payload);
   const totalStartedAt = Date.now();
 
   const queryStartedAt = Date.now();
@@ -411,47 +611,38 @@ async function listMessages(payload: ListPayload, userId: string): Promise<{
     .eq("conversation_id", payload.conversationId)
     .order("created_at", { ascending: false })
     .order("id", { ascending: false })
-    .limit(limit + paginationSlack);
+    .limit(limit + 1);
 
-  if (payload.cursorCreatedAt) {
-    query = query.lte("created_at", payload.cursorCreatedAt);
+  if (cursor) {
+    query = query.or(buildSeekCursorFilter(cursor));
   }
 
   const { data, error } = await query;
   const queryMs = Date.now() - queryStartedAt;
 
   if (error) {
-    throw new HttpError(500, "LIST_MESSAGES_FAILED", "Falha ao listar mensagens.", {
-      code: error.code ?? null,
-      hint: error.hint ?? null,
-      details: error.details ?? null,
+    logStructured("error", "chat_messages_list_query_failed", context, {
+      conversationId: payload.conversationId,
+      queryMs,
+      supabaseCode: error.code ?? null,
     });
+    throw new HttpError(500, "LIST_MESSAGES_FAILED", "Falha ao listar mensagens.");
   }
 
-  let rows = (data ?? []).map(normalizeMessageRow).filter((row): row is MessageRow => Boolean(row)).sort(compareDesc);
-
-  if (payload.cursorCreatedAt && payload.cursorId) {
-    rows = rows.filter((row) => {
-      if (row.created_at < payload.cursorCreatedAt!) {
-        return true;
-      }
-      if (row.created_at > payload.cursorCreatedAt!) {
-        return false;
-      }
-      return row.id < payload.cursorId!;
-    });
-  }
-
+  const rows = (data ?? [])
+    .map(normalizeMessageRow)
+    .filter((row: MessageRow | null): row is MessageRow => Boolean(row))
+    .sort(compareDesc);
   const hasMore = rows.length > limit;
-  const windowedRows = rows.slice(0, limit);
+  const pageRows = rows.slice(0, limit);
   const attachmentLookupStartedAt = Date.now();
-  const attachmentMap = await loadAttachmentMap(windowedRows.map((row) => row.id));
-  const attachmentLookupMs = Date.now() - attachmentLookupStartedAt;
-  const mapped = windowedRows
-    .map((row) => mapMessage(row, attachmentMap.get(row.id) ?? null))
+  const mapped = (await loadHydratedMessages(pageRows, context, {
+    conversationId: payload.conversationId,
+  }))
     .sort(compareAsc);
+  const attachmentLookupMs = Date.now() - attachmentLookupStartedAt;
 
-  const oldest = windowedRows[windowedRows.length - 1];
+  const oldest = pageRows[pageRows.length - 1];
 
   return {
     messages: mapped,
@@ -481,23 +672,186 @@ async function assertReplyMessageBelongsToConversation(replyToId: string, conver
     .maybeSingle();
 
   if (error) {
-    throw new HttpError(500, "REPLY_VALIDATION_FAILED", "Falha ao validar reply_to_id.");
+    throw new HttpError(500, "REPLY_VALIDATION_FAILED", "Falha ao validar replyToId.");
   }
 
   const row = data as { id?: string; conversation_id?: string } | null;
   if (!row?.id || !row.conversation_id) {
-    throw new HttpError(400, "INVALID_REPLY", "reply_to_id nao encontrado.");
+    throw new HttpError(400, "INVALID_REPLY", "replyToId nao encontrado.");
   }
 
   if (row.conversation_id !== conversationId) {
-    throw new HttpError(400, "INVALID_REPLY", "reply_to_id nao pertence a mesma conversa.");
+    throw new HttpError(400, "INVALID_REPLY", "replyToId nao pertence a mesma conversa.");
   }
+}
+
+function assertSafeChatAttachmentKey(rawKey: string, fieldName: string): string {
+  const candidate = String(rawKey ?? "").trim();
+  if (!candidate) {
+    throw new HttpError(400, "INVALID_ATTACHMENT_KEY", `${fieldName} invalido.`);
+  }
+
+  const lowered = candidate.toLowerCase();
+  if (/[\u0000-\u001F\u007F]/.test(candidate) || BLOCKED_MEDIA_KEY_SEQUENCES.some((sequence) => lowered.includes(sequence))) {
+    throw new HttpError(400, "INVALID_ATTACHMENT_KEY", `${fieldName} invalido.`);
+  }
+
+  let safeKey: string;
+  try {
+    safeKey = sanitizeMediaKey(candidate);
+  } catch {
+    throw new HttpError(400, "INVALID_ATTACHMENT_KEY", `${fieldName} invalido.`);
+  }
+
+  return safeKey;
+}
+
+function normalizeAttachmentPayload(
+  attachment: NonNullable<SendPayload["attachment"]>,
+): NormalizedAttachmentPayload {
+  return {
+    fileKey: assertSafeChatAttachmentKey(attachment.fileKey, "fileKey"),
+    originalKey: attachment.originalKey ? assertSafeChatAttachmentKey(attachment.originalKey, "originalKey") : null,
+    thumbKey: attachment.thumbKey ? assertSafeChatAttachmentKey(attachment.thumbKey, "thumbKey") : null,
+    mimeType: sanitizeFreeformString(attachment.mimeType, 120),
+    fileSize: typeof attachment.fileSize === "number" ? attachment.fileSize : null,
+    width: typeof attachment.width === "number" ? attachment.width : null,
+    height: typeof attachment.height === "number" ? attachment.height : null,
+    thumbWidth: typeof attachment.thumbWidth === "number" ? attachment.thumbWidth : null,
+    thumbHeight: typeof attachment.thumbHeight === "number" ? attachment.thumbHeight : null,
+    codec: sanitizeFreeformString(attachment.codec, 80),
+    durationMs: typeof attachment.durationMs === "number" ? attachment.durationMs : null,
+  };
+}
+
+async function assertAttachmentAuthorization(
+  userId: string,
+  conversationId: string,
+  attachment: NormalizedAttachmentPayload,
+): Promise<void> {
+  const uniqueKeys = [...new Set([attachment.fileKey, attachment.originalKey, attachment.thumbKey].filter(Boolean))] as string[];
+  if (uniqueKeys.length === 0) {
+    throw new HttpError(400, "INVALID_ATTACHMENT_KEY", "Nenhuma chave de anexo foi informada.");
+  }
+
+  const supabase = getSupabaseAdminClient();
+  const { data, error } = await supabase
+    .from("media_uploads")
+    .select("file_key,status")
+    .eq("owner_user_id", userId)
+    .eq("conversation_id", conversationId)
+    .in("file_key", uniqueKeys);
+
+  if (error) {
+    throw new HttpError(500, "MEDIA_UPLOAD_LOOKUP_FAILED", "Falha ao validar upload do anexo.");
+  }
+
+  const authorizationByKey = new Map<string, string>();
+  for (const row of data ?? []) {
+    const fileKey = String((row as { file_key?: string }).file_key ?? "").trim();
+    const status = String((row as { status?: string }).status ?? "").trim().toLowerCase();
+    if (fileKey) {
+      authorizationByKey.set(fileKey, status);
+    }
+  }
+
+  const missingKey = uniqueKeys.find((key) => !authorizationByKey.has(key));
+  if (missingKey) {
+    throw new HttpError(403, "ATTACHMENT_NOT_AUTHORIZED", "Anexo nao autorizado para essa conversa.", {
+      fileKey: missingKey,
+    });
+  }
+
+  const invalidStatusKey = uniqueKeys.find((key) => {
+    const status = authorizationByKey.get(key);
+    return status !== "pending" && status !== "uploaded" && status !== "attached";
+  });
+  if (invalidStatusKey) {
+    throw new HttpError(409, "ATTACHMENT_UPLOAD_INVALID", "O upload do anexo nao esta disponivel para uso.", {
+      fileKey: invalidStatusKey,
+      status: authorizationByKey.get(invalidStatusKey) ?? null,
+    });
+  }
+
+  const nowIso = new Date().toISOString();
+  const { error: updateError } = await supabase
+    .from("media_uploads")
+    .update({
+      status: "attached",
+      updated_at: nowIso,
+      last_seen_at: nowIso,
+    })
+    .eq("owner_user_id", userId)
+    .eq("conversation_id", conversationId)
+    .in("file_key", uniqueKeys);
+
+  if (updateError) {
+    throw new HttpError(500, "MEDIA_UPLOAD_MARK_FAILED", "Falha ao vincular upload ao anexo.");
+  }
+}
+
+function sanitizeAttachmentDisplayName(rawValue: unknown): string | null {
+  if (rawValue == null) {
+    return null;
+  }
+
+  const normalized = normalizeTextContent(String(rawValue))
+    .replace(/[\\/]+/g, "/")
+    .split("/")
+    .pop()
+    ?.trim()
+    .slice(0, 240) ?? "";
+
+  return normalized ? normalized : null;
+}
+
+function normalizeMessagePayload(payload: SendPayload["payload"], messageType: MessageType): NormalizedMessagePayload | null {
+  if (!payload || messageType !== "file") {
+    return null;
+  }
+
+  const fileName = sanitizeAttachmentDisplayName(payload.fileName);
+  if (!fileName) {
+    return null;
+  }
+
+  return {
+    fileName,
+  };
+}
+
+function createAttachmentRowFromPayload(messageId: string, attachment: NormalizedAttachmentPayload): AttachmentRow {
+  return {
+    message_id: messageId,
+    file_key: attachment.fileKey,
+    original_key: attachment.originalKey,
+    thumb_key: attachment.thumbKey,
+    mime_type: attachment.mimeType,
+    file_size: attachment.fileSize,
+    width: attachment.width,
+    height: attachment.height,
+    thumb_width: attachment.thumbWidth,
+    thumb_height: attachment.thumbHeight,
+    codec: attachment.codec,
+    duration_ms: attachment.durationMs,
+  };
+}
+
+function isSchemaCompatibilityInsertError(error: { code?: string | null; message?: string | null; details?: string | null }): boolean {
+  const combined = `${error.code ?? ""} ${error.message ?? ""} ${error.details ?? ""}`.toLowerCase();
+  return combined.includes("original_key")
+    || combined.includes("thumb_key")
+    || combined.includes("thumb_width")
+    || combined.includes("thumb_height")
+    || combined.includes("duration_ms")
+    || combined.includes("codec")
+    || combined.includes("conversation_id");
 }
 
 async function insertAttachmentMetadata(
   messageId: string,
   conversationId: string,
-  attachment: NonNullable<SendPayload["attachment"]>,
+  attachment: NormalizedAttachmentPayload,
 ): Promise<void> {
   const supabase = getSupabaseAdminClient();
 
@@ -505,27 +859,32 @@ async function insertAttachmentMetadata(
     message_id: messageId,
     conversation_id: conversationId,
     file_key: attachment.fileKey,
-    original_key: attachment.originalKey ?? null,
-    thumb_key: attachment.thumbKey ?? null,
-    file_size: attachment.fileSize ?? null,
-    mime_type: attachment.mimeType ?? null,
-    width: attachment.width ?? null,
-    height: attachment.height ?? null,
-    thumb_width: attachment.thumbWidth ?? null,
-    thumb_height: attachment.thumbHeight ?? null,
-    codec: attachment.codec ?? null,
-    duration_ms: attachment.durationMs ?? null,
+    original_key: attachment.originalKey,
+    thumb_key: attachment.thumbKey,
+    file_size: attachment.fileSize,
+    mime_type: attachment.mimeType,
+    width: attachment.width,
+    height: attachment.height,
+    thumb_width: attachment.thumbWidth,
+    thumb_height: attachment.thumbHeight,
+    codec: attachment.codec,
+    duration_ms: attachment.durationMs,
   });
 
   if (!primaryInsert.error) {
     return;
   }
 
+  if (!isSchemaCompatibilityInsertError(primaryInsert.error)) {
+    throw new HttpError(500, "ATTACHMENT_SAVE_FAILED", "Falha ao registrar metadados do anexo.");
+  }
+
   const fallbackInsert = await supabase.from("attachments").insert({
     message_id: messageId,
+    conversation_id: conversationId,
     file_key: attachment.fileKey,
-    file_size: attachment.fileSize ?? null,
-    mime_type: attachment.mimeType ?? null,
+    file_size: attachment.fileSize,
+    mime_type: attachment.mimeType,
   });
 
   if (fallbackInsert.error) {
@@ -533,50 +892,55 @@ async function insertAttachmentMetadata(
   }
 }
 
-async function sendMessage(payload: SendPayload, userId: string): Promise<MessageWithAttachment> {
+async function rollbackMessageInsert(messageId: string, context: RequestContext): Promise<void> {
+  const supabase = getSupabaseAdminClient();
+  const { error } = await supabase.from("messages").delete().eq("id", messageId);
+  if (error) {
+    logStructured("warn", "chat_message_rollback_failed", context, {
+      messageId,
+      supabaseCode: error.code ?? null,
+    });
+  }
+}
+
+async function sendMessage(payload: SendPayload, userId: string, context: RequestContext): Promise<MessageWithAttachment> {
   await assertConversationMembership(payload.conversationId, userId);
+
+  const existingMessage = await loadHydratedMessageByConversationAndClientId(
+    payload.conversationId,
+    payload.clientId,
+    context,
+  );
+  if (existingMessage) {
+    return existingMessage;
+  }
+
+  await assertConversationCanSendMessages(payload.conversationId, userId);
 
   if (payload.replyToId) {
     await assertReplyMessageBelongsToConversation(payload.replyToId, payload.conversationId);
   }
 
-  const messageType = payload.type;
-  let normalizedContent = normalizeTextContent(payload.content ?? "");
+  const messageType = normalizeMessageType(payload.type);
+  const replyToSnapshot = sanitizeReplySnapshot(payload.replyToSnapshot);
+  const normalizedPayload = normalizeMessagePayload(payload.payload, messageType);
+  let normalizedContent = normalizeTextContent(payload.content ?? "").trim();
+  let attachment: NormalizedAttachmentPayload | null = null;
 
   if (messageType === "text") {
-    normalizedContent = normalizedContent.trim();
+    if (payload.attachment) {
+      throw new HttpError(400, "INVALID_ATTACHMENT", "Mensagem de texto nao aceita anexo.");
+    }
     if (!normalizedContent) {
       throw new HttpError(400, "EMPTY_MESSAGE", "Mensagem vazia nao pode ser enviada.");
     }
   } else {
-    const attachmentKey = payload.attachment?.fileKey ?? payload.content;
-    const safeKey = sanitizeMediaKey(attachmentKey);
-    normalizedContent = safeKey;
-
-    if (!safeKey.startsWith("attachments/")) {
-      throw new HttpError(400, "INVALID_ATTACHMENT_KEY", "Anexos devem usar prefixo attachments/.");
+    if (!payload.attachment) {
+      throw new HttpError(400, "MISSING_ATTACHMENT", "Anexo obrigatorio para este tipo de mensagem.");
     }
-
-    const keyConversationId = parseAttachmentConversationId(safeKey);
-    if (!keyConversationId || keyConversationId !== payload.conversationId) {
-      throw new HttpError(400, "INVALID_ATTACHMENT_KEY", "Anexo nao pertence a conversationId informada.");
-    }
-  }
-
-  if (payload.attachment) {
-    const attachmentKeys = [
-      payload.attachment.fileKey,
-      payload.attachment.thumbKey ?? null,
-      payload.attachment.originalKey ?? null,
-    ].filter((value): value is string => Boolean(value));
-
-    for (const key of attachmentKeys) {
-      const safeAttachmentKey = sanitizeMediaKey(key);
-      const keyConversationId = parseAttachmentConversationId(safeAttachmentKey);
-      if (!keyConversationId || keyConversationId !== payload.conversationId) {
-        throw new HttpError(400, "INVALID_ATTACHMENT_KEY", "Metadado de anexo fora da conversa.");
-      }
-    }
+    attachment = normalizeAttachmentPayload(payload.attachment);
+    await assertAttachmentAuthorization(userId, payload.conversationId, attachment);
+    normalizedContent = attachment.fileKey;
   }
 
   const supabase = getSupabaseAdminClient();
@@ -589,7 +953,8 @@ async function sendMessage(payload: SendPayload, userId: string): Promise<Messag
       content: normalizedContent,
       type: messageType,
       reply_to_id: payload.replyToId ?? null,
-      reply_to_snapshot: payload.replyToSnapshot ?? null,
+      reply_to_snapshot: replyToSnapshot,
+      payload: normalizedPayload,
     })
     .select(MESSAGE_SELECT_COLUMNS)
     .limit(1)
@@ -597,24 +962,13 @@ async function sendMessage(payload: SendPayload, userId: string): Promise<Messag
 
   if (insertResult.error || !insertResult.data) {
     if (insertResult.error?.code === "23505") {
-      const existing = await supabase
-        .from("messages")
-        .select(MESSAGE_SELECT_COLUMNS)
-        .eq("conversation_id", payload.conversationId)
-        .eq("client_id", payload.clientId)
-        .limit(1)
-        .maybeSingle();
-
-      if (!existing.error) {
-        const existingRow = normalizeMessageRow(existing.data);
-        if (existingRow) {
-          const hydrated = await loadMessageById(existingRow.id);
-          if (hydrated) {
-            return hydrated;
-          }
-
-          return mapMessage(existingRow, null);
-        }
+      const conflictedMessage = await loadHydratedMessageByConversationAndClientId(
+        payload.conversationId,
+        payload.clientId,
+        context,
+      );
+      if (conflictedMessage) {
+        return conflictedMessage;
       }
     }
 
@@ -626,56 +980,95 @@ async function sendMessage(payload: SendPayload, userId: string): Promise<Messag
     throw new HttpError(500, "SEND_MESSAGE_FAILED", "Falha ao enviar mensagem.");
   }
 
-  if (payload.attachment && messageType !== "text") {
-    await insertAttachmentMetadata(insertedMessage.id, payload.conversationId, payload.attachment);
+  if (attachment) {
+    try {
+      await insertAttachmentMetadata(insertedMessage.id, payload.conversationId, attachment);
+    } catch (error) {
+      await rollbackMessageInsert(insertedMessage.id, context);
+      throw error;
+    }
   }
 
-  if (messageType === "text" && !payload.attachment) {
-    return mapMessage(insertedMessage, null);
+  return mapMessage(insertedMessage, attachment ? createAttachmentRowFromPayload(insertedMessage.id, attachment) : null);
+}
+async function hydrateSingleMessageRow(row: MessageRow, context: RequestContext): Promise<MessageWithAttachment> {
+  if (row.type === "text") {
+    return mapMessage(row, null);
   }
 
-  const hydrated = await loadMessageById(insertedMessage.id);
-  if (hydrated) {
-    return hydrated;
-  }
-
-  const payloadAttachment: AttachmentRow | null = payload.attachment
-    ? {
-        message_id: insertedMessage.id,
-        file_key: payload.attachment.fileKey,
-        original_key: payload.attachment.originalKey ?? null,
-        thumb_key: payload.attachment.thumbKey ?? null,
-        mime_type: payload.attachment.mimeType ?? null,
-        file_size: payload.attachment.fileSize ?? null,
-        width: payload.attachment.width ?? null,
-        height: payload.attachment.height ?? null,
-        thumb_width: payload.attachment.thumbWidth ?? null,
-        thumb_height: payload.attachment.thumbHeight ?? null,
-        codec: payload.attachment.codec ?? null,
-        duration_ms: payload.attachment.durationMs ?? null,
-      }
-    : null;
-
-  return mapMessage(insertedMessage, payloadAttachment);
+  const [message] = await loadHydratedMessages([row], context, {
+    conversationId: row.conversation_id,
+    messageId: row.id,
+  });
+  return message ?? mapMessage(row, null);
 }
 
-async function editMessage(payload: EditPayload, userId: string): Promise<MessageWithAttachment> {
-  const supabase = getSupabaseAdminClient();
-  const existing = await supabase
-    .from("messages")
-    .select(MESSAGE_SELECT_COLUMNS)
-    .eq("id", payload.messageId)
-    .limit(1)
-    .maybeSingle();
-
-  if (existing.error) {
-    throw new HttpError(500, "EDIT_LOOKUP_FAILED", "Falha ao carregar mensagem para edicao.");
+function assertMutationWindow(createdAt: string, windowMs: number, code: string, message: string): void {
+  const createdAtMs = Date.parse(createdAt);
+  if (!Number.isFinite(createdAtMs)) {
+    throw new HttpError(500, "MESSAGE_STATE_INVALID", "Falha ao validar o estado da mensagem.");
   }
 
-  const row = normalizeMessageRow(existing.data);
+  if (Date.now() - createdAtMs > windowMs) {
+    throw new HttpError(400, code, message);
+  }
+}
+
+function sanitizeEditHistoryItem(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const raw = value as Record<string, unknown>;
+  const replacedAt = sanitizeFreeformString(raw.replaced_at, 64);
+  const previousEditedAt = sanitizeFreeformString(raw.previous_edited_at, 64);
+  const previousContentLength = toOptionalNumber(raw.previous_content_length);
+  const sanitized: Record<string, unknown> = {};
+
+  if (replacedAt) sanitized.replaced_at = replacedAt;
+  if (previousEditedAt) sanitized.previous_edited_at = previousEditedAt;
+  if (typeof previousContentLength === "number") sanitized.previous_content_length = previousContentLength;
+
+  return Object.keys(sanitized).length > 0 ? sanitized : null;
+}
+
+function buildEditedPayload(row: MessageRow, nextEditedAt: string): Record<string, unknown> | null {
+  const nextPayload = row.payload && typeof row.payload === "object" && !Array.isArray(row.payload)
+    ? { ...row.payload }
+    : {};
+
+  const existingHistory = Array.isArray(nextPayload.edit_history)
+    ? nextPayload.edit_history.map(sanitizeEditHistoryItem).filter((entry): entry is Record<string, unknown> => Boolean(entry))
+    : [];
+
+  existingHistory.push({
+    replaced_at: nextEditedAt,
+    previous_edited_at: row.edited_at ?? row.created_at,
+    previous_content_length: String(row.content ?? "").length,
+  });
+
+  const nextHistory = existingHistory.slice(-EDIT_HISTORY_LIMIT);
+  nextPayload.edit_history = nextHistory;
+  nextPayload.edit_count = nextHistory.length;
+
+  if (byteLength(JSON.stringify(nextPayload)) > EDIT_HISTORY_MAX_BYTES) {
+    return {
+      edit_count: nextHistory.length,
+    };
+  }
+
+  return nextPayload;
+}
+
+async function editMessage(payload: EditPayload, userId: string, context: RequestContext): Promise<MessageWithAttachment> {
+  const supabase = getSupabaseAdminClient();
+  const row = await loadMessageRowById(payload.messageId);
+
   if (!row?.id || !row.sender_id) {
     throw new HttpError(404, "MESSAGE_NOT_FOUND", "Mensagem nao encontrada.");
   }
+
+  await assertConversationMembership(row.conversation_id, userId);
 
   if (row.sender_id !== userId) {
     throw new HttpError(403, "FORBIDDEN", "Somente o autor pode editar a mensagem.");
@@ -689,16 +1082,30 @@ async function editMessage(payload: EditPayload, userId: string): Promise<Messag
     throw new HttpError(400, "MESSAGE_DELETED", "Mensagem excluida nao pode ser editada.");
   }
 
+  assertMutationWindow(
+    row.created_at,
+    EDIT_WINDOW_MS,
+    "MESSAGE_EDIT_WINDOW_EXPIRED",
+    `Mensagens so podem ser editadas em ate ${EDIT_WINDOW_MINUTES} minutos.`,
+  );
+
   const normalizedContent = normalizeTextContent(payload.content).trim();
   if (!normalizedContent) {
     throw new HttpError(400, "EMPTY_MESSAGE", "Mensagem vazia nao pode ser salva.");
   }
 
+  if (normalizedContent === String(row.content ?? "")) {
+    return mapMessage(row, null);
+  }
+
+  const editedAt = new Date().toISOString();
+  const nextPayload = buildEditedPayload(row, editedAt);
   const { data, error } = await supabase
     .from("messages")
     .update({
       content: normalizedContent,
-      edited_at: new Date().toISOString(),
+      edited_at: editedAt,
+      payload: nextPayload,
     })
     .eq("id", payload.messageId)
     .select(MESSAGE_SELECT_COLUMNS)
@@ -713,35 +1120,33 @@ async function editMessage(payload: EditPayload, userId: string): Promise<Messag
     throw new HttpError(500, "EDIT_MESSAGE_FAILED", "Falha ao editar mensagem.");
   }
 
-  const hydrated = await loadMessageById(normalized.id);
-  if (hydrated) {
-    return hydrated;
-  }
-
   return mapMessage(normalized, null);
 }
 
-async function deleteMessage(payload: DeletePayload, userId: string): Promise<MessageWithAttachment> {
+async function deleteMessage(payload: DeletePayload, userId: string, context: RequestContext): Promise<MessageWithAttachment> {
   const supabase = getSupabaseAdminClient();
-  const existing = await supabase
-    .from("messages")
-    .select(MESSAGE_SELECT_COLUMNS)
-    .eq("id", payload.messageId)
-    .limit(1)
-    .maybeSingle();
+  const row = await loadMessageRowById(payload.messageId);
 
-  if (existing.error) {
-    throw new HttpError(500, "DELETE_LOOKUP_FAILED", "Falha ao carregar mensagem para exclusao.");
-  }
-
-  const row = normalizeMessageRow(existing.data);
   if (!row?.id || !row.sender_id) {
     throw new HttpError(404, "MESSAGE_NOT_FOUND", "Mensagem nao encontrada.");
   }
 
+  await assertConversationMembership(row.conversation_id, userId);
+
   if (row.sender_id !== userId) {
     throw new HttpError(403, "FORBIDDEN", "Somente o autor pode excluir a mensagem.");
   }
+
+  if (row.deleted_at) {
+    return await hydrateSingleMessageRow(row, context);
+  }
+
+  assertMutationWindow(
+    row.created_at,
+    DELETE_WINDOW_MS,
+    "MESSAGE_DELETE_WINDOW_EXPIRED",
+    `Mensagens so podem ser excluidas em ate ${DELETE_WINDOW_HOURS} horas.`,
+  );
 
   const { data, error } = await supabase
     .from("messages")
@@ -762,14 +1167,8 @@ async function deleteMessage(payload: DeletePayload, userId: string): Promise<Me
     throw new HttpError(500, "DELETE_MESSAGE_FAILED", "Falha ao excluir mensagem.");
   }
 
-  const hydrated = await loadMessageById(normalized.id);
-  if (hydrated) {
-    return hydrated;
-  }
-
-  return mapMessage(normalized, null);
+  return await hydrateSingleMessageRow(normalized, context);
 }
-
 async function enforceActionRateLimits(uid: string, payload: InputPayload): Promise<void> {
   if (payload.action === "send") {
     const checks: Array<Promise<unknown>> = [
@@ -812,8 +1211,24 @@ async function enforceActionRateLimits(uid: string, payload: InputPayload): Prom
   });
 }
 
-Deno.serve(async (request) => {
+function sanitizeErrorForClient(error: unknown): HttpError {
+  if (!(error instanceof HttpError)) {
+    return new HttpError(500, "INTERNAL_ERROR", "Erro interno.");
+  }
+
+  if (error.code === "INVALID_PAYLOAD") {
+    return error;
+  }
+
+  return new HttpError(error.status, error.code, error.message);
+}
+
+Deno.serve(async (request: Request) => {
   const context = createRequestContext(ROUTE);
+  let payload: InputPayload | null = null;
+  let userId: string | null = null;
+  let conversationId: string | null = null;
+  let messageId: string | null = null;
 
   try {
     if (isOptionsRequest(request)) {
@@ -822,25 +1237,31 @@ Deno.serve(async (request) => {
 
     assertMethod(request, "POST");
 
-    const auth = await validateFirebaseToken(request);
+    const auth = await validateSupabaseToken(request);
     context.uid = auth.uid;
 
     const rawPayload = await parseJsonBody<unknown>(request);
-    const payload = parsePayload(rawPayload);
+    payload = parsePayload(rawPayload);
     context.action = payload.action;
+
+    if ("conversationId" in payload && payload.conversationId) {
+      conversationId = payload.conversationId;
+    }
+    if ("messageId" in payload && payload.messageId) {
+      messageId = payload.messageId;
+    }
 
     await enforceActionRateLimits(auth.uid, payload);
 
-    const userId = await resolveUserIdByFirebaseUid(auth.uid, auth.email);
+    userId = await resolveUserId(auth.uid, auth.email);
 
     if (payload.action === "list") {
-      const listed = await listMessages(payload, userId);
-      const responsePayload = {
-        messages: listed.messages,
-        nextCursor: listed.nextCursor,
-      };
+      const listed = await listMessages(payload, userId, context);
       logStructured("info", "chat_messages_list_success", context, {
         status: 200,
+        uid: auth.uid,
+        userId,
+        conversationId,
         count: listed.messages.length,
         queryMs: listed.metrics.queryMs,
         attachmentLookupMs: listed.metrics.attachmentLookupMs,
@@ -848,41 +1269,77 @@ Deno.serve(async (request) => {
         queriedRows: listed.metrics.queriedRows,
         returnedRows: listed.metrics.returnedRows,
       });
-      return responseJson(request, responsePayload, 200);
+      return responseJson(request, {
+        messages: listed.messages,
+        nextCursor: listed.nextCursor,
+      }, 200);
     }
 
     if (payload.action === "send") {
-      const message = await sendMessage(payload, userId);
+      const message = await sendMessage(payload, userId, context);
+      conversationId = message.conversation_id;
+      messageId = message.id;
       logStructured("info", "chat_message_send_success", context, {
         status: 200,
-        messageId: message.id,
+        uid: auth.uid,
+        userId,
+        conversationId,
+        messageId,
         type: message.type,
+        totalMs: getSafeElapsedMs(context),
       });
       return responseJson(request, { message }, 200);
     }
 
     if (payload.action === "edit") {
-      const message = await editMessage(payload, userId);
+      const message = await editMessage(payload, userId, context);
+      conversationId = message.conversation_id;
+      messageId = message.id;
       logStructured("info", "chat_message_edit_success", context, {
         status: 200,
-        messageId: message.id,
+        uid: auth.uid,
+        userId,
+        conversationId,
+        messageId,
+        totalMs: getSafeElapsedMs(context),
       });
       return responseJson(request, { message }, 200);
     }
 
-    const message = await deleteMessage(payload, userId);
+    const message = await deleteMessage(payload, userId, context);
+    conversationId = message.conversation_id;
+    messageId = message.id;
     logStructured("info", "chat_message_delete_success", context, {
       status: 200,
-      messageId: message.id,
+      uid: auth.uid,
+      userId,
+      conversationId,
+      messageId,
+      totalMs: getSafeElapsedMs(context),
     });
     return responseJson(request, { message }, 200);
   } catch (error) {
-    logStructured("error", "chat_messages_failure", context, {
-      status: error instanceof HttpError ? error.status : 500,
-      code: error instanceof HttpError ? error.code : "INTERNAL_ERROR",
+    const status = error instanceof HttpError ? error.status : 500;
+    const code = error instanceof HttpError ? error.code : "INTERNAL_ERROR";
+    logStructured(status >= 500 ? "error" : "warn", "chat_messages_failure", context, {
+      status,
+      code,
+      uid: context.uid ?? null,
+      userId,
+      conversationId,
+      messageId,
+      totalMs: getSafeElapsedMs(context),
       error: error instanceof Error ? error.message : String(error ?? "Unknown error"),
     });
 
-    return responseError(request, context, error);
+    return responseError(request, context, sanitizeErrorForClient(error));
   }
 });
+
+/*
+Recommended SQL for idempotent send:
+create unique index if not exists messages_conversation_client_unique_idx
+  on public.messages (conversation_id, client_id)
+  where client_id is not null;
+*/
+

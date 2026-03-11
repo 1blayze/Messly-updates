@@ -1,4 +1,5 @@
-import { validateFirebaseToken } from "../_shared/auth.ts";
+/// <reference path="../_shared/edge-runtime.d.ts" />
+import { validateSupabaseToken } from "../_shared/auth.ts";
 import { enforceRateLimit } from "../_shared/rateLimit.ts";
 import {
   assertMethod,
@@ -16,7 +17,7 @@ import {
   sanitizeContentType,
   sanitizeMediaKey,
 } from "../_shared/mediaSecurity.ts";
-import { assertConversationMembership, resolveUserIdByFirebaseUid } from "../_shared/user.ts";
+import { assertConversationMembership, resolveUserId } from "../_shared/user.ts";
 
 const DEFAULT_EXPIRES_SECONDS = 300;
 const MIN_EXPIRES_SECONDS = 60;
@@ -60,7 +61,7 @@ async function sha256Hex(input: string): Promise<string> {
     .join("");
 }
 
-async function hmacSha256(key: ArrayBuffer, data: string): Promise<ArrayBuffer> {
+async function hmacSha256(key: BufferSource, data: string): Promise<ArrayBuffer> {
   const cryptoKey = await crypto.subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   return crypto.subtle.sign("HMAC", cryptoKey, new TextEncoder().encode(data));
 }
@@ -173,7 +174,7 @@ async function authorizeMediaKeyAccess(key: string, userId: string): Promise<voi
   if (key.startsWith("attachments/")) {
     const conversationId = parseAttachmentConversationId(key);
     if (!conversationId) {
-      throw new HttpError(400, "INVALID_ATTACHMENT_KEY", "Chave de anexo invalida.");
+      throw new HttpError(400, "INVALID_ATTACHMENT_KEY", "Chave de anexo inválida.");
     }
 
     await assertConversationMembership(conversationId, userId);
@@ -182,13 +183,14 @@ async function authorizeMediaKeyAccess(key: string, userId: string): Promise<voi
 
   if (key.startsWith("avatars/") || key.startsWith("banners/")) {
     const ownerSegment = key.split("/").filter(Boolean)[1] ?? "";
-    if (!ownerSegment || ownerSegment !== userId) {
-      throw new HttpError(403, "FORBIDDEN", "Sem permissao para alterar essa midia de perfil.");
+    const ownerId = ownerSegment.replace(/\.[^./\\]+$/, "");
+    if (!ownerSegment || (ownerSegment !== userId && ownerId !== userId)) {
+      throw new HttpError(403, "FORBIDDEN", "Sem permissão para alterar essa mídia de perfil.");
     }
   }
 }
 
-Deno.serve(async (request) => {
+Deno.serve(async (request: Request) => {
   const context = createRequestContext(ROUTE);
 
   try {
@@ -198,7 +200,7 @@ Deno.serve(async (request) => {
 
     assertMethod(request, "POST");
 
-    const auth = await validateFirebaseToken(request);
+    const auth = await validateSupabaseToken(request);
     context.uid = auth.uid;
 
     const safeKey = sanitizeMediaKey(request.headers.get("x-media-key"));
@@ -216,7 +218,7 @@ Deno.serve(async (request) => {
       });
     }
 
-    const userId = await resolveUserIdByFirebaseUid(auth.uid, auth.email);
+    const userId = await resolveUserId(auth.uid, auth.email);
     await authorizeMediaKeyAccess(safeKey, userId);
 
     const endpoint = getRequiredEnv("R2_ENDPOINT");

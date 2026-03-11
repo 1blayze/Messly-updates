@@ -1,5 +1,6 @@
+/// <reference path="../_shared/edge-runtime.d.ts" />
 import { z } from "npm:zod@3.25.76";
-import { validateFirebaseToken } from "../_shared/auth.ts";
+import { validateSupabaseToken } from "../_shared/auth.ts";
 import {
   countConnectedParticipants,
   computeDurationSeconds,
@@ -36,8 +37,8 @@ const payloadSchema = z
 function parsePayload(raw: unknown): { callId: string } {
   const parsed = payloadSchema.safeParse(raw);
   if (!parsed.success) {
-    throw new HttpError(400, "INVALID_PAYLOAD", "Payload invalido.", {
-      issues: parsed.error.issues.map((issue) => ({
+    throw new HttpError(400, "INVALID_PAYLOAD", "Payload inválido.", {
+      issues: parsed.error.issues.map((issue: { path: PropertyKey[]; message: string }) => ({
         path: issue.path.join("."),
         message: issue.message,
       })),
@@ -63,7 +64,7 @@ function serializeCall(call: CallSessionRow): Record<string, unknown> {
   };
 }
 
-Deno.serve(async (request) => {
+Deno.serve(async (request: Request) => {
   const context = createRequestContext(ROUTE);
 
   try {
@@ -72,7 +73,7 @@ Deno.serve(async (request) => {
     }
 
     assertMethod(request, "POST");
-    const auth = await validateFirebaseToken(request);
+    const auth = await validateSupabaseToken(request);
     context.uid = auth.uid;
     context.action = "hangup";
 
@@ -116,7 +117,7 @@ Deno.serve(async (request) => {
     }
 
     if (call.status !== "active") {
-      throw new HttpError(409, "CALL_NOT_ACTIVE", "A chamada nao esta ativa.");
+      throw new HttpError(409, "CALL_NOT_ACTIVE", "A chamada não está ativa.");
     }
 
     const connectedParticipantsCount = countConnectedParticipants(participantsAfterLeave);

@@ -163,7 +163,7 @@ function createAppUpdater(options) {
     app,
     shell,
     owner = "1blayze",
-    repo = "Messly",
+    repo = "Messly-updates",
     token = "",
     platform = process.platform,
     userAgent = `Messly-Updater/${app.getVersion()}`,

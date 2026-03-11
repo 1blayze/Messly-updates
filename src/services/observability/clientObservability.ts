@@ -31,10 +31,25 @@ export function reportClientError(error: unknown, context?: Record<string, unkno
     return;
   }
 
-  const message = error instanceof Error ? error.message : String(error ?? "Unknown client error");
+  const typedError = error as Record<string, unknown> | null;
+  const details = typedError && typeof typedError === "object" ? typedError : null;
+  const message =
+    error instanceof Error
+      ? error.message
+      : String(typedError?.message ?? error ?? "Unknown client error");
+  const code = typedError && typeof details?.code !== "undefined" ? details.code : undefined;
+  const status = details && typeof details.status !== "undefined" ? details.status : undefined;
+  const payload =
+    details && typeof details.details !== "undefined"
+      ? details.details
+      : (details && typeof details.hint !== "undefined" ? details.hint : null);
+
   console.error("[messly-client-error]", {
     message,
     context: context ?? null,
+    code: code ?? null,
+    status: status ?? null,
+    details: payload,
     error,
   });
 }

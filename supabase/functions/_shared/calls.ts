@@ -1,6 +1,6 @@
 import { HttpError } from "./http.ts";
 import { getSupabaseAdminClient } from "./supabaseAdmin.ts";
-import { assertConversationMembership, resolveUserIdByFirebaseUid } from "./user.ts";
+import { assertConversationMembership, resolveUserId } from "./user.ts";
 
 export type CallMode = "audio" | "video";
 export type CallStatus = "ringing" | "active" | "ended" | "missed" | "declined";
@@ -35,8 +35,6 @@ export interface CallSessionRow {
 export interface ConversationMemberMap {
   conversationId: string;
   userIds: [string, string];
-  firebaseUidByUserId: Map<string, string>;
-  userIdByFirebaseUid: Map<string, string>;
 }
 
 const CALL_TIMEOUT_MS = 3 * 60_000;
@@ -152,7 +150,7 @@ export function isTerminalCallStatus(status: CallStatus): boolean {
 export function validateCallMode(modeRaw: unknown): CallMode {
   const mode = String(modeRaw ?? "").trim().toLowerCase() as CallMode;
   if (!ALLOWED_CALL_MODES.has(mode)) {
-    throw new HttpError(400, "INVALID_CALL_MODE", "Modo de chamada invalido.");
+    throw new HttpError(400, "INVALID_CALL_MODE", "Modo de chamada inválido.");
   }
   return mode;
 }
@@ -160,7 +158,7 @@ export function validateCallMode(modeRaw: unknown): CallMode {
 export function validateSignalType(typeRaw: unknown): CallSignalType {
   const type = String(typeRaw ?? "").trim().toLowerCase() as CallSignalType;
   if (!ALLOWED_SIGNAL_TYPES.has(type)) {
-    throw new HttpError(400, "INVALID_SIGNAL_TYPE", "Tipo de sinal invalido.");
+    throw new HttpError(400, "INVALID_SIGNAL_TYPE", "Tipo de sinal inválido.");
   }
   return type;
 }
@@ -168,7 +166,7 @@ export function validateSignalType(typeRaw: unknown): CallSignalType {
 export function validateEndedReason(reasonRaw: unknown): CallEndedReason {
   const reason = String(reasonRaw ?? "").trim().toLowerCase() as CallEndedReason;
   if (!ALLOWED_END_REASONS.has(reason)) {
-    throw new HttpError(400, "INVALID_ENDED_REASON", "Motivo de encerramento invalido.");
+    throw new HttpError(400, "INVALID_ENDED_REASON", "Motivo de encerramento inválido.");
   }
   return reason;
 }
@@ -237,40 +235,12 @@ export async function getConversationMembers(conversationId: string): Promise<Co
   const user1Id = String(row?.user1_id ?? "").trim();
   const user2Id = String(row?.user2_id ?? "").trim();
   if (!conversationIdValue || !user1Id || !user2Id) {
-    throw new HttpError(404, "CONVERSATION_NOT_FOUND", "Conversa nao encontrada.");
-  }
-
-  const { data: usersData, error: usersError } = await supabase
-    .from("users")
-    .select("id,firebase_uid")
-    .in("id", [user1Id, user2Id]);
-
-  if (usersError) {
-    throw new HttpError(500, "CONVERSATION_MEMBERS_LOOKUP_FAILED", "Falha ao carregar membros da conversa.");
-  }
-
-  const firebaseUidByUserId = new Map<string, string>();
-  const userIdByFirebaseUid = new Map<string, string>();
-  const userRows = Array.isArray(usersData) ? usersData : [];
-  for (const raw of userRows) {
-    const id = String((raw as { id?: unknown }).id ?? "").trim();
-    const firebaseUid = String((raw as { firebase_uid?: unknown }).firebase_uid ?? "").trim();
-    if (!id || !firebaseUid) {
-      continue;
-    }
-    firebaseUidByUserId.set(id, firebaseUid);
-    userIdByFirebaseUid.set(firebaseUid, id);
-  }
-
-  if (!firebaseUidByUserId.get(user1Id) || !firebaseUidByUserId.get(user2Id)) {
-    throw new HttpError(500, "CONVERSATION_MEMBER_NOT_MAPPED", "Conversa com membro sem firebase_uid.");
+    throw new HttpError(404, "CONVERSATION_NOT_FOUND", "Conversa não encontrada.");
   }
 
   return {
     conversationId: conversationIdValue,
     userIds: [user1Id, user2Id],
-    firebaseUidByUserId,
-    userIdByFirebaseUid,
   };
 }
 
@@ -284,12 +254,12 @@ export async function loadCallSession(callId: string): Promise<CallSessionRow> {
     .maybeSingle();
 
   if (error) {
-    throw new HttpError(500, "CALL_LOOKUP_FAILED", "Falha ao carregar sessao de chamada.");
+    throw new HttpError(500, "CALL_LOOKUP_FAILED", "Falha ao carregar sessão de chamada.");
   }
 
   const normalized = normalizeCallSessionRow(data);
   if (!normalized) {
-    throw new HttpError(404, "CALL_NOT_FOUND", "Chamada nao encontrada.");
+    throw new HttpError(404, "CALL_NOT_FOUND", "Chamada não encontrada.");
   }
 
   return normalized;
@@ -304,13 +274,13 @@ export async function resolveCallAuthorizationContext(
   authUserId: string;
   members: ConversationMemberMap;
 }> {
-  const authUserId = await resolveUserIdByFirebaseUid(authUid, authEmail);
+  const authUserId = await resolveUserId(authUid);
   const call = await loadCallSession(callId);
   await assertConversationMembership(call.conversation_id, authUserId);
 
   const members = await getConversationMembers(call.conversation_id);
-  if (!members.userIdByFirebaseUid.has(authUid)) {
-    throw new HttpError(403, "FORBIDDEN", "Usuario sem permissao para esta chamada.");
+  if (!members.userIds.includes(authUserId)) {
+    throw new HttpError(403, "FORBIDDEN", "Usuário sem permissão para esta chamada.");
   }
 
   return {
@@ -334,12 +304,12 @@ export async function updateCallSession(
     .single();
 
   if (error || !data) {
-    throw new HttpError(500, "CALL_UPDATE_FAILED", "Falha ao atualizar sessao de chamada.");
+    throw new HttpError(500, "CALL_UPDATE_FAILED", "Falha ao atualizar sessão de chamada.");
   }
 
   const normalized = normalizeCallSessionRow(data);
   if (!normalized) {
-    throw new HttpError(500, "CALL_UPDATE_FAILED", "Sessao de chamada retornou dados invalidos.");
+    throw new HttpError(500, "CALL_UPDATE_FAILED", "Sessão de chamada retornou dados inválidos.");
   }
 
   return normalized;
@@ -352,7 +322,7 @@ export async function resolveSenderUserIdForCallEvent(
   const preferredUid = String(actorFirebaseUid ?? "").trim() || String(call.created_by ?? "").trim();
   if (preferredUid) {
     try {
-      return await resolveUserIdByFirebaseUid(preferredUid, null);
+      return await resolveUserId(preferredUid);
     } catch {
       // ignore and fallback below
     }
@@ -425,7 +395,7 @@ export async function insertCallEventMessage(params: {
 
 export function normalizeSignalPayload(payload: unknown): Record<string, unknown> {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-    throw new HttpError(400, "INVALID_SIGNAL_PAYLOAD", "Payload de sinal invalido.");
+    throw new HttpError(400, "INVALID_SIGNAL_PAYLOAD", "Payload de sinal inválido.");
   }
   return payload as Record<string, unknown>;
 }
@@ -439,7 +409,7 @@ export function ensureFirebaseUidInConversation(members: ConversationMemberMap, 
 export function validateCallStatus(statusRaw: unknown): CallStatus {
   const status = String(statusRaw ?? "").trim().toLowerCase() as CallStatus;
   if (!ALLOWED_CALL_STATUSES.has(status)) {
-    throw new HttpError(400, "INVALID_CALL_STATUS", "Status de chamada invalido.");
+    throw new HttpError(400, "INVALID_CALL_STATUS", "Status de chamada inválido.");
   }
   return status;
 }

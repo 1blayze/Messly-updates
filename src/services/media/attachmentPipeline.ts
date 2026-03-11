@@ -1,8 +1,6 @@
-import { invokeEdgeJson } from "../edge/edgeClient";
-import { getAuthenticatedEdgeHeaders } from "../auth/firebaseToken";
-import { supabase } from "../supabase";
+import { hashFile } from "../../utils/hashFile";
 import { compressImage, generateThumbnail } from "./compression";
-import { uploadWithRetry } from "./uploadWithRetry";
+import { uploadMediaAsset } from "../uploadMedia";
 
 export type AttachmentKind = "image" | "video" | "file";
 
@@ -24,31 +22,10 @@ export interface PreparedAttachment {
   durationMs?: number;
 }
 
-interface PresignRequest {
-  action: "get" | "put";
-  key: string;
-  contentType?: string;
-  fileSize?: number;
-  expiresSeconds?: number;
-}
-
-interface PresignResponse {
-  key: string;
-  action: "get" | "put";
-  url: string;
-  expiresIn: number;
-  contentType?: string;
-}
-
-interface UploadViaEdgeResponse {
-  key?: string;
-  size?: number;
-  contentType?: string;
-}
-
 export interface UploadAttachmentBlobOptions {
   file: File;
   key: string;
+  conversationId: string;
   contentType?: string;
   signal?: AbortSignal;
   timeoutMs?: number;
@@ -84,9 +61,9 @@ const ALLOWED_FILE_MIME = new Set([
   "application/x-zip-compressed",
 ]);
 
-const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
-const MAX_VIDEO_BYTES = 80 * 1024 * 1024;
-const MAX_GENERIC_BYTES = 20 * 1024 * 1024;
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const MAX_VIDEO_BYTES = 100 * 1024 * 1024;
+const MAX_GENERIC_BYTES = 25 * 1024 * 1024;
 
 function isFlagEnabled(rawValue: string | undefined): boolean {
   const normalized = String(rawValue ?? "").trim().toLowerCase();
@@ -150,14 +127,6 @@ function assertSize(kind: AttachmentKind, size: number): void {
   }
 }
 
-function makeAttachmentKey(conversationId: string, extension: string): string {
-  const safeExt = extension.replace(/[^a-z0-9]/gi, "").toLowerCase() || "bin";
-  const id = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-    ? crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  return `attachments/${conversationId}/${id}.${safeExt}`;
-}
-
 function ensureConversationId(conversationId: string): void {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(conversationId)) {
     throw new Error("conversationId invalido para upload de anexo.");
@@ -171,170 +140,63 @@ function fileFromBlob(blob: Blob, fileName: string): File {
   });
 }
 
-function isAbortError(error: unknown): boolean {
-  return error instanceof DOMException && error.name === "AbortError";
+function normalizePositiveDimension(value: number | undefined): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.trunc(value) : undefined;
 }
 
-function shouldFallbackToEdgeUpload(error: unknown): boolean {
-  if (isAbortError(error)) {
-    return false;
-  }
-
-  const message = String(error instanceof Error ? error.message : error ?? "").toLowerCase();
-  if (!message) {
-    return false;
-  }
-
-  return (
-    message.includes("network error while uploading") ||
-    message.includes("failed to fetch") ||
-    message.includes("err_failed") ||
-    message.includes("cors") ||
-    message.includes("preflight")
-  );
+async function buildImageKey(file: File, suffix = ".webp"): Promise<string> {
+  const sha256 = await hashFile(file);
+  return `messages/images/${sha256}${suffix}`;
 }
 
-function shouldFallbackFromElectronAttachmentUpload(error: unknown): boolean {
-  if (isAbortError(error)) {
-    return false;
-  }
-
-  const message = String(error instanceof Error ? error.message : error ?? "");
-  const normalizedMessage = message.toLowerCase();
-  if (!normalizedMessage) {
-    return false;
-  }
-
-  const isMissingR2Env =
-    normalizedMessage.includes("missing required environment variable:") &&
-    (normalizedMessage.includes("r2_bucket") ||
-      normalizedMessage.includes("r2_endpoint") ||
-      normalizedMessage.includes("r2_access_key_id") ||
-      normalizedMessage.includes("r2_secret_access_key"));
-
-  if (isMissingR2Env) {
-    return true;
-  }
-
-  return (
-    normalizedMessage.includes("nosuchbucket") ||
-    normalizedMessage.includes("the specified bucket does not exist") ||
-    normalizedMessage.includes("no value provided for input http label: bucket")
-  );
+async function buildVideoKey(file: File): Promise<string> {
+  const sha256 = await hashFile(file);
+  const ext = getFileExtension(file.name, "mp4");
+  return `messages/videos/${sha256}.${ext}`;
 }
 
-async function uploadAttachmentViaElectron(options: UploadAttachmentBlobOptions): Promise<boolean> {
-  const handler = window.electronAPI?.uploadAttachment;
-  if (!handler) {
-    return false;
-  }
-
-  if (options.signal?.aborted) {
-    throw new DOMException("Upload aborted", "AbortError");
-  }
-
-  const bytes = new Uint8Array(await options.file.arrayBuffer());
-  if (options.signal?.aborted) {
-    throw new DOMException("Upload aborted", "AbortError");
-  }
-
-  try {
-    await handler({
-      key: options.key,
-      bytes,
-      contentType: options.contentType,
-    });
-  } catch (error) {
-    const message = String(error instanceof Error ? error.message : error ?? "");
-    if (message.includes("No handler registered for 'media:upload-attachment'")) {
-      return false;
-    }
-    if (shouldFallbackFromElectronAttachmentUpload(error)) {
-      return false;
-    }
-    throw error;
-  }
-
-  options.onProgress?.(1);
-  return true;
+async function buildFileKey(file: File): Promise<string> {
+  const sha256 = await hashFile(file);
+  const ext = getFileExtension(file.name, "bin");
+  return `messages/files/${sha256}.${ext}`;
 }
 
-async function uploadAttachmentViaPresignedUrl(options: UploadAttachmentBlobOptions): Promise<void> {
-  const signedPut = await requestPresignedUrl({
-    action: "put",
-    key: options.key,
-    contentType: options.contentType,
-    fileSize: options.file.size,
-  });
-
-  await uploadWithRetry({
-    url: signedPut.url,
-    file: options.file,
-    contentType: options.contentType || "application/octet-stream",
-    retries: options.retries,
-    timeoutMs: options.timeoutMs,
-    signal: options.signal,
-    onProgress: options.onProgress
-      ? ({ ratio }) => {
-          options.onProgress?.(ratio);
-        }
-      : undefined,
-  });
-}
-
-async function uploadAttachmentViaEdge(options: UploadAttachmentBlobOptions): Promise<void> {
-  if (options.signal?.aborted) {
-    throw new DOMException("Upload aborted", "AbortError");
+function resolveUploadKindFromKey(
+  key: string,
+  file: File,
+): "message_image" | "message_image_preview" | "message_image_original" | "message_video" | "message_video_thumb" | "message_file" {
+  const normalized = String(key ?? "").trim().toLowerCase();
+  if (normalized.startsWith("messages/images/") && normalized.endsWith(".preview.webp")) {
+    return "message_image_preview";
+  }
+  if (normalized.startsWith("messages/images/")) {
+    return "message_image";
+  }
+  if (normalized.startsWith("messages/videos/") && normalized.endsWith(".thumb.webp")) {
+    return "message_video_thumb";
+  }
+  if (normalized.startsWith("messages/videos/")) {
+    return "message_video";
+  }
+  if (normalized.startsWith("messages/files/")) {
+    return file.type.startsWith("image/") ? "message_image_original" : "message_file";
   }
 
-  const headers = await getAuthenticatedEdgeHeaders({
-    "Content-Type": options.contentType || "application/octet-stream",
-    "x-media-key": options.key,
-  });
-
-  const response = await supabase.functions.invoke<UploadViaEdgeResponse>("r2-upload", {
-    body: options.file,
-    headers,
-  });
-
-  if (response.error) {
-    throw new Error(response.error.message || "Falha ao enviar anexo.");
-  }
-
-  if (!response.data?.key) {
-    throw new Error("Resposta invalida do upload.");
-  }
-
-  options.onProgress?.(1);
+  throw new Error("Chave de anexo invalida para upload.");
 }
 
 export async function uploadAttachmentBlob(options: UploadAttachmentBlobOptions): Promise<void> {
-  const normalizedOptions: UploadAttachmentBlobOptions = {
-    ...options,
-    contentType: options.contentType || "application/octet-stream",
-  };
-
-  if (await uploadAttachmentViaElectron(normalizedOptions)) {
-    return;
-  }
-
-  try {
-    await uploadAttachmentViaPresignedUrl(normalizedOptions);
-    return;
-  } catch (error) {
-    if (!shouldFallbackToEdgeUpload(error)) {
-      throw error;
-    }
-  }
-
-  await uploadAttachmentViaEdge(normalizedOptions);
-}
-
-export async function requestPresignedUrl(payload: PresignRequest): Promise<PresignResponse> {
-  return invokeEdgeJson<PresignRequest, PresignResponse>("r2-presign", payload, {
-    retries: 1,
-    timeoutMs: 18_000,
+  const uploadKind = resolveUploadKindFromKey(options.key, options.file);
+  const uploaded = await uploadMediaAsset({
+    kind: uploadKind,
+    file: options.file,
+    conversationId: options.conversationId,
+    onProgress: options.onProgress,
   });
+
+  if (uploaded.fileKey !== options.key) {
+    throw new Error("Chave de upload divergente da chave esperada.");
+  }
 }
 
 export async function prepareAttachmentUpload(file: File, conversationId: string): Promise<PreparedAttachment> {
@@ -360,18 +222,17 @@ export async function prepareAttachmentUpload(file: File, conversationId: string
     });
 
     const uploadFile = compressed.file;
-    const uploadExt = getFileExtension(uploadFile.name, "webp");
-    const fileKey = makeAttachmentKey(conversationId, uploadExt);
+    const fileKey = await buildImageKey(uploadFile);
 
     const thumbnail = await generateThumbnail(uploadFile, {
-      maxDimension: 480,
+      maxDimension: 512,
       mimeType: "image/webp",
-      quality: 0.8,
+      quality: 0.82,
     });
 
-    const thumbName = `${sanitizeFileName(uploadFile.name).replace(/\.[^.]+$/, "")}-thumb.webp`;
+    const thumbName = `${sanitizeFileName(uploadFile.name).replace(/\.[^.]+$/, "")}-preview.webp`;
     const thumbFile = fileFromBlob(thumbnail.blob, thumbName);
-    const thumbKey = makeAttachmentKey(conversationId, "webp");
+    const thumbKey = await buildImageKey(thumbFile, ".preview.webp");
 
     const output: PreparedAttachment = {
       kind,
@@ -381,15 +242,15 @@ export async function prepareAttachmentUpload(file: File, conversationId: string
       thumbKey,
       mimeType: uploadFile.type || "image/webp",
       fileSize: uploadFile.size,
-      width: compressed.width,
-      height: compressed.height,
-      thumbWidth: thumbnail.width,
-      thumbHeight: thumbnail.height,
+      width: normalizePositiveDimension(compressed.width),
+      height: normalizePositiveDimension(compressed.height),
+      thumbWidth: normalizePositiveDimension(thumbnail.width),
+      thumbHeight: normalizePositiveDimension(thumbnail.height),
     };
 
     if (keepOriginal && compressed.originalFile && compressed.originalFile !== uploadFile) {
       output.originalFile = compressed.originalFile;
-      output.originalKey = makeAttachmentKey(conversationId, getFileExtension(compressed.originalFile.name, ext));
+      output.originalKey = await buildFileKey(compressed.originalFile);
     }
 
     return output;
@@ -397,9 +258,9 @@ export async function prepareAttachmentUpload(file: File, conversationId: string
 
   if (kind === "video") {
     const thumb = await generateThumbnail(file, {
-      maxDimension: 480,
+      maxDimension: 512,
       mimeType: "image/webp",
-      quality: 0.8,
+      quality: 0.82,
       videoFrameTimeSec: 0.3,
     });
 
@@ -408,13 +269,13 @@ export async function prepareAttachmentUpload(file: File, conversationId: string
     return {
       kind,
       uploadFile: file,
-      fileKey: makeAttachmentKey(conversationId, getFileExtension(safeName, "mp4")),
+      fileKey: await buildVideoKey(file),
       thumbFile,
-      thumbKey: makeAttachmentKey(conversationId, "webp"),
+      thumbKey: `messages/videos/${await hashFile(thumbFile)}.thumb.webp`,
       mimeType: originalMime,
       fileSize: file.size,
-      thumbWidth: thumb.width,
-      thumbHeight: thumb.height,
+      thumbWidth: normalizePositiveDimension(thumb.width),
+      thumbHeight: normalizePositiveDimension(thumb.height),
       codec: originalMime,
     };
   }
@@ -422,7 +283,7 @@ export async function prepareAttachmentUpload(file: File, conversationId: string
   return {
     kind,
     uploadFile: file,
-    fileKey: makeAttachmentKey(conversationId, ext),
+    fileKey: await buildFileKey(file),
     mimeType: originalMime,
     fileSize: file.size,
   };

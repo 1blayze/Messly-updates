@@ -1,4 +1,5 @@
-import { createClient } from "@supabase/supabase-js";
+import { supabase, supabaseAnonKey } from "../lib/supabaseClient";
+import { authService } from "./auth";
 
 export interface UserRow {
   id: string;
@@ -9,60 +10,54 @@ export interface UserRow {
   banner_key: string | null;
   avatar_hash: string | null;
   banner_hash: string | null;
+  avatar_url: string | null;
   about: string | null;
   status: string | null;
   last_active: string | null;
-  firebase_uid: string;
   public_id: string | null;
+  banner_color: string | null;
+  profile_theme_primary_color: string | null;
+  profile_theme_accent_color: string | null;
+  spotify_connection: unknown | null;
   created_at: string;
+  updated_at?: string | null;
 }
 
-function getRequiredEnv(name: keyof ImportMetaEnv): string {
-  const value = import.meta.env[name];
-  if (!value) {
-    throw new Error(`Missing required environment variable: ${name}`);
-  }
-  return value;
+export { supabase };
+
+export function isDirectUsersRestBlocked(): boolean {
+  return false;
 }
 
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
-const supabasePublishableKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
-
-function getSupabaseClientKey(): string {
-  if (supabaseAnonKey) {
-    return supabaseAnonKey;
-  }
-
-  if (supabasePublishableKey) {
-    return supabasePublishableKey;
-  }
-
-  throw new Error("Missing Supabase key: set VITE_SUPABASE_ANON_KEY (recommended) or VITE_SUPABASE_PUBLISHABLE_KEY.");
+export interface SupabaseFunctionHeadersOptions {
+  requireAuth?: boolean;
 }
 
-const supabaseUrl = getRequiredEnv("VITE_SUPABASE_URL");
-const supabaseClientKey = getSupabaseClientKey();
-
-if (!supabaseAnonKey && supabasePublishableKey && import.meta.env.DEV) {
-  console.warn(
-    "VITE_SUPABASE_ANON_KEY nao configurado. Funcoes Edge podem retornar 401. Defina a anon key no .env/.hosting.",
-  );
-}
-
-export function getSupabaseFunctionHeaders(): Record<string, string> | undefined {
-  const functionKey = supabaseAnonKey || supabasePublishableKey;
-  if (!functionKey) {
+export async function getSupabaseFunctionHeaders(
+  options: SupabaseFunctionHeadersOptions = {},
+): Promise<Record<string, string> | undefined> {
+  if (!supabaseAnonKey) {
     return undefined;
   }
 
+  if (options.requireAuth) {
+    const validatedAccessToken = String(await authService.getValidatedEdgeAccessToken() ?? "").trim();
+    if (!validatedAccessToken) {
+      return {
+        apikey: supabaseAnonKey,
+      };
+    }
+
+    return {
+      apikey: supabaseAnonKey,
+      authorization: `Bearer ${validatedAccessToken}`,
+    };
+  }
+
+  const currentAccessToken = String(await authService.getCurrentAccessToken() ?? "").trim();
+
   return {
-    apikey: functionKey,
+    apikey: supabaseAnonKey,
+    ...(currentAccessToken ? { authorization: `Bearer ${currentAccessToken}` } : {}),
   };
 }
-
-export const supabase = createClient(supabaseUrl, supabaseClientKey, {
-  auth: {
-    persistSession: false,
-    autoRefreshToken: false,
-  },
-});

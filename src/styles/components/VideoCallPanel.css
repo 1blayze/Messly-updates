@@ -5,7 +5,7 @@
   z-index: 70;
   pointer-events: none;
   background: #000;
-  border-top: 0;
+  border-top: 1px solid var(--border-subtle);
 }
 
 .video-call-wrapper.is-screen-share-mode {
@@ -22,7 +22,10 @@
   position: relative;
   border-radius: 0;
   overflow: hidden;
-  border: 0;
+  border-top: 1px solid var(--border-subtle);
+  border-left: 0;
+  border-right: 0;
+  border-bottom: 0;
   background: #000;
   box-shadow: none;
 }
@@ -203,7 +206,7 @@
   color: #eef4ff;
   border: 1px solid rgba(255, 255, 255, 0.18);
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 600;
   line-height: 1.2;
 }
 
@@ -666,7 +669,7 @@
   border-radius: 999px;
   background: var(--call-card-chip, rgba(8, 12, 20, 0.82));
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .video-call-transmission-user-name > span:last-child {
@@ -828,7 +831,7 @@
   gap: 6px;
   color: #f7fbff;
   font-size: 13px;
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .video-call-source-title-icon {
@@ -859,7 +862,7 @@
   border: 1px solid rgba(255, 255, 255, 0.14);
   color: #f0f5ff;
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 600;
   letter-spacing: 0.02em;
 }
 
@@ -1070,7 +1073,7 @@
   margin: 0;
   color: #f7fbff;
   font-size: 14px;
-  font-weight: 700;
+  font-weight: 600;
   text-shadow: 0 1px 0 rgba(0, 0, 0, 0.28);
 }
 
@@ -1150,7 +1153,7 @@
   border: 1px solid rgba(255, 209, 124, 0.52);
   color: rgba(255, 226, 165, 0.98);
   font-size: 9px;
-  font-weight: 700;
+  font-weight: 600;
   line-height: 1.1;
   white-space: nowrap;
   overflow: hidden;
@@ -1309,34 +1312,6 @@
   background: rgba(92, 100, 114, 0.9);
   transform: translateY(-1px);
   outline: none;
-}
-
-.video-call-participants-toggle::after {
-  content: attr(data-tooltip);
-  position: absolute;
-  left: 50%;
-  bottom: calc(100% + 8px);
-  transform: translate(-50%, 4px);
-  opacity: 0;
-  pointer-events: none;
-  white-space: nowrap;
-  padding: 6px 10px;
-  border-radius: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  background: rgba(13, 18, 27, 0.96);
-  color: #f3f7ff;
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 1.1;
-  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.38);
-  transition: opacity 120ms ease, transform 120ms ease;
-  z-index: 20;
-}
-
-.video-call-participants-toggle:hover::after,
-.video-call-participants-toggle:focus-visible::after {
-  opacity: 1;
-  transform: translate(-50%, 0);
 }
 
 .video-call-participants-toggle--screen-share {
@@ -1714,7 +1689,10 @@
   border-radius: 12px;
   overflow: hidden;
   background: rgba(6, 9, 14, 0.92);
-  border: 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.14);
+  border-left: 0;
+  border-right: 0;
+  border-bottom: 0;
   box-shadow: 0 10px 22px rgba(0, 0, 0, 0.2);
 }
 
@@ -1859,7 +1837,7 @@
   background: rgba(6, 9, 14, 0.72);
   color: #f4f8ff;
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 600;
   line-height: 1.2;
 }
 
@@ -1878,7 +1856,7 @@
   border-left: 1px solid rgba(255, 255, 255, 0.14);
   color: rgba(242, 247, 255, 0.92);
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 600;
   flex-shrink: 0;
 }
 
@@ -1925,7 +1903,7 @@
   box-shadow: 0 10px 24px rgba(0, 0, 0, 0.2);
   color: #f3f7ff;
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 600;
   line-height: 1.2;
 }
 
@@ -1952,7 +1930,7 @@
   border: 1px solid rgba(255, 255, 255, 0.1);
   color: rgba(247, 251, 255, 0.96);
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 600;
   line-height: 1;
   white-space: nowrap;
   letter-spacing: 0.02em;
@@ -2127,19 +2105,28 @@
   height: auto;
   aspect-ratio: 16 / 9;
   border-radius: 12px;
-  border: 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.14);
+  border-left: 0;
+  border-right: 0;
+  border-bottom: 0;
   box-shadow: 0 10px 22px rgba(0, 0, 0, 0.2);
 }
 
 .video-call-screen-tile--grid:hover,
 .video-call-screen-tile--grid:focus-visible {
-  border-color: transparent;
+  border-top-color: rgba(255, 255, 255, 0.18);
+  border-left-color: transparent;
+  border-right-color: transparent;
+  border-bottom-color: transparent;
   box-shadow: 0 14px 26px rgba(0, 0, 0, 0.26);
 }
 
 .video-call-screen-tile--grid.is-presenter,
 .video-call-screen-tile--grid.is-stage-focused {
-  border-color: transparent;
+  border-top-color: rgba(255, 255, 255, 0.2);
+  border-left-color: transparent;
+  border-right-color: transparent;
+  border-bottom-color: transparent;
 }
 
 .video-call-screen-tile:hover,
@@ -2197,7 +2184,7 @@
   background: rgba(0, 0, 0, 0.55);
   color: #f6faff;
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 600;
   line-height: 1.1;
 }
 
@@ -2211,7 +2198,7 @@
   background: rgba(0, 0, 0, 0.6);
   color: rgba(246, 250, 255, 0.96);
   font-size: 10px;
-  font-weight: 700;
+  font-weight: 600;
   line-height: 1;
   letter-spacing: 0.02em;
 }
@@ -2279,7 +2266,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .video-call-screen-tile__icons {

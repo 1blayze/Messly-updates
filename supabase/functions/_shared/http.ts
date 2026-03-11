@@ -1,6 +1,5 @@
-const ALLOWED_HEADERS =
-  "authorization, x-client-info, apikey, content-type, x-media-key, x-requested-with, x-firebase-authorization";
-const ALLOWED_METHODS = "POST, OPTIONS";
+/// <reference path="./edge-runtime.d.ts" />
+import { getCorsHeaders as resolveCorsHeaders } from "./cors.ts";
 
 export interface RequestContext {
   requestId: string;
@@ -33,35 +32,23 @@ export class HttpError extends Error {
   }
 }
 
-function parseAllowedOrigins(): string[] {
-  const raw = Deno.env.get("CORS_ALLOWED_ORIGINS") ?? "*";
-  return raw
-    .split(",")
-    .map((part) => part.trim())
-    .filter(Boolean);
-}
-
-function resolveOrigin(request: Request, allowedOrigins: string[]): string {
-  if (allowedOrigins.length === 0 || allowedOrigins.includes("*")) {
-    return "*";
+function sanitizeRequestId(valueRaw: string | null): string | null {
+  const value = String(valueRaw ?? "")
+    .trim()
+    .slice(0, 128);
+  if (!value) {
+    return null;
   }
 
-  const requestOrigin = request.headers.get("origin")?.trim();
-  if (!requestOrigin) {
-    return allowedOrigins[0] ?? "*";
+  if (!/^[a-zA-Z0-9._:-]+$/.test(value)) {
+    return null;
   }
 
-  return allowedOrigins.includes(requestOrigin) ? requestOrigin : allowedOrigins[0] ?? "*";
+  return value;
 }
 
 export function getCorsHeaders(request: Request): Headers {
-  const allowedOrigins = parseAllowedOrigins();
-  const headers = new Headers();
-  headers.set("access-control-allow-origin", resolveOrigin(request, allowedOrigins));
-  headers.set("access-control-allow-headers", ALLOWED_HEADERS);
-  headers.set("access-control-allow-methods", ALLOWED_METHODS);
-  headers.set("vary", "origin");
-  return headers;
+  return resolveCorsHeaders(request);
 }
 
 export function responseJson(request: Request, payload: unknown, status = 200, extraHeaders?: HeadersInit): Response {
@@ -133,9 +120,15 @@ export function isOptionsRequest(request: Request): boolean {
   return request.method.toUpperCase() === "OPTIONS";
 }
 
-export function createRequestContext(route: string): RequestContext {
+export function createRequestContext(route: string, request?: Request): RequestContext {
+  const requestId = request
+    ? sanitizeRequestId(request.headers.get("sb-request-id")) ??
+      sanitizeRequestId(request.headers.get("x-request-id")) ??
+      crypto.randomUUID()
+    : crypto.randomUUID();
+
   return {
-    requestId: crypto.randomUUID(),
+    requestId,
     route,
     startedAt: Date.now(),
   };
@@ -177,15 +170,36 @@ export function logStructured(
   console.log(encoded);
 }
 
-export async function parseJsonBody<T>(request: Request): Promise<T> {
+export async function parseJsonBody<T>(request: Request, maxBytes = 1_000_000): Promise<T> {
+  if (!Number.isFinite(maxBytes) || maxBytes <= 0) {
+    throw new HttpError(500, "SERVER_CONFIG_ERROR", "Limite de body invalido.");
+  }
+
+  const contentLengthHeader = request.headers.get("content-length");
+  if (contentLengthHeader) {
+    const contentLength = Number(contentLengthHeader);
+    if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+      throw new HttpError(413, "PAYLOAD_TOO_LARGE", "Body excede o limite permitido.");
+    }
+  }
+
   try {
-    return (await request.json()) as T;
-  } catch {
+    const rawBody = await request.text();
+    const bodySize = new TextEncoder().encode(rawBody).byteLength;
+    if (bodySize > maxBytes) {
+      throw new HttpError(413, "PAYLOAD_TOO_LARGE", "Body excede o limite permitido.");
+    }
+
+    return JSON.parse(rawBody) as T;
+  } catch (error) {
+    if (error instanceof HttpError) {
+      throw error;
+    }
     throw new HttpError(400, "INVALID_JSON", "Corpo JSON invalido.");
   }
 }
 
-export function assertMethod(request: Request, method: "POST"): void {
+export function assertMethod(request: Request, method: "GET" | "POST"): void {
   if (request.method.toUpperCase() !== method) {
     throw new HttpError(405, "METHOD_NOT_ALLOWED", `Metodo ${request.method} nao permitido.`);
   }

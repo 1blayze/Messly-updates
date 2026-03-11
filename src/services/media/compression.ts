@@ -95,7 +95,7 @@ async function loadImage(file: Blob): Promise<{ image: HTMLImageElement; width: 
 
     image.onerror = () => {
       URL.revokeObjectURL(objectUrl);
-      reject(new Error("Nao foi possivel carregar a imagem."));
+      reject(new Error("Não foi possível carregar a imagem."));
     };
 
     image.src = objectUrl;
@@ -181,7 +181,7 @@ export async function compressImage(file: File, options: CompressImageOptions = 
 
   const context = canvas.getContext("2d");
   if (!context) {
-    throw new Error("Falha ao inicializar canvas para compressao.");
+    throw new Error("Falha ao inicializar o canvas para compressão.");
   }
 
   context.imageSmoothingEnabled = true;
@@ -235,7 +235,7 @@ async function loadVideoFrame(file: Blob, timeSec: number): Promise<{ canvas: HT
       const context = canvas.getContext("2d");
       if (!context) {
         cleanup();
-        reject(new Error("Nao foi possivel capturar frame do video."));
+        reject(new Error("Não foi possível capturar o frame do vídeo."));
         return;
       }
 
@@ -246,7 +246,7 @@ async function loadVideoFrame(file: Blob, timeSec: number): Promise<{ canvas: HT
 
     video.onerror = () => {
       cleanup();
-      reject(new Error("Nao foi possivel gerar thumbnail de video."));
+      reject(new Error("Não foi possível gerar a miniatura do vídeo."));
     };
 
     video.src = objectUrl;
@@ -270,7 +270,7 @@ export async function generateThumbnail(file: File | Blob, options: ThumbnailOpt
 
     const context = canvas.getContext("2d");
     if (!context) {
-      throw new Error("Falha ao preparar thumbnail do video.");
+      throw new Error("Falha ao preparar a miniatura do vídeo.");
     }
 
     context.imageSmoothingEnabled = true;
@@ -295,7 +295,7 @@ export async function generateThumbnail(file: File | Blob, options: ThumbnailOpt
 
   const context = canvas.getContext("2d");
   if (!context) {
-    throw new Error("Falha ao preparar thumbnail da imagem.");
+    throw new Error("Falha ao preparar a miniatura da imagem.");
   }
 
   context.imageSmoothingEnabled = true;
