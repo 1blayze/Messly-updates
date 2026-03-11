@@ -2,7 +2,7 @@
   "name": "messly",
   "private": true,
   "productName": "Messly",
-  "version": "0.0.8",
+  "version": "0.0.9",
   "description": "Messly desktop app for chat, media sharing and calls.",
   "author": "Marco",
   "type": "module",

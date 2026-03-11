@@ -1806,6 +1806,12 @@ function buildStartupSnapshot() {
     hiddenConversationCount += normalizeHiddenDirectMessageConversationIds(conversationIds).length;
   }
 
+  const defaultPublicApiBaseUrl = "https://messly.site";
+  const defaultPublicGatewayUrl = "wss://messly.site/gateway";
+  const configuredGatewayUrl = String(process.env.VITE_MESSLY_GATEWAY_URL ?? "").trim();
+  const configuredAuthApiUrl = String(process.env.VITE_MESSLY_AUTH_API_URL ?? "").trim();
+  const configuredAppApiUrl = String(process.env.VITE_MESSLY_API_URL ?? "").trim();
+
   return {
     generatedAt: new Date().toISOString(),
     appVersion: String(app.getVersion?.() ?? "0.0.0"),
@@ -1814,9 +1820,9 @@ function buildStartupSnapshot() {
     windowsSettings: { ...loadWindowsBehaviorSettings() },
     apiConfig: {
       supabaseUrl: String(process.env.VITE_SUPABASE_URL ?? process.env.SUPABASE_URL ?? "").trim() || null,
-      gatewayUrl: String(process.env.VITE_MESSLY_GATEWAY_URL ?? "").trim() || null,
-      authApiUrl: String(process.env.VITE_MESSLY_AUTH_API_URL ?? "").trim() || null,
-      appApiUrl: String(process.env.VITE_MESSLY_API_URL ?? "").trim() || null,
+      gatewayUrl: configuredGatewayUrl || defaultPublicGatewayUrl,
+      authApiUrl: configuredAuthApiUrl || configuredAppApiUrl || defaultPublicApiBaseUrl,
+      appApiUrl: configuredAppApiUrl || defaultPublicApiBaseUrl,
     },
     cacheHints: {
       hiddenScopeCount: Object.keys(scopeMap).length,

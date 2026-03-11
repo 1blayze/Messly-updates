@@ -251,8 +251,32 @@ function shouldFallbackToDirectSupabaseLogin(error: unknown): boolean {
   return true;
 }
 
+function isDesktopRuntime(): boolean {
+  return typeof window !== "undefined" && Boolean(window.electronAPI);
+}
+
+function isInstalledDesktopRuntime(): boolean {
+  if (!isDesktopRuntime()) {
+    return false;
+  }
+  const protocol = String(window.location?.protocol ?? "").trim().toLowerCase();
+  return protocol === "file:";
+}
+
+function shouldFallbackToDirectSupabaseSignup(error: unknown): boolean {
+  if (isInstalledDesktopRuntime()) {
+    return false;
+  }
+  return shouldFallbackToDirectSupabaseLogin(error);
+}
+
 function shouldPreferDirectSupabaseLogin(): boolean {
-  if (typeof window === "undefined" || !window.electronAPI) {
+  if (!isDesktopRuntime()) {
+    return false;
+  }
+
+  // Installed desktop must use API-based auth flow (Turnstile + verification code).
+  if (isInstalledDesktopRuntime()) {
     return false;
   }
 
@@ -262,6 +286,9 @@ function shouldPreferDirectSupabaseLogin(): boolean {
 }
 
 function shouldPreferDirectSupabaseSignup(): boolean {
+  if (isInstalledDesktopRuntime()) {
+    return false;
+  }
   return shouldPreferDirectSupabaseLogin();
 }
 
@@ -438,7 +465,7 @@ class AuthService {
         client: resolveClientDescriptor(),
       });
     } catch (error) {
-      if (!shouldFallbackToDirectSupabaseLogin(error)) {
+      if (!shouldFallbackToDirectSupabaseSignup(error)) {
         throw error;
       }
       await signUpWithDirectSupabase(input);
