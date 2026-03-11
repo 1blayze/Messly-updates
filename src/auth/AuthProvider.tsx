@@ -69,6 +69,7 @@ interface AuthContextValue {
   isLoading: boolean;
   loading: boolean;
   authReady: boolean;
+  requiresSignupSecurityVerification: boolean;
   hasSessionHint: boolean;
   sessionHintResolved: boolean;
   error: string | null;
@@ -102,6 +103,7 @@ const FALLBACK_AUTH_CONTEXT: AuthContextValue = {
   isLoading: false,
   loading: false,
   authReady: false,
+  requiresSignupSecurityVerification: true,
   hasSessionHint: false,
   sessionHintResolved: true,
   error: null,
@@ -216,6 +218,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [sessionHintResolved, setSessionHintResolved] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [storedKnownAccounts, setStoredKnownAccounts] = useState<StoredKnownAccount[]>(() => readKnownAccounts());
+  const requiresSignupSecurityVerification = authService.requiresSignupSecurityVerification();
   const subscriptionRef = useRef<ReturnType<typeof supabase.auth.onAuthStateChange>["data"]["subscription"] | null>(null);
   const lastSessionAccessTokenRef = useRef<string | null>(null);
 
@@ -523,23 +526,49 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       const turnstileToken = String(securityInput?.turnstileToken ?? "").trim();
       const registrationFingerprint = String(securityInput?.registrationFingerprint ?? "").trim();
-      if (!turnstileToken) {
-        throw new Error("Verificacao de seguranca obrigatoria.");
-      }
-      if (!registrationFingerprint) {
-        throw new Error("Nao foi possivel validar este dispositivo.");
+      if (requiresSignupSecurityVerification) {
+        if (!turnstileToken) {
+          throw new Error("Verificacao de seguranca obrigatoria.");
+        }
+        if (!registrationFingerprint) {
+          throw new Error("Nao foi possivel validar este dispositivo.");
+        }
       }
 
       await authService.signup({
         email: normalizedUserEmail,
         password: normalizedPassword,
-        turnstileToken,
-        registrationFingerprint,
+        turnstileToken: turnstileToken || "desktop-direct-signup",
+        registrationFingerprint: registrationFingerprint || `desktop:${Date.now()}`,
         profile: {
           displayName,
           username,
         },
       });
+
+      const nextSession = await authService.getCurrentSession();
+      const signedUser = mapSupabaseUser(nextSession?.user ?? null);
+      if (nextSession && signedUser) {
+        await applySessionAndProfile(nextSession, {
+          preferredUsername: username,
+          displayName,
+        });
+        const ensuredProfile = await fetchProfileById(signedUser.uid);
+        syncKnownAccount(signedUser);
+        setHasSessionHint(true);
+        setSessionHintResolved(true);
+        setError(null);
+        dispatch(authActions.authErrorChanged(null));
+        return {
+          user: signedUser,
+          profile: ensuredProfile,
+          needsEmailConfirmation: false,
+        };
+      }
+
+      if (!requiresSignupSecurityVerification) {
+        throw new Error("Cadastro criado. Confirme seu e-mail pelo link recebido e depois faça login.");
+      }
 
       setError(null);
       dispatch(authActions.authErrorChanged(null));
@@ -551,7 +580,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         needsEmailConfirmation: true,
       };
     },
-    [dispatch],
+    [applySessionAndProfile, dispatch, requiresSignupSecurityVerification, syncKnownAccount],
   );
 
   const verifyEmailCode = useCallback(
@@ -723,6 +752,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       isLoading,
       loading: isLoading,
       authReady,
+      requiresSignupSecurityVerification,
       hasSessionHint,
       sessionHintResolved,
       error,
@@ -747,6 +777,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       profile,
       isLoading,
       authReady,
+      requiresSignupSecurityVerification,
       hasSessionHint,
       sessionHintResolved,
       error,

@@ -121,30 +121,17 @@ function isNoPublishedUpdateErrorMessage(rawMessage: string | null | undefined):
   );
 }
 
-function shouldSilenceUpdaterState(state: AppUpdaterState | null): boolean {
-  if (!state) {
-    return false;
-  }
-  if (state.status === "unavailable") {
-    return true;
-  }
-  return state.status === "error" && isNoPublishedUpdateErrorMessage(state.errorMessage);
-}
-
 function shouldShowUpdaterButton(state: AppUpdaterState | null, isPanelOpen: boolean): boolean {
   if (typeof window === "undefined" || !window.electronAPI?.updaterGetState) {
-    return false;
-  }
-  if (!state) {
-    return false;
-  }
-  if (shouldSilenceUpdaterState(state)) {
     return false;
   }
   if (isPanelOpen) {
     return true;
   }
-  return ["checking", "available", "downloading", "downloaded", "error"].includes(state.status);
+  if (!state) {
+    return true;
+  }
+  return state.status !== "disabled" || Boolean(state.errorMessage);
 }
 
 function logUpdaterConsoleError(context: string, error: unknown): void {
@@ -230,13 +217,6 @@ export default function TopBar({ section = "friends", isCallActive = false, onPr
     return () => window.removeEventListener("mousedown", handlePointerDown);
   }, [isUpdaterPanelOpen]);
 
-  useEffect(() => {
-    if (!shouldSilenceUpdaterState(updaterState)) {
-      return;
-    }
-    setIsUpdaterPanelOpen(false);
-  }, [updaterState]);
-
   const handleCheckUpdates = useCallback(async (): Promise<void> => {
     const api = window.electronAPI;
     if (!api?.updaterCheck) {
@@ -315,7 +295,7 @@ export default function TopBar({ section = "friends", isCallActive = false, onPr
 
   const updaterBodyText = useMemo(() => {
     if (!updaterState) {
-      return "";
+      return "Clique em Verificar para buscar atualizações.";
     }
     if (updaterState.status === "available") {
       return updaterState.latestVersion
@@ -424,6 +404,7 @@ export default function TopBar({ section = "friends", isCallActive = false, onPr
                 </div>
 
                 {updaterBodyText ? <p className="app-top-bar__updater-body">{updaterBodyText}</p> : null}
+                {localActionError ? <p className="app-top-bar__updater-error">{localActionError}</p> : null}
 
                 {updaterState?.status === "downloading" ? (
                   <div className="app-top-bar__progress">

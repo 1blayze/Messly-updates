@@ -233,7 +233,7 @@ function createElectronUpdaterAdapter({ app }) {
     }
     setImmediate(() => {
       try {
-        autoUpdater.quitAndInstall(false, true);
+        autoUpdater.quitAndInstall(true, true);
       } catch {}
     });
     return {

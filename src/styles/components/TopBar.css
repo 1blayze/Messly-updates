@@ -100,21 +100,7 @@
 
 .app-top-bar__updater::before,
 .app-top-bar__updater::after {
-  content: "";
-  position: absolute;
-  top: 8px;
-  bottom: 8px;
-  width: 1px;
-  background: rgba(255, 255, 255, 0.08);
-  pointer-events: none;
-}
-
-.app-top-bar__updater::before {
-  left: 0;
-}
-
-.app-top-bar__updater::after {
-  right: 0;
+  content: none;
 }
 
 .app-top-bar__icon-btn {
@@ -192,7 +178,7 @@
 }
 
 .app-top-bar__icon-btn--updater:focus-visible {
-  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.14);
+  box-shadow: inset 0 -2px 0 rgba(255, 255, 255, 0.2);
 }
 
 .app-top-bar__icon-btn--updater-available,

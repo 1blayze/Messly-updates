@@ -385,7 +385,7 @@ function createAppUpdater(options) {
 
     const targetPath = downloadPath;
     if (platform === "win32") {
-      const child = spawn(targetPath, [], {
+      const child = spawn(targetPath, ["/S"], {
         detached: true,
         stdio: "ignore",
       });

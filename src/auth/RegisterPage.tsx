@@ -183,8 +183,9 @@ function BirthSelect({
 
 export default function RegisterPage() {
   const navigate = useNavigate();
-  const { signUp, verifyEmailCode, resendVerificationCode } = useAuthSession();
+  const { signUp, verifyEmailCode, resendVerificationCode, requiresSignupSecurityVerification } = useAuthSession();
   const turnstileSiteKey = String(import.meta.env.VITE_TURNSTILE_SITE_KEY ?? "").trim();
+  const shouldRenderCaptcha = Boolean(turnstileSiteKey);
   const currentYear = new Date().getFullYear();
   const birthGridRef = useRef<HTMLDivElement | null>(null);
   const usernameCheckRef = useRef<number | null>(null);
@@ -359,20 +360,20 @@ export default function RegisterPage() {
       return;
     }
 
-    if (!turnstileSiteKey) {
+    if (requiresSignupSecurityVerification && !turnstileSiteKey) {
       setFormMessageTone("error");
       setFormMessage("Nao foi possivel iniciar a verificacao de seguranca. Tente novamente em instantes.");
       return;
     }
 
-    if (!turnstileToken) {
+    if (requiresSignupSecurityVerification && !turnstileToken) {
       setVerificationState("error");
       setCaptchaError("Conclua a verificacao de seguranca antes de continuar.");
       turnstileRef.current?.reset();
       return;
     }
 
-    if (!registrationFingerprint) {
+    if (requiresSignupSecurityVerification && !registrationFingerprint) {
       setFormMessageTone("error");
       setFormMessage("Nao foi possivel validar este dispositivo. Recarregue a tela e tente novamente.");
       return;
@@ -429,15 +430,20 @@ export default function RegisterPage() {
       }
 
       const errorCode = resolveAuthApiErrorCode(error);
-      if (CAPTCHA_RESET_ERROR_CODES.has(errorCode)) {
+      if (requiresSignupSecurityVerification && CAPTCHA_RESET_ERROR_CODES.has(errorCode)) {
         setTurnstileToken("");
         setVerificationState(errorCode === "CAPTCHA_EXPIRED" ? "expired" : "error");
         setCaptchaError("A verificacao de seguranca expirou ou falhou. Confirme novamente.");
         turnstileRef.current?.reset();
       }
-
-      setFormMessageTone("error");
-      setFormMessage(toFriendlySupabaseAuthError(error));
+      const friendly = toFriendlySupabaseAuthError(error);
+      if (friendly.toLowerCase().startsWith("cadastro criado.")) {
+        setFormMessageTone("success");
+        setFormMessage(friendly);
+      } else {
+        setFormMessageTone("error");
+        setFormMessage(friendly);
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -700,37 +706,53 @@ export default function RegisterPage() {
               ) : null}
             </div>
 
-            <div className="auth-field auth-field--captcha">
-              <TurnstileWidget
-                ref={turnstileRef}
-                className="auth-turnstile"
-                siteKey={turnstileSiteKey}
-                onVerify={(token) => {
-                  setTurnstileToken(token);
-                  setVerificationState("verified");
-                  setCaptchaError(null);
-                }}
-                onError={() => {
-                  setTurnstileToken("");
-                  setVerificationState("error");
-                  setCaptchaError("A verificacao de seguranca falhou. Tente novamente.");
-                }}
-                onExpire={() => {
-                  setTurnstileToken("");
-                  setVerificationState("expired");
-                  setCaptchaError("A verificacao expirou. Confirme novamente para continuar.");
-                  turnstileRef.current?.reset();
-                }}
-                onTimeout={() => {
-                  setTurnstileToken("");
-                  setVerificationState("timeout");
-                  setCaptchaError("Tempo esgotado na verificacao. Tente novamente.");
-                  turnstileRef.current?.reset();
-                }}
-              />
-              {!registrationFingerprint ? <p className="auth-note">Preparando verificacao do dispositivo...</p> : null}
-              {captchaError ? <p className="auth-feedback auth-feedback--error">{captchaError}</p> : null}
-            </div>
+            {shouldRenderCaptcha ? (
+              <div className="auth-field auth-field--captcha">
+                <TurnstileWidget
+                  ref={turnstileRef}
+                  className="auth-turnstile"
+                  siteKey={turnstileSiteKey}
+                  showErrors={requiresSignupSecurityVerification}
+                  onVerify={(token) => {
+                    setTurnstileToken(token);
+                    setVerificationState("verified");
+                    if (requiresSignupSecurityVerification) {
+                      setCaptchaError(null);
+                    }
+                  }}
+                  onError={() => {
+                    setTurnstileToken("");
+                    if (requiresSignupSecurityVerification) {
+                      setVerificationState("error");
+                      setCaptchaError("A verificacao de seguranca falhou. Tente novamente.");
+                    }
+                  }}
+                  onExpire={() => {
+                    setTurnstileToken("");
+                    if (requiresSignupSecurityVerification) {
+                      setVerificationState("expired");
+                      setCaptchaError("A verificacao expirou. Confirme novamente para continuar.");
+                      turnstileRef.current?.reset();
+                    }
+                  }}
+                  onTimeout={() => {
+                    setTurnstileToken("");
+                    if (requiresSignupSecurityVerification) {
+                      setVerificationState("timeout");
+                      setCaptchaError("Tempo esgotado na verificacao. Tente novamente.");
+                      turnstileRef.current?.reset();
+                    }
+                  }}
+                />
+                {!registrationFingerprint && requiresSignupSecurityVerification ? (
+                  <p className="auth-note">Preparando verificacao do dispositivo...</p>
+                ) : null}
+                {!requiresSignupSecurityVerification ? (
+                  <p className="auth-note">Verificacao de seguranca opcional no aplicativo instalado.</p>
+                ) : null}
+                {captchaError ? <p className="auth-feedback auth-feedback--error">{captchaError}</p> : null}
+              </div>
+            ) : null}
 
             {formMessage ? (
               <p

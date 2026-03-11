@@ -261,6 +261,10 @@ function shouldPreferDirectSupabaseLogin(): boolean {
   return !explicitAuthApiUrl && !explicitAppApiUrl && !getRuntimeAuthApiUrl() && !getRuntimeAppApiUrl();
 }
 
+function shouldPreferDirectSupabaseSignup(): boolean {
+  return shouldPreferDirectSupabaseLogin();
+}
+
 async function applyRemoteSession(accessToken: string, refreshToken: string): Promise<Session> {
   const sessionResult = await supabase.auth.setSession({
     access_token: accessToken,
@@ -287,6 +291,37 @@ async function signInWithDirectSupabase(email: string, password: string): Promis
   const session = signInResult.data.session;
   await persistSessionState(session, session.refresh_token ?? null);
   return session;
+}
+
+async function signUpWithDirectSupabase(input: SignupInput): Promise<Session | null> {
+  const metadata: Record<string, string> = {};
+  const displayName = String(input.profile?.displayName ?? "").trim();
+  const username = String(input.profile?.username ?? "").trim();
+  if (displayName) {
+    metadata.display_name = displayName;
+  }
+  if (username) {
+    metadata.username = username;
+  }
+
+  const signUpResult = await supabase.auth.signUp({
+    email: input.email,
+    password: input.password,
+    options: {
+      data: metadata,
+    },
+  });
+
+  if (signUpResult.error) {
+    throw signUpResult.error;
+  }
+
+  if (signUpResult.data.session) {
+    const session = signUpResult.data.session;
+    await persistSessionState(session, session.refresh_token ?? null);
+    return session;
+  }
+  return null;
 }
 
 async function refreshSessionWithStoredToken(refreshTokenRaw?: string | null): Promise<Session | null> {
@@ -328,6 +363,10 @@ async function refreshSessionWithStoredToken(refreshTokenRaw?: string | null): P
 ensureAuthStateSync();
 
 class AuthService {
+  requiresSignupSecurityVerification(): boolean {
+    return !shouldPreferDirectSupabaseSignup();
+  }
+
   private canReuseValidatedEdgeAccessToken(accessTokenRaw: string | null | undefined): boolean {
     const accessToken = String(accessTokenRaw ?? "").trim();
     if (!accessToken || !lastValidatedEdgeAccessToken) {
@@ -377,14 +416,40 @@ class AuthService {
   }
 
   async signup(input: SignupInput): Promise<PendingVerificationState> {
-    const response = await signupRequest({
-      email: input.email,
-      password: input.password,
-      turnstileToken: input.turnstileToken,
-      registrationFingerprint: input.registrationFingerprint,
-      profile: input.profile,
-      client: resolveClientDescriptor(),
-    });
+    if (shouldPreferDirectSupabaseSignup()) {
+      await signUpWithDirectSupabase(input);
+      await setPendingVerificationState(null);
+      return {
+        email: input.email,
+        expiresAt: null,
+        maxAttempts: null,
+        createdAt: Date.now(),
+      };
+    }
+
+    let response;
+    try {
+      response = await signupRequest({
+        email: input.email,
+        password: input.password,
+        turnstileToken: input.turnstileToken,
+        registrationFingerprint: input.registrationFingerprint,
+        profile: input.profile,
+        client: resolveClientDescriptor(),
+      });
+    } catch (error) {
+      if (!shouldFallbackToDirectSupabaseLogin(error)) {
+        throw error;
+      }
+      await signUpWithDirectSupabase(input);
+      await setPendingVerificationState(null);
+      return {
+        email: input.email,
+        expiresAt: null,
+        maxAttempts: null,
+        createdAt: Date.now(),
+      };
+    }
 
     const state: PendingVerificationState = {
       email: response.email,
@@ -455,7 +520,7 @@ class AuthService {
     const currentSession = getInMemorySession() ?? (await this.getCurrentSession());
     const accessToken = String(currentSession?.access_token ?? "").trim();
 
-    if (accessToken) {
+    if (accessToken && !shouldPreferDirectSupabaseLogin()) {
       try {
         await logoutRequest(accessToken);
       } catch {

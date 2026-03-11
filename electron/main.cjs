@@ -1,4 +1,4 @@
-const fs = require("node:fs");
+﻿const fs = require("node:fs");
 const path = require("node:path");
 const dotenv = require("dotenv");
 
@@ -177,6 +177,8 @@ let spotifyPresenceService = null;
 let embeddedDevToolsHostViewRef = null;
 let notificationIconImageCache = undefined;
 let startupAutoUpdatePromise = null;
+let updaterAutoInstallInFlight = false;
+let windowsHiddenForUpdateFlow = false;
 let windowsFirewallBootstrapPromise = null;
 const ephemeralSecureAuthStorage = new Map();
 const hardenedWebContents = new WeakSet();
@@ -637,13 +639,13 @@ function buildStatusPanelHtml(payload) {
       text-align: center;
     }
 
-    /* ✅ IMAGEM SEM CORTE E SEM ARREDONDAR */
+    /* Imagem sem corte e sem arredondamento */
     .avatar {
       width: 90px;
       height: 90px;
 
-      border-radius: 0;        /* 🔥 remove círculo */
-      object-fit: contain;     /* 🔥 mostra a imagem inteira */
+      border-radius: 0;        /* remove círculo */
+      object-fit: contain;     /* mostra a imagem inteira */
       display: block;
 
       background: transparent;
@@ -965,16 +967,16 @@ function showStatusPanel(payload, mode = "generic") {
     safePayload.showProgress = true;
   } else if (normalizedMode === "update-check") {
     if (!safePayload.title) {
-      safePayload.title = "Checando atualizacoes";
+      safePayload.title = "Verificando atualização";
     }
     if (!safePayload.subtitle) {
-      safePayload.subtitle = "Buscando nova versao...";
+      safePayload.subtitle = "Buscando nova versão...";
     }
     if (!safePayload.detail) {
-      safePayload.detail = `Versao atual v${String(app.getVersion?.() ?? "0.0.0")}`;
+      safePayload.detail = `Versão atual v${String(app.getVersion?.() ?? "0.0.0")}`;
     }
     if (!safePayload.progressText) {
-      safePayload.progressText = "Verificando servidor de atualizacao";
+      safePayload.progressText = "Consultando servidor de atualização";
     }
     if (!Number.isFinite(safePayload.progressPercent) || safePayload.progressPercent <= 0) {
       safePayload.progressPercent = 24;
@@ -986,13 +988,13 @@ function showStatusPanel(payload, mode = "generic") {
     safePayload.showProgress = true;
   } else if (normalizedMode === "update-download") {
     if (!safePayload.title) {
-      safePayload.title = "Baixando atualizacao";
+      safePayload.title = "Baixando atualização";
     }
     if (!safePayload.subtitle) {
-      safePayload.subtitle = "Transferindo pacote para instalacao";
+      safePayload.subtitle = "Transferindo pacote para instalação";
     }
     if (!safePayload.progressText) {
-      safePayload.progressText = "Preparando transferencia";
+      safePayload.progressText = "Preparando transferência";
     }
     if (!Number.isFinite(safePayload.progressPercent)) {
       safePayload.progressPercent = 0;
@@ -1004,13 +1006,13 @@ function showStatusPanel(payload, mode = "generic") {
     safePayload.showProgress = true;
   } else if (normalizedMode === "update-install") {
     if (!safePayload.title) {
-      safePayload.title = "Aplicando atualizacao";
+      safePayload.title = "Aplicando atualização";
     }
     if (!safePayload.subtitle) {
-      safePayload.subtitle = "Finalizando instalacao...";
+      safePayload.subtitle = "Finalizando instalação...";
     }
     if (!safePayload.progressText) {
-      safePayload.progressText = "Reiniciando aplicativo";
+      safePayload.progressText = "Reiniciando o aplicativo";
     }
     if (!Number.isFinite(safePayload.progressPercent) || safePayload.progressPercent <= 0) {
       safePayload.progressPercent = 100;
@@ -1145,24 +1147,13 @@ function syncStatusPanelWithUpdaterStateV2(nextState) {
     return;
   }
 
-  if (nextState.status === "checking") {
-    showStatusPanel(
-      {
-        title: "Checando atualizacoes",
-        subtitle: "Buscando a versao mais recente...",
-        detail: `Versao atual v${String(nextState.currentVersion ?? app.getVersion?.() ?? "0.0.0")}`,
-        progressText: "Verificando servidor de atualizacao",
-        progressPercent: 24,
-        showProgressBar: true,
-        showProgress: true,
-        progressCounterLabel: "3/10",
-      },
-      "update-check",
-    );
+  const status = String(nextState.status ?? "").trim().toLowerCase();
+  if (status === "checking") {
+    hideStatusPanel({ mode: "update-check" });
     return;
   }
 
-  if (nextState.status === "downloading") {
+  if (status === "downloading") {
     const downloadedBytes = Number(nextState.downloadedBytes ?? 0);
     const totalBytes = Number(nextState.totalBytes ?? 0);
     const progressPercent = Math.max(0, Math.min(100, Number(nextState.progressPercent ?? 0)));
@@ -1174,8 +1165,8 @@ function syncStatusPanelWithUpdaterStateV2(nextState) {
 
     showStatusPanel(
       {
-        title: "Baixando atualizacao",
-        subtitle: "Transferindo pacote para instalacao",
+        title: "Baixando atualização",
+        subtitle: "Transferindo pacote para instalação",
         detail: detailParts.join(" - "),
         progressText: progressLine,
         progressPercent,
@@ -1185,20 +1176,63 @@ function syncStatusPanelWithUpdaterStateV2(nextState) {
       },
       "update-download",
     );
+    updaterAutoInstallInFlight = false;
+    hideWindowsForUpdateFlow();
     return;
   }
 
-  if (nextState.status === "downloaded") {
-    hideStatusPanel({ mode: "update-check" });
-    hideStatusPanel({ mode: "update-download" });
-    hideStatusPanel({ mode: "update-install" });
+  if (status === "downloaded") {
+    showStatusPanel(
+      {
+        title: "Aplicando atualização",
+        subtitle: "Finalizando instalação...",
+        detail: nextState.latestVersion ? `Instalando versão v${String(nextState.latestVersion)}` : "",
+        progressText: "Reiniciando o Messly para concluir",
+        progressPercent: 100,
+        showProgressBar: true,
+        showProgress: true,
+        progressCounterLabel: "10/10",
+      },
+      "update-install",
+    );
+    hideWindowsForUpdateFlow();
+
+    if (updaterAutoInstallInFlight || !appUpdater?.installUpdate) {
+      return;
+    }
+
+    updaterAutoInstallInFlight = true;
+    void appUpdater.installUpdate()
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error ?? "Falha desconhecida.");
+        updaterAutoInstallInFlight = false;
+        showStatusPanel(
+          {
+            title: "Falha ao aplicar atualização",
+            subtitle: "Não foi possível concluir a instalação.",
+            detail: message,
+            progressText: "Tente novamente em alguns instantes.",
+            progressPercent: 0,
+            showProgressBar: false,
+            showProgress: true,
+            progressCounterLabel: "",
+          },
+          "update-install",
+        );
+        restoreWindowsAfterUpdateFlow();
+      })
+      .finally(() => {
+        updaterAutoInstallInFlight = false;
+      });
     return;
   }
 
-  if (nextState.status === "available" || nextState.status === "unavailable" || nextState.status === "error" || nextState.status === "disabled") {
+  if (status === "available" || status === "unavailable" || status === "error" || status === "disabled" || status === "idle") {
+    updaterAutoInstallInFlight = false;
     hideStatusPanel({ mode: "update-check" });
     hideStatusPanel({ mode: "update-download" });
     hideStatusPanel({ mode: "update-install" });
+    restoreWindowsAfterUpdateFlow();
   }
 }
 
@@ -1866,6 +1900,39 @@ function showMainWindow() {
   return true;
 }
 
+function hideWindowsForUpdateFlow() {
+  let hiddenAnyWindow = false;
+  const windows = BrowserWindow.getAllWindows();
+  for (const window of windows) {
+    if (!window || window.isDestroyed()) {
+      continue;
+    }
+    if (statusPanelWindowRef && window === statusPanelWindowRef) {
+      continue;
+    }
+    try {
+      window.hide();
+      hiddenAnyWindow = true;
+    } catch {}
+  }
+  if (hiddenAnyWindow) {
+    windowsHiddenForUpdateFlow = true;
+  }
+}
+
+function restoreWindowsAfterUpdateFlow() {
+  if (!windowsHiddenForUpdateFlow) {
+    return;
+  }
+  if (isAppQuitting) {
+    return;
+  }
+  windowsHiddenForUpdateFlow = false;
+  if (!showMainWindow()) {
+    createMainWindow();
+  }
+}
+
 function getMessageNotificationIcon() {
   if (notificationIconImageCache !== undefined) {
     return notificationIconImageCache;
@@ -2439,10 +2506,10 @@ async function runStartupAutoUpdateIfEnabled() {
 
       showStatusPanel(
         {
-          title: "Aplicando atualizacao",
-          subtitle: "Reiniciando para concluir a instalacao",
+          title: "Aplicando atualização",
+          subtitle: "Reiniciando para concluir a instalação",
           detail: "",
-          progressText: "Finalizando update",
+          progressText: "Finalizando atualização",
           progressPercent: 100,
           showProgressBar: true,
           showProgress: true,
@@ -2838,7 +2905,7 @@ function registerIpcHandlers() {
     }
     showStatusPanel(
       {
-        title: "Checando atualizações",
+        title: "Verificando atualização",
         subtitle: "",
         detail: "",
         progressText: "",
@@ -2855,12 +2922,14 @@ function registerIpcHandlers() {
     }
     showStatusPanel(
       {
-        title: "Checando atualizações",
-        subtitle: "",
+        title: "Baixando atualização",
+        subtitle: "Preparando download...",
         detail: `v${String(app.getVersion?.() ?? "0.0.0")}`,
-        progressText: "",
-        showProgressBar: false,
-        showProgress: false,
+        progressText: "Conectando ao servidor...",
+        progressPercent: 2,
+        showProgressBar: true,
+        showProgress: true,
+        progressCounterLabel: "7/10",
       },
       "update-download",
     );
@@ -2873,15 +2942,25 @@ function registerIpcHandlers() {
     showStatusPanel(
       {
         title: "Aplicando atualização",
-        subtitle: "",
+        subtitle: "Finalizando instalação...",
         detail: `v${String(app.getVersion?.() ?? "0.0.0")}`,
-        progressText: "",
-        showProgressBar: false,
-        showProgress: false,
+        progressText: "Reiniciando o Messly para concluir",
+        progressPercent: 100,
+        showProgressBar: true,
+        showProgress: true,
+        progressCounterLabel: "10/10",
       },
       "update-install",
     );
-    return appUpdater.installUpdate();
+    hideWindowsForUpdateFlow();
+    updaterAutoInstallInFlight = true;
+    try {
+      return await appUpdater.installUpdate();
+    } catch (error) {
+      updaterAutoInstallInFlight = false;
+      restoreWindowsAfterUpdateFlow();
+      throw error;
+    }
   });
   ipcMain.handle("windows-settings:get", async () => ({ ...loadWindowsBehaviorSettings() }));
   ipcMain.handle("windows-settings:update", async (_event, payload) => {
@@ -3310,9 +3389,12 @@ app.whenReady().then(async () => {
   }
   registerMesslyProtocolClient();
   loadWindowsBehaviorSettings();
+  appUpdater = createConfiguredAppUpdater();
+  appUpdater.setBroadcaster(broadcastUpdaterState);
   registerIpcHandlers();
   createMainWindow();
   void createAppTray();
+  refreshAppTrayMenu();
   setTimeout(() => {
     removeSecureAuthStorageValue(LEGACY_SESSION_STORAGE_KEY);
     const initialCallbackUrl = findSpotifyCallbackUrlInCommandLine(process.argv);
@@ -3330,9 +3412,6 @@ app.whenReady().then(async () => {
       waitForOAuthCallback: waitForSpotifyOAuthCallback,
     });
 
-    appUpdater = createConfiguredAppUpdater();
-    appUpdater.setBroadcaster(broadcastUpdaterState);
-    refreshAppTrayMenu();
     const autoCheckIntervalMs = Number.parseInt(String(process.env.AUTO_UPDATE_CHECK_INTERVAL_MS ?? ""), 10);
     void runStartupAutoUpdateIfEnabled()
       .catch(() => {})
@@ -3382,3 +3461,5 @@ app.on("window-all-closed", () => {
     app.quit();
   }
 });
+
+
