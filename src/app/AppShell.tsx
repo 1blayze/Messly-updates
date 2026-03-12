@@ -1790,109 +1790,121 @@ export default function AppShell() {
       return;
     }
 
-    const channel = supabase
-      .channel(`messly:profile-sync:${normalizedCurrentUserId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "users",
-          filter: `id=eq.${normalizedCurrentUserId}`,
-        },
-        (payload) => {
-          const nextRow =
-            payload && typeof payload.new === "object" && payload.new !== null
-              ? (payload.new as Record<string, unknown>)
-              : null;
-          if (!nextRow) {
-            return;
-          }
+    let disposed = false;
+    let channel: ReturnType<typeof supabase.channel> | null = null;
+    const bootstrapTimer = window.setTimeout(() => {
+      if (disposed) {
+        return;
+      }
 
-          const rowUserId = toNullableTrimmedString(nextRow.id);
-          if (!rowUserId || rowUserId !== normalizedCurrentUserId) {
-            return;
-          }
+      channel = supabase
+        .channel(`messly:profile-sync:${normalizedCurrentUserId}`)
+        .on(
+          "postgres_changes",
+          {
+            event: "UPDATE",
+            schema: "public",
+            table: "users",
+            filter: `id=eq.${normalizedCurrentUserId}`,
+          },
+          (payload) => {
+            const nextRow =
+              payload && typeof payload.new === "object" && payload.new !== null
+                ? (payload.new as Record<string, unknown>)
+                : null;
+            if (!nextRow) {
+              return;
+            }
 
-          const profileDetail: ProfileUpdatedDetail = { userId: rowUserId };
-          let hasProfilePayload = false;
+            const rowUserId = toNullableTrimmedString(nextRow.id);
+            if (!rowUserId || rowUserId !== normalizedCurrentUserId) {
+              return;
+            }
 
-          if (hasOwnRecordKey(nextRow, "display_name")) {
-            profileDetail.display_name = toNullableTrimmedString(nextRow.display_name);
-            hasProfilePayload = true;
-          }
-          if (hasOwnRecordKey(nextRow, "username")) {
-            profileDetail.username = toNullableTrimmedString(nextRow.username);
-            hasProfilePayload = true;
-          }
-          if (hasOwnRecordKey(nextRow, "about")) {
-            profileDetail.about = toNullableTrimmedString(nextRow.about);
-            hasProfilePayload = true;
-          }
-          if (hasOwnRecordKey(nextRow, "banner_color")) {
-            profileDetail.banner_color = normalizeBannerColor(toNullableTrimmedString(nextRow.banner_color)) ?? null;
-            hasProfilePayload = true;
-          }
-          if (hasOwnRecordKey(nextRow, "profile_theme_primary_color")) {
-            profileDetail.profile_theme_primary_color =
-              normalizeBannerColor(toNullableTrimmedString(nextRow.profile_theme_primary_color)) ?? null;
-            hasProfilePayload = true;
-          }
-          if (hasOwnRecordKey(nextRow, "profile_theme_accent_color")) {
-            profileDetail.profile_theme_accent_color =
-              normalizeBannerColor(toNullableTrimmedString(nextRow.profile_theme_accent_color)) ?? null;
-            hasProfilePayload = true;
-          }
-          if (hasOwnRecordKey(nextRow, "username_changed_at")) {
-            profileDetail.username_changed_at = toNormalizedIsoTimestamp(nextRow.username_changed_at);
-            hasProfilePayload = true;
-          }
+            const profileDetail: ProfileUpdatedDetail = { userId: rowUserId };
+            let hasProfilePayload = false;
 
-          if (hasProfilePayload) {
-            window.dispatchEvent(new CustomEvent<ProfileUpdatedDetail>("messly:profile-updated", { detail: profileDetail }));
-          }
+            if (hasOwnRecordKey(nextRow, "display_name")) {
+              profileDetail.display_name = toNullableTrimmedString(nextRow.display_name);
+              hasProfilePayload = true;
+            }
+            if (hasOwnRecordKey(nextRow, "username")) {
+              profileDetail.username = toNullableTrimmedString(nextRow.username);
+              hasProfilePayload = true;
+            }
+            if (hasOwnRecordKey(nextRow, "about")) {
+              profileDetail.about = toNullableTrimmedString(nextRow.about);
+              hasProfilePayload = true;
+            }
+            if (hasOwnRecordKey(nextRow, "banner_color")) {
+              profileDetail.banner_color = normalizeBannerColor(toNullableTrimmedString(nextRow.banner_color)) ?? null;
+              hasProfilePayload = true;
+            }
+            if (hasOwnRecordKey(nextRow, "profile_theme_primary_color")) {
+              profileDetail.profile_theme_primary_color =
+                normalizeBannerColor(toNullableTrimmedString(nextRow.profile_theme_primary_color)) ?? null;
+              hasProfilePayload = true;
+            }
+            if (hasOwnRecordKey(nextRow, "profile_theme_accent_color")) {
+              profileDetail.profile_theme_accent_color =
+                normalizeBannerColor(toNullableTrimmedString(nextRow.profile_theme_accent_color)) ?? null;
+              hasProfilePayload = true;
+            }
+            if (hasOwnRecordKey(nextRow, "username_changed_at")) {
+              profileDetail.username_changed_at = toNormalizedIsoTimestamp(nextRow.username_changed_at);
+              hasProfilePayload = true;
+            }
 
-          const mediaDetail: ProfileMediaUpdatedDetail = { userId: rowUserId };
-          let hasMediaPayload = false;
+            if (hasProfilePayload) {
+              window.dispatchEvent(new CustomEvent<ProfileUpdatedDetail>("messly:profile-updated", { detail: profileDetail }));
+            }
 
-          if (hasOwnRecordKey(nextRow, "avatar_key")) {
-            mediaDetail.avatar_key = toNullableTrimmedString(nextRow.avatar_key);
-            hasMediaPayload = true;
-          }
-          if (hasOwnRecordKey(nextRow, "avatar_hash")) {
-            mediaDetail.avatar_hash = toNullableTrimmedString(nextRow.avatar_hash);
-            hasMediaPayload = true;
-          }
-          if (hasOwnRecordKey(nextRow, "avatar_url")) {
-            mediaDetail.avatar_url = toNullableTrimmedString(nextRow.avatar_url);
-            hasMediaPayload = true;
-          }
-          if (hasOwnRecordKey(nextRow, "banner_key")) {
-            mediaDetail.banner_key = toNullableTrimmedString(nextRow.banner_key);
-            hasMediaPayload = true;
-          }
-          if (hasOwnRecordKey(nextRow, "banner_hash")) {
-            mediaDetail.banner_hash = toNullableTrimmedString(nextRow.banner_hash);
-            hasMediaPayload = true;
-          }
-          if (hasOwnRecordKey(nextRow, "banner_color")) {
-            mediaDetail.banner_color = normalizeBannerColor(toNullableTrimmedString(nextRow.banner_color)) ?? null;
-            hasMediaPayload = true;
-          }
+            const mediaDetail: ProfileMediaUpdatedDetail = { userId: rowUserId };
+            let hasMediaPayload = false;
 
-          if (hasMediaPayload) {
-            window.dispatchEvent(
-              new CustomEvent<ProfileMediaUpdatedDetail>("messly:profile-media-updated", {
-                detail: mediaDetail,
-              }),
-            );
-          }
-        },
-      )
-      .subscribe();
+            if (hasOwnRecordKey(nextRow, "avatar_key")) {
+              mediaDetail.avatar_key = toNullableTrimmedString(nextRow.avatar_key);
+              hasMediaPayload = true;
+            }
+            if (hasOwnRecordKey(nextRow, "avatar_hash")) {
+              mediaDetail.avatar_hash = toNullableTrimmedString(nextRow.avatar_hash);
+              hasMediaPayload = true;
+            }
+            if (hasOwnRecordKey(nextRow, "avatar_url")) {
+              mediaDetail.avatar_url = toNullableTrimmedString(nextRow.avatar_url);
+              hasMediaPayload = true;
+            }
+            if (hasOwnRecordKey(nextRow, "banner_key")) {
+              mediaDetail.banner_key = toNullableTrimmedString(nextRow.banner_key);
+              hasMediaPayload = true;
+            }
+            if (hasOwnRecordKey(nextRow, "banner_hash")) {
+              mediaDetail.banner_hash = toNullableTrimmedString(nextRow.banner_hash);
+              hasMediaPayload = true;
+            }
+            if (hasOwnRecordKey(nextRow, "banner_color")) {
+              mediaDetail.banner_color = normalizeBannerColor(toNullableTrimmedString(nextRow.banner_color)) ?? null;
+              hasMediaPayload = true;
+            }
+
+            if (hasMediaPayload) {
+              window.dispatchEvent(
+                new CustomEvent<ProfileMediaUpdatedDetail>("messly:profile-media-updated", {
+                  detail: mediaDetail,
+                }),
+              );
+            }
+          },
+        )
+        .subscribe();
+    }, 0);
 
     return () => {
-      void supabase.removeChannel(channel);
+      disposed = true;
+      window.clearTimeout(bootstrapTimer);
+      if (channel) {
+        void supabase.removeChannel(channel);
+      }
     };
   }, [currentUserId]);
 

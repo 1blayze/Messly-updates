@@ -117,40 +117,47 @@ export function useFriendRequestsRealtime(
       });
     };
 
-    channel = supabase
-      .channel(`realtime:friend_requests:${normalizedUserId}:${status}`)
-      // NOTE: Postgres Changes does not support OR filters for requester/addressee reliably.
-      // We subscribe to table events and filter on client by currentUserId.
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "friend_requests" },
-        applyRealtimeChange,
-      )
-      .subscribe((channelStatus) => {
-        if (isDisposed) {
-          return;
-        }
+    const bootstrapTimer = window.setTimeout(() => {
+      if (isDisposed) {
+        return;
+      }
 
-        if (channelStatus === "SUBSCRIBED") {
-          if (hasSubscribedRef.current && droppedRef.current) {
-            droppedRef.current = false;
-            void queryClient.invalidateQueries({ queryKey, exact: true });
+      channel = supabase
+        .channel(`realtime:friend_requests:${normalizedUserId}:${status}`)
+        // NOTE: Postgres Changes does not support OR filters for requester/addressee reliably.
+        // We subscribe to table events and filter on client by currentUserId.
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "friend_requests" },
+          applyRealtimeChange,
+        )
+        .subscribe((channelStatus) => {
+          if (isDisposed) {
+            return;
           }
-          hasSubscribedRef.current = true;
-          return;
-        }
 
-        if (
-          channelStatus === "TIMED_OUT" ||
-          channelStatus === "CHANNEL_ERROR" ||
-          channelStatus === "CLOSED"
-        ) {
-          droppedRef.current = true;
-        }
-      });
+          if (channelStatus === "SUBSCRIBED") {
+            if (hasSubscribedRef.current && droppedRef.current) {
+              droppedRef.current = false;
+              void queryClient.invalidateQueries({ queryKey, exact: true });
+            }
+            hasSubscribedRef.current = true;
+            return;
+          }
+
+          if (
+            channelStatus === "TIMED_OUT" ||
+            channelStatus === "CHANNEL_ERROR" ||
+            channelStatus === "CLOSED"
+          ) {
+            droppedRef.current = true;
+          }
+        });
+    }, 0);
 
     return () => {
       isDisposed = true;
+      window.clearTimeout(bootstrapTimer);
       if (channel) {
         void supabase.removeChannel(channel);
       }

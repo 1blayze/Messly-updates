@@ -2206,96 +2206,108 @@ export default function DirectMessagesSidebar({
       return normalized || null;
     };
 
-    const channel = supabase
-      .channel(`realtime:dm-users:${identity.userId ?? "anon"}`)
-      .on(
-        "postgres_changes",
-        { event: "UPDATE", schema: "public", table: "users" },
-        (payload) => {
-          const nextRow =
-            payload && typeof payload.new === "object" && payload.new !== null
-              ? (payload.new as Record<string, unknown>)
-              : null;
-          if (!nextRow) {
-            return;
-          }
+    let disposed = false;
+    let channel: ReturnType<typeof supabase.channel> | null = null;
+    const bootstrapTimer = window.setTimeout(() => {
+      if (disposed) {
+        return;
+      }
 
-          const rowUserId = toNullableTrimmedString(nextRow.id);
-          if (!rowUserId || !trackedUserIds.has(rowUserId)) {
-            return;
-          }
+      channel = supabase
+        .channel(`realtime:dm-users:${identity.userId ?? "anon"}`)
+        .on(
+          "postgres_changes",
+          { event: "UPDATE", schema: "public", table: "users" },
+          (payload) => {
+            const nextRow =
+              payload && typeof payload.new === "object" && payload.new !== null
+                ? (payload.new as Record<string, unknown>)
+                : null;
+            if (!nextRow) {
+              return;
+            }
 
-          const profileDetail: ProfileUpdatedDetail = { userId: rowUserId };
-          let hasProfilePayload = false;
+            const rowUserId = toNullableTrimmedString(nextRow.id);
+            if (!rowUserId || !trackedUserIds.has(rowUserId)) {
+              return;
+            }
 
-          if (Object.prototype.hasOwnProperty.call(nextRow, "display_name")) {
-            profileDetail.display_name = toNullableTrimmedString(nextRow.display_name);
-            hasProfilePayload = true;
-          }
-          if (Object.prototype.hasOwnProperty.call(nextRow, "username")) {
-            profileDetail.username = toNullableTrimmedString(nextRow.username);
-            hasProfilePayload = true;
-          }
-          if (Object.prototype.hasOwnProperty.call(nextRow, "about")) {
-            profileDetail.about = toNullableTrimmedString(nextRow.about);
-            hasProfilePayload = true;
-          }
-          if (Object.prototype.hasOwnProperty.call(nextRow, "banner_color")) {
-            profileDetail.banner_color = normalizeBannerColor(toNullableTrimmedString(nextRow.banner_color)) ?? null;
-            hasProfilePayload = true;
-          }
-          if (Object.prototype.hasOwnProperty.call(nextRow, "profile_theme_primary_color")) {
-            profileDetail.profile_theme_primary_color =
-              normalizeBannerColor(toNullableTrimmedString(nextRow.profile_theme_primary_color)) ?? null;
-            hasProfilePayload = true;
-          }
-          if (Object.prototype.hasOwnProperty.call(nextRow, "profile_theme_accent_color")) {
-            profileDetail.profile_theme_accent_color =
-              normalizeBannerColor(toNullableTrimmedString(nextRow.profile_theme_accent_color)) ?? null;
-            hasProfilePayload = true;
-          }
+            const profileDetail: ProfileUpdatedDetail = { userId: rowUserId };
+            let hasProfilePayload = false;
 
-          if (hasProfilePayload) {
-            window.dispatchEvent(new CustomEvent<ProfileUpdatedDetail>("messly:profile-updated", { detail: profileDetail }));
-          }
+            if (Object.prototype.hasOwnProperty.call(nextRow, "display_name")) {
+              profileDetail.display_name = toNullableTrimmedString(nextRow.display_name);
+              hasProfilePayload = true;
+            }
+            if (Object.prototype.hasOwnProperty.call(nextRow, "username")) {
+              profileDetail.username = toNullableTrimmedString(nextRow.username);
+              hasProfilePayload = true;
+            }
+            if (Object.prototype.hasOwnProperty.call(nextRow, "about")) {
+              profileDetail.about = toNullableTrimmedString(nextRow.about);
+              hasProfilePayload = true;
+            }
+            if (Object.prototype.hasOwnProperty.call(nextRow, "banner_color")) {
+              profileDetail.banner_color = normalizeBannerColor(toNullableTrimmedString(nextRow.banner_color)) ?? null;
+              hasProfilePayload = true;
+            }
+            if (Object.prototype.hasOwnProperty.call(nextRow, "profile_theme_primary_color")) {
+              profileDetail.profile_theme_primary_color =
+                normalizeBannerColor(toNullableTrimmedString(nextRow.profile_theme_primary_color)) ?? null;
+              hasProfilePayload = true;
+            }
+            if (Object.prototype.hasOwnProperty.call(nextRow, "profile_theme_accent_color")) {
+              profileDetail.profile_theme_accent_color =
+                normalizeBannerColor(toNullableTrimmedString(nextRow.profile_theme_accent_color)) ?? null;
+              hasProfilePayload = true;
+            }
 
-          const mediaDetail: ProfileMediaUpdatedDetail = { userId: rowUserId };
-          let hasMediaPayload = false;
+            if (hasProfilePayload) {
+              window.dispatchEvent(new CustomEvent<ProfileUpdatedDetail>("messly:profile-updated", { detail: profileDetail }));
+            }
 
-          if (Object.prototype.hasOwnProperty.call(nextRow, "avatar_key")) {
-            mediaDetail.avatar_key = toNullableTrimmedString(nextRow.avatar_key);
-            hasMediaPayload = true;
-          }
-          if (Object.prototype.hasOwnProperty.call(nextRow, "avatar_hash")) {
-            mediaDetail.avatar_hash = toNullableTrimmedString(nextRow.avatar_hash);
-            hasMediaPayload = true;
-          }
-          if (Object.prototype.hasOwnProperty.call(nextRow, "banner_key")) {
-            mediaDetail.banner_key = toNullableTrimmedString(nextRow.banner_key);
-            hasMediaPayload = true;
-          }
-          if (Object.prototype.hasOwnProperty.call(nextRow, "banner_hash")) {
-            mediaDetail.banner_hash = toNullableTrimmedString(nextRow.banner_hash);
-            hasMediaPayload = true;
-          }
-          if (Object.prototype.hasOwnProperty.call(nextRow, "banner_color")) {
-            mediaDetail.banner_color = normalizeBannerColor(toNullableTrimmedString(nextRow.banner_color)) ?? null;
-            hasMediaPayload = true;
-          }
+            const mediaDetail: ProfileMediaUpdatedDetail = { userId: rowUserId };
+            let hasMediaPayload = false;
 
-          if (hasMediaPayload) {
-            window.dispatchEvent(
-              new CustomEvent<ProfileMediaUpdatedDetail>("messly:profile-media-updated", {
-                detail: mediaDetail,
-              }),
-            );
-          }
-        },
-      )
-      .subscribe();
+            if (Object.prototype.hasOwnProperty.call(nextRow, "avatar_key")) {
+              mediaDetail.avatar_key = toNullableTrimmedString(nextRow.avatar_key);
+              hasMediaPayload = true;
+            }
+            if (Object.prototype.hasOwnProperty.call(nextRow, "avatar_hash")) {
+              mediaDetail.avatar_hash = toNullableTrimmedString(nextRow.avatar_hash);
+              hasMediaPayload = true;
+            }
+            if (Object.prototype.hasOwnProperty.call(nextRow, "banner_key")) {
+              mediaDetail.banner_key = toNullableTrimmedString(nextRow.banner_key);
+              hasMediaPayload = true;
+            }
+            if (Object.prototype.hasOwnProperty.call(nextRow, "banner_hash")) {
+              mediaDetail.banner_hash = toNullableTrimmedString(nextRow.banner_hash);
+              hasMediaPayload = true;
+            }
+            if (Object.prototype.hasOwnProperty.call(nextRow, "banner_color")) {
+              mediaDetail.banner_color = normalizeBannerColor(toNullableTrimmedString(nextRow.banner_color)) ?? null;
+              hasMediaPayload = true;
+            }
+
+            if (hasMediaPayload) {
+              window.dispatchEvent(
+                new CustomEvent<ProfileMediaUpdatedDetail>("messly:profile-media-updated", {
+                  detail: mediaDetail,
+                }),
+              );
+            }
+          },
+        )
+        .subscribe();
+    }, 0);
 
     return () => {
-      void supabase.removeChannel(channel);
+      disposed = true;
+      window.clearTimeout(bootstrapTimer);
+      if (channel) {
+        void supabase.removeChannel(channel);
+      }
     };
   }, [dmUsersRealtimeKey, identity.userId]);
 
@@ -2305,62 +2317,72 @@ export default function DirectMessagesSidebar({
     }
 
     const conversationIds = dmRealtimeConversationKey.split("|").filter((conversationId) => Boolean(conversationId));
-    const channels = conversationIds.map((conversationId) =>
-      supabase
-        .channel(`dm-chat:${conversationId}`, {
-          config: {
-            broadcast: {
-              ack: false,
-              self: false,
+    let disposed = false;
+    let channels: ReturnType<typeof supabase.channel>[] = [];
+    const bootstrapTimer = window.setTimeout(() => {
+      if (disposed) {
+        return;
+      }
+
+      channels = conversationIds.map((conversationId) =>
+        supabase
+          .channel(`dm-chat:${conversationId}`, {
+            config: {
+              broadcast: {
+                ack: false,
+                self: false,
+              },
             },
-          },
-        })
-        .on(
-          "broadcast",
-          {
-            event: "message",
-          },
-          (payload) => {
-            const data = payload.payload as {
-              conversationId?: string;
-              message?: BroadcastChatMessageItem | null;
-            } | null;
-            const incomingConversationId = String(data?.conversationId ?? "").trim();
-            if (!incomingConversationId || incomingConversationId !== conversationId) {
-              return;
-            }
+          })
+          .on(
+            "broadcast",
+            {
+              event: "message",
+            },
+            (payload) => {
+              const data = payload.payload as {
+                conversationId?: string;
+                message?: BroadcastChatMessageItem | null;
+              } | null;
+              const incomingConversationId = String(data?.conversationId ?? "").trim();
+              if (!incomingConversationId || incomingConversationId !== conversationId) {
+                return;
+              }
 
-            const serverMessage = mapBroadcastMessageToServerMessage(incomingConversationId, data?.message ?? null);
-            if (!serverMessage) {
-              return;
-            }
+              const serverMessage = mapBroadcastMessageToServerMessage(incomingConversationId, data?.message ?? null);
+              if (!serverMessage) {
+                return;
+              }
 
-            upsertCachedInitialChatMessages(incomingConversationId, serverMessage);
-          },
-        )
-        .on(
-          "broadcast",
-          {
-            event: "message_retract",
-          },
-          (payload) => {
-            const data = payload.payload as { conversationId?: string; clientId?: string | null } | null;
-            const incomingConversationId = String(data?.conversationId ?? "").trim();
-            const clientId = String(data?.clientId ?? "").trim();
-            if (!incomingConversationId || incomingConversationId !== conversationId || !clientId) {
-              return;
-            }
+              upsertCachedInitialChatMessages(incomingConversationId, serverMessage);
+            },
+          )
+          .on(
+            "broadcast",
+            {
+              event: "message_retract",
+            },
+            (payload) => {
+              const data = payload.payload as { conversationId?: string; clientId?: string | null } | null;
+              const incomingConversationId = String(data?.conversationId ?? "").trim();
+              const clientId = String(data?.clientId ?? "").trim();
+              if (!incomingConversationId || incomingConversationId !== conversationId || !clientId) {
+                return;
+              }
 
-            removeCachedInitialChatMessageByClientId(incomingConversationId, clientId);
-          },
-        ),
-    );
+              removeCachedInitialChatMessageByClientId(incomingConversationId, clientId);
+            },
+          ),
+      );
 
-    channels.forEach((channel) => {
-      void channel.subscribe();
-    });
+      channels.forEach((channel) => {
+        void channel.subscribe();
+      });
+    }, 0);
 
     return () => {
+      disposed = true;
+      window.clearTimeout(bootstrapTimer);
       channels.forEach((channel) => {
         void supabase.removeChannel(channel);
       });

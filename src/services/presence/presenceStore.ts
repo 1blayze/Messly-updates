@@ -25,6 +25,7 @@ const PRESENCE_UI_DEBOUNCE_MS = 50;
 const PRESENCE_FETCH_DEBOUNCE_MS = 20;
 const PRESENCE_FETCH_RETRY_DELAY_MS = 2_500;
 const PRESENCE_REALTIME_RECONNECT_DELAY_MS = 1_500;
+const PRESENCE_REALTIME_DISCONNECT_GRACE_MS = 750;
 const PRESENCE_DEBUG_ENABLED = import.meta.env.DEV;
 
 interface PresenceEntry {
@@ -52,6 +53,7 @@ const inFlightFetchUserIds = new Set<string>();
 let staleTimerId: number | null = null;
 let realtimeChannel: ReturnType<typeof supabase.channel> | null = null;
 let realtimeReconnectTimerId: number | null = null;
+let realtimeDisconnectTimerId: number | null = null;
 let fetchRetryTimerId: number | null = null;
 let unsubscribeGatewayEvents: (() => void) | null = null;
 let ensureRealtimeSubscriptionPromise: Promise<void> | null = null;
@@ -107,6 +109,13 @@ function clearRealtimeReconnectTimer(): void {
   if (realtimeReconnectTimerId !== null && typeof window !== "undefined") {
     window.clearTimeout(realtimeReconnectTimerId);
     realtimeReconnectTimerId = null;
+  }
+}
+
+function clearRealtimeDisconnectTimer(): void {
+  if (realtimeDisconnectTimerId !== null && typeof window !== "undefined") {
+    window.clearTimeout(realtimeDisconnectTimerId);
+    realtimeDisconnectTimerId = null;
   }
 }
 
@@ -636,6 +645,8 @@ async function ensureRealtimeSubscription(): Promise<void> {
     return;
   }
 
+  clearRealtimeDisconnectTimer();
+
   if (ensureRealtimeSubscriptionPromise) {
     return ensureRealtimeSubscriptionPromise;
   }
@@ -723,11 +734,7 @@ async function ensureRealtimeSubscription(): Promise<void> {
   return trackedPromise;
 }
 
-function clearRealtimeSubscriptionIfUnused(): void {
-  if (shouldMaintainRealtimeConnection()) {
-    return;
-  }
-
+function releaseRealtimeResources(): void {
   clearRealtimeReconnectTimer();
   clearFetchRetryTimer();
 
@@ -749,6 +756,30 @@ function clearRealtimeSubscriptionIfUnused(): void {
   ensureRealtimeSubscriptionPromise = null;
 }
 
+function clearRealtimeSubscriptionIfUnused(): void {
+  if (shouldMaintainRealtimeConnection()) {
+    clearRealtimeDisconnectTimer();
+    return;
+  }
+
+  if (typeof window === "undefined") {
+    releaseRealtimeResources();
+    return;
+  }
+
+  if (realtimeDisconnectTimerId !== null) {
+    return;
+  }
+
+  realtimeDisconnectTimerId = window.setTimeout(() => {
+    realtimeDisconnectTimerId = null;
+    if (shouldMaintainRealtimeConnection()) {
+      return;
+    }
+    releaseRealtimeResources();
+  }, PRESENCE_REALTIME_DISCONNECT_GRACE_MS);
+}
+
 function buildEmptyPresenceSnapshot(userId: string): PresenceSnapshot {
   return {
     userId,
@@ -761,8 +792,9 @@ function buildEmptyPresenceSnapshot(userId: string): PresenceSnapshot {
 }
 
 export function subscribe(listener: PresenceStoreListener): () => void {
-  void ensureRealtimeSubscription().catch(() => undefined);
   listeners.add(listener);
+  clearRealtimeDisconnectTimer();
+  void ensureRealtimeSubscription().catch(() => undefined);
   return () => {
     listeners.delete(listener);
     clearRealtimeSubscriptionIfUnused();
@@ -775,8 +807,9 @@ export function watchUsers(userIds: string[]): () => void {
     return () => undefined;
   }
 
-  void ensureRealtimeSubscription().catch(() => undefined);
   const releaseTrackedUsers = retainTrackedUsers(normalizedUserIds);
+  clearRealtimeDisconnectTimer();
+  void ensureRealtimeSubscription().catch(() => undefined);
   queueInitialPresenceFetch(normalizedUserIds);
 
   return () => {
