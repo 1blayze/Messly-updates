@@ -9,6 +9,7 @@ import type { GatewayEnv } from "../config/env";
 import { createLogger, type Logger } from "../logging/logger";
 import { GatewayMetrics } from "../metrics/gatewayMetrics";
 import { RedisManager } from "../redis/client";
+import { gatewayRedisKeys } from "../redis/keys";
 import { RedisRateLimiter, NoopRateLimiter, type RateLimiter } from "../redis/rateLimiter";
 import { RedisLease } from "../redis/lease";
 import { GatewayBus } from "../pubsub/gatewayBus";
@@ -124,6 +125,7 @@ export class GatewayApplication {
   private readonly server = http.createServer();
   private readonly wss: WebSocketServer;
   private heartbeatSweepTimer: NodeJS.Timeout | null = null;
+  private instanceHeartbeatTimer: NodeJS.Timeout | null = null;
   private draining = false;
   private live = true;
   private started = false;
@@ -188,7 +190,12 @@ export class GatewayApplication {
       ),
       this.logger.child({ subsystem: "realtime-bridge" }),
     );
-    this.sessions = new RedisSessionStore(this.redis, env.resumeTtlSeconds, env.sessionBufferSize);
+    this.sessions = new RedisSessionStore(
+      this.redis,
+      env.resumeTtlSeconds,
+      env.sessionBufferSize,
+      env.sessionLeaseDurationMs,
+    );
     this.presence = new RedisPresenceService(
       this.redis,
       Math.max(env.resumeTtlSeconds, Math.ceil(env.clientTimeoutMs / 1_000) * 2),
@@ -222,6 +229,8 @@ export class GatewayApplication {
     this.bus.subscribe((message) => this.handleBusMessage(message));
     this.bridge.start();
     this.startHeartbeatSweep();
+    await this.writeInstanceHeartbeat("startup");
+    this.startInstanceHeartbeat();
 
     await new Promise<void>((resolve) => {
       this.server.listen(this.env.port, this.env.host, () => resolve());
@@ -275,9 +284,11 @@ export class GatewayApplication {
       ]);
 
       this.heartbeatSweepTimer && clearInterval(this.heartbeatSweepTimer);
+      this.instanceHeartbeatTimer && clearInterval(this.instanceHeartbeatTimer);
       this.wss.close();
       await this.bridge.stop();
       await this.bus.stop();
+      await this.redis.command.del(gatewayRedisKeys.instance(this.instanceId)).catch(() => undefined);
       await this.redis.close();
       this.live = false;
       this.logger.info("gateway_stopped", { reason });
@@ -416,6 +427,7 @@ export class GatewayApplication {
     });
 
     this.metrics.trackConnectionOpen(this.registry.count());
+    void this.writeInstanceHeartbeat("connection_open");
     this.sendFrame(socket, {
       op: "HELLO",
       s: 0,
@@ -547,15 +559,20 @@ export class GatewayApplication {
     }
 
     this.registry.touchHeartbeat(connection.connectionId);
-    const heartbeatUpdated = await this.sessions.touchHeartbeat(connection.sessionId, normalizeHeartbeatSequence(payload));
+    const heartbeatUpdated = await this.sessions.touchHeartbeat(
+      connection.sessionId,
+      normalizeHeartbeatSequence(payload),
+      this.instanceId,
+    );
     if (!heartbeatUpdated) {
-      this.sendInvalidSession(connection.socket, {
-        reason: "INVALID_SESSION",
-        canResume: false,
-      });
-      connection.socket.close(4001, "INVALID_SESSION");
+      await this.handleSessionNotOwned(connection, connection.sessionId, "HEARTBEAT_NOT_OWNED");
       return;
     }
+    this.logger.debug("session_lease_renewed", {
+      sessionId: connection.sessionId,
+      connectionId: connection.connectionId,
+      instanceId: this.instanceId,
+    });
     await this.presence.touchSession(connection.sessionId);
     const sessionStillActive = await this.authSessions.touchAuthSessionId(connection.authSessionId, {
       userId: connection.userId,
@@ -743,22 +760,93 @@ export class GatewayApplication {
       return;
     }
 
+    const affinityInstanceId = await this.sessions.getAffinity(payload.sessionId);
+    if (affinityInstanceId && affinityInstanceId !== this.instanceId) {
+      const leaseExpiresAtMs = Date.parse(resume.session.leaseExpiresAt);
+      const leaseStillActive = Number.isFinite(leaseExpiresAtMs) && leaseExpiresAtMs > Date.now();
+      const affinityAlive = await this.isInstanceAlive(affinityInstanceId);
+      if (leaseStillActive && affinityAlive) {
+        this.logger.warn("session_affinity_mismatch", {
+          sessionId: payload.sessionId,
+          currentInstanceId: this.instanceId,
+          affinityInstanceId,
+          connectionId: connection.connectionId,
+          leaseExpiresAt: resume.session.leaseExpiresAt,
+        });
+        this.sendReconnect(connection, "SESSION_AFFINITY_MISMATCH", 1_500, affinityInstanceId);
+        connection.socket.close(4010, "SESSION_AFFINITY_MISMATCH");
+        return;
+      }
+
+      if (!affinityAlive) {
+        this.logger.warn("session_affinity_stale", {
+          sessionId: payload.sessionId,
+          staleInstanceId: affinityInstanceId,
+        });
+      }
+    }
+
+    const leaseResult = await this.sessions.renewOrClaimLease(payload.sessionId, this.instanceId, true);
+    if (leaseResult.status === "missing") {
+      this.metrics.trackResumeFailure();
+      this.sendInvalidSession(connection.socket, {
+        reason: "INVALID_SESSION",
+        canResume: false,
+      });
+      connection.socket.close(4001, "INVALID_SESSION");
+      return;
+    }
+    if (leaseResult.status === "owned_by_other") {
+      const targetInstanceId = leaseResult.ownerInstanceId ?? resume.session.instanceId;
+      const retryAfterMs = this.computeRetryAfterMs(leaseResult.leaseExpiresAt);
+      this.logger.warn("session_affinity_mismatch", {
+        sessionId: payload.sessionId,
+        currentInstanceId: this.instanceId,
+        ownerInstanceId: targetInstanceId,
+        leaseExpiresAt: leaseResult.leaseExpiresAt,
+        retryAfterMs,
+      });
+      this.sendReconnect(connection, "SESSION_REDIRECT", retryAfterMs, targetInstanceId);
+      connection.socket.close(4010, "SESSION_REDIRECT");
+      return;
+    }
+    if (leaseResult.status === "claimed") {
+      this.logger.warn("session_claimed", {
+        sessionId: payload.sessionId,
+        claimedByInstanceId: this.instanceId,
+        previousOwnerInstanceId: leaseResult.ownerInstanceId,
+      });
+
+      if (leaseResult.ownerInstanceId && leaseResult.ownerInstanceId !== this.instanceId) {
+        const previousOwnerAlive = await this.isInstanceAlive(leaseResult.ownerInstanceId);
+        if (previousOwnerAlive) {
+          this.logger.warn("instance_failover_detected", {
+            sessionId: payload.sessionId,
+            previousOwnerInstanceId: leaseResult.ownerInstanceId,
+            newOwnerInstanceId: this.instanceId,
+          });
+          await this.bus.publish({
+            kind: "control",
+            control: "disconnect_session",
+            sessionId: payload.sessionId,
+            connectionId: resume.session.connectionId,
+            targetInstanceId: leaseResult.ownerInstanceId,
+            reason: "SESSION_FAILOVER_CLAIMED",
+            retryAfterMs: 1_000,
+          } satisfies GatewayControlBusMessage);
+        }
+      }
+    } else if (leaseResult.status === "renewed") {
+      this.logger.debug("session_lease_renewed", {
+        sessionId: payload.sessionId,
+        instanceId: this.instanceId,
+      });
+    }
+
     const localExisting = this.registry.getBySessionId(payload.sessionId);
     if (localExisting && localExisting.connectionId !== connection.connectionId) {
       this.sendReconnect(localExisting, "SESSION_RESUMED_ELSEWHERE", 1_000);
       localExisting.socket.close(4009, "SESSION_RESUMED_ELSEWHERE");
-    }
-
-    if (resume.session.instanceId && resume.session.instanceId !== this.instanceId) {
-      await this.bus.publish({
-        kind: "control",
-        control: "disconnect_session",
-        sessionId: resume.session.sessionId,
-        connectionId: resume.session.connectionId,
-        targetInstanceId: resume.session.instanceId,
-        reason: "SESSION_RESUMED_ELSEWHERE",
-        retryAfterMs: 1_000,
-      } satisfies GatewayControlBusMessage);
     }
 
     const subscriptions = await this.normalizeSubscriptions(user.id, payload.subscriptions ?? resume.session.subscriptions);
@@ -855,13 +943,9 @@ export class GatewayApplication {
       });
       const nextSubscriptions = [...unique.values()];
       this.registry.replaceSubscriptions(connection.connectionId, nextSubscriptions);
-      const updated = await this.sessions.updateSubscriptions(connection.sessionId, nextSubscriptions);
+      const updated = await this.sessions.updateSubscriptions(connection.sessionId, nextSubscriptions, this.instanceId);
       if (!updated) {
-        this.sendInvalidSession(connection.socket, {
-          reason: "INVALID_SESSION",
-          canResume: false,
-        });
-        connection.socket.close(4001, "INVALID_SESSION");
+        await this.handleSessionNotOwned(connection, connection.sessionId, "SUBSCRIPTION_NOT_OWNED");
       }
       return;
     }
@@ -871,13 +955,9 @@ export class GatewayApplication {
       return !removal.has(`${subscription.type}:${subscription.id}`);
     });
     this.registry.replaceSubscriptions(connection.connectionId, nextSubscriptions);
-    const updated = await this.sessions.updateSubscriptions(connection.sessionId, nextSubscriptions);
+    const updated = await this.sessions.updateSubscriptions(connection.sessionId, nextSubscriptions, this.instanceId);
     if (!updated) {
-      this.sendInvalidSession(connection.socket, {
-        reason: "INVALID_SESSION",
-        canResume: false,
-      });
-      connection.socket.close(4001, "INVALID_SESSION");
+      await this.handleSessionNotOwned(connection, connection.sessionId, "SUBSCRIPTION_NOT_OWNED");
     }
   }
 
@@ -980,12 +1060,24 @@ export class GatewayApplication {
       return;
     }
     this.metrics.trackConnectionClose(this.registry.count());
+    void this.writeInstanceHeartbeat("connection_close");
 
     if (!connection.sessionId || !connection.userId) {
       return;
     }
 
-    await this.sessions.markDisconnected(connection.sessionId);
+    const disconnectedSession = await this.sessions.markDisconnected(connection.sessionId, {
+      instanceId: this.instanceId,
+      connectionId: connection.connectionId,
+    });
+    if (!disconnectedSession) {
+      this.logger.info("session_disconnect_ignored", {
+        sessionId: connection.sessionId,
+        connectionId: connection.connectionId,
+        instanceId: this.instanceId,
+      });
+      return;
+    }
     this.typing.stopAllForUser(connection.userId);
     const aggregatedPresence = await this.presence.disconnectSession(connection.userId, connection.sessionId);
     await this.publisher.publishPresence({
@@ -1025,7 +1117,7 @@ export class GatewayApplication {
     if (message.connectionId && connection.connectionId !== message.connectionId) {
       return;
     }
-    this.sendReconnect(connection, message.reason, message.retryAfterMs);
+    this.sendReconnect(connection, message.reason, message.retryAfterMs, message.targetInstanceId);
     connection.socket.close(4010, message.reason);
   }
 
@@ -1038,12 +1130,14 @@ export class GatewayApplication {
     }
     const record = await this.sessions.appendDispatchEvent({
       sessionId: connection.sessionId,
+      instanceId: this.instanceId,
       eventId: message.eventId,
       event: message.event,
       payload: message.payload,
       occurredAt: message.occurredAt,
     });
     if (!record) {
+      await this.handleSessionNotOwned(connection, connection.sessionId, "DISPATCH_NOT_OWNED");
       return;
     }
 
@@ -1143,16 +1237,136 @@ export class GatewayApplication {
     return outcome.allowed;
   }
 
-  private sendReconnect(connection: LocalGatewayConnection, reason: string, retryAfterMs: number): void {
+  private startInstanceHeartbeat(): void {
+    this.instanceHeartbeatTimer = setInterval(() => {
+      void this.writeInstanceHeartbeat("tick");
+    }, this.env.instanceHeartbeatIntervalMs);
+  }
+
+  private async writeInstanceHeartbeat(source: "startup" | "tick" | "connection_open" | "connection_close"): Promise<void> {
+    try {
+      await this.redis.command.hset(gatewayRedisKeys.instance(this.instanceId), {
+        instanceId: this.instanceId,
+        lastHeartbeat: new Date().toISOString(),
+        region: this.env.region,
+        connections: String(this.registry.count()),
+      });
+      await this.redis.command.pexpire(gatewayRedisKeys.instance(this.instanceId), this.env.instanceHeartbeatTtlMs);
+      if (source !== "tick") {
+        this.logger.debug("instance_heartbeat_updated", {
+          source,
+          instanceId: this.instanceId,
+          region: this.env.region,
+          connections: this.registry.count(),
+        });
+      }
+    } catch (error) {
+      this.logger.warn("instance_heartbeat_failed", {
+        source,
+        instanceId: this.instanceId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  private async isInstanceAlive(instanceIdRaw: string | null): Promise<boolean> {
+    const instanceId = String(instanceIdRaw ?? "").trim();
+    if (!instanceId) {
+      return false;
+    }
+    if (instanceId === this.instanceId) {
+      return true;
+    }
+
+    try {
+      const exists = await this.redis.command.exists(gatewayRedisKeys.instance(instanceId));
+      return Number(exists) > 0;
+    } catch (error) {
+      this.logger.warn("instance_liveness_check_failed", {
+        instanceId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    }
+  }
+
+  private computeRetryAfterMs(leaseExpiresAtRaw: string | null): number {
+    const leaseExpiresAtMs = Date.parse(String(leaseExpiresAtRaw ?? ""));
+    if (!Number.isFinite(leaseExpiresAtMs)) {
+      return 1_000;
+    }
+    const remainingMs = leaseExpiresAtMs - Date.now();
+    return Math.max(750, Math.min(10_000, remainingMs > 0 ? remainingMs : 1_000));
+  }
+
+  private async handleSessionNotOwned(
+    connection: LocalGatewayConnection,
+    sessionId: string,
+    reason: string,
+  ): Promise<void> {
+    const session = await this.sessions.getSession(sessionId);
+    if (!session) {
+      this.sendInvalidSession(connection.socket, {
+        reason: "INVALID_SESSION",
+        canResume: false,
+      });
+      connection.socket.close(4001, "INVALID_SESSION");
+      return;
+    }
+
+    const ownerInstanceId = session.instanceId;
+    if (ownerInstanceId && ownerInstanceId !== this.instanceId) {
+      this.logger.warn("session_affinity_mismatch", {
+        sessionId,
+        connectionId: connection.connectionId,
+        currentInstanceId: this.instanceId,
+        ownerInstanceId,
+        reason,
+      });
+      this.sendReconnect(connection, reason, this.computeRetryAfterMs(session.leaseExpiresAt), ownerInstanceId);
+      connection.socket.close(4010, reason);
+      return;
+    }
+
+    const leaseExpiresAtMs = Date.parse(session.leaseExpiresAt);
+    if (Number.isFinite(leaseExpiresAtMs) && leaseExpiresAtMs <= Date.now()) {
+      this.logger.warn("session_lease_expired", {
+        sessionId,
+        connectionId: connection.connectionId,
+        instanceId: this.instanceId,
+        leaseExpiresAt: session.leaseExpiresAt,
+      });
+      this.sendReconnect(connection, "SESSION_LEASE_EXPIRED", 1_000);
+      connection.socket.close(4010, "SESSION_LEASE_EXPIRED");
+      return;
+    }
+
+    this.sendInvalidSession(connection.socket, {
+      reason: "INVALID_SESSION",
+      canResume: false,
+    });
+    connection.socket.close(4001, "INVALID_SESSION");
+  }
+
+  private sendReconnect(
+    connection: LocalGatewayConnection,
+    reason: string,
+    retryAfterMs: number,
+    targetInstanceId: string | null = null,
+  ): void {
     this.metrics.trackReconnectSignal();
+    const reconnectPayload: GatewayReconnectPayload = {
+      reason,
+      retryAfterMs,
+    };
+    if (targetInstanceId) {
+      reconnectPayload.targetInstanceId = targetInstanceId;
+    }
     this.sendFrame(connection.socket, {
       op: "RECONNECT",
       s: null,
       t: null,
-      d: {
-        reason,
-        retryAfterMs,
-      } satisfies GatewayReconnectPayload,
+      d: reconnectPayload,
     });
   }
 

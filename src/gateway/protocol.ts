@@ -126,6 +126,7 @@ export interface GatewayInvalidSessionPayload {
 export interface GatewayReconnectPayload {
   reason: string;
   retryAfterMs: number;
+  targetInstanceId?: string;
 }
 
 export interface GatewayErrorPayload {

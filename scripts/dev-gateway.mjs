@@ -2,6 +2,7 @@ import net from "node:net";
 import process from "node:process";
 import readline from "node:readline";
 import { spawn } from "node:child_process";
+import "dotenv/config";
 import { createDevLogger, getDevSymbols } from "./dev-logger.mjs";
 
 const symbols = getDevSymbols();
@@ -9,6 +10,34 @@ const hasExternalPrefix = process.argv.includes("--external-prefix");
 const gatewayLog = createDevLogger("GATEWAY", { externalPrefix: hasExternalPrefix });
 const GATEWAY_HOST = "127.0.0.1";
 const GATEWAY_PORT = 8788;
+
+function parseBoolean(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes";
+}
+
+function resolveConfiguredGatewayUrl() {
+  const fromServer = String(process.env.MESSLY_GATEWAY_PUBLIC_URL ?? "").trim();
+  if (fromServer) {
+    return fromServer;
+  }
+  return String(process.env.VITE_MESSLY_GATEWAY_URL ?? "").trim();
+}
+
+function isLocalGatewayUrl(urlRaw) {
+  const urlValue = String(urlRaw ?? "").trim();
+  if (!urlValue) {
+    return true;
+  }
+
+  try {
+    const parsed = new URL(urlValue);
+    const hostname = parsed.hostname.toLowerCase();
+    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+  } catch {
+    return false;
+  }
+}
 
 function normalizeOutputLine(rawLine) {
   const line = String(rawLine ?? "").replace(/\u001b\[[0-9;]*m/g, "").trim();
@@ -101,6 +130,17 @@ function resolveGatewayLaunchCommand() {
 }
 
 async function main() {
+  const forceLocalGateway = parseBoolean(process.env.MESSLY_DEV_FORCE_LOCAL_GATEWAY);
+  const configuredGatewayUrl = resolveConfiguredGatewayUrl();
+  if (!forceLocalGateway && configuredGatewayUrl && !isLocalGatewayUrl(configuredGatewayUrl)) {
+    gatewayLog.warn(
+      `Remote gateway configured (${configuredGatewayUrl}); skipping local gateway bootstrap.`,
+    );
+    await waitForShutdown();
+    process.exit(0);
+    return;
+  }
+
   const alreadyRunning = await isPortReachable(GATEWAY_HOST, GATEWAY_PORT);
   if (alreadyRunning) {
     const healthy = await isMesslyGatewayHealthy(GATEWAY_HOST, GATEWAY_PORT);

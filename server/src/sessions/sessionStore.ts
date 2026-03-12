@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { SessionClientInfo } from "./sessionManager";
 import type { RedisManager } from "../redis/client";
 import { gatewayRedisKeys } from "../redis/keys";
-import type { GatewaySubscription, GatewayDispatchPayloadMap } from "../protocol/dispatch";
+import type { GatewayDispatchPayloadMap, GatewaySubscription } from "../protocol/dispatch";
 import type { GatewayDispatchEvent } from "../protocol/opcodes";
 
 interface CreateSessionInput {
@@ -27,6 +27,11 @@ interface BindSessionInput {
   subscriptions: GatewaySubscription[];
 }
 
+interface MarkDisconnectedInput {
+  instanceId?: string;
+  connectionId?: string;
+}
+
 interface SessionDispatchRecord<TEvent extends GatewayDispatchEvent = GatewayDispatchEvent> {
   seq: number;
   eventId: string;
@@ -43,6 +48,7 @@ export interface StoredGatewaySession {
   subscriptions: GatewaySubscription[];
   connectionId: string | null;
   instanceId: string | null;
+  leaseExpiresAt: string;
   ipAddress: string;
   authSessionId: string;
   userAgent: string | null;
@@ -61,9 +67,23 @@ export interface SessionResumeResult {
   replay: SessionDispatchRecord[];
 }
 
+export interface SessionLeaseResult {
+  status: "renewed" | "claimed" | "owned_by_other" | "missing";
+  ownerInstanceId: string | null;
+  leaseExpiresAt: string | null;
+}
+
 const APPEND_DISPATCH_EVENT_SCRIPT = `
 if redis.call("HEXISTS", KEYS[1], "sessionId") == 0 then
   return 0
+end
+local owner = redis.call("HGET", KEYS[1], "instanceId") or ""
+if owner == "" or owner ~= ARGV[5] then
+  return -1
+end
+local leaseMs = tonumber(redis.call("HGET", KEYS[1], "leaseExpiresAtMs") or "0")
+if leaseMs > 0 and leaseMs <= tonumber(ARGV[6]) then
+  return -2
 end
 local nextSeq = redis.call("HINCRBY", KEYS[1], "lastSequence", 1)
 local record = cjson.decode(ARGV[3])
@@ -74,6 +94,32 @@ redis.call("RPUSH", KEYS[2], cjson.encode(record))
 redis.call("LTRIM", KEYS[2], -tonumber(ARGV[4]), -1)
 redis.call("EXPIRE", KEYS[2], ARGV[2])
 return nextSeq
+`;
+
+const RENEW_OR_CLAIM_LEASE_SCRIPT = `
+if redis.call("HEXISTS", KEYS[1], "sessionId") == 0 then
+  return {"missing", "", ""}
+end
+local owner = redis.call("HGET", KEYS[1], "instanceId") or ""
+local nowMs = tonumber(ARGV[1])
+local instanceId = ARGV[2]
+local leaseIso = ARGV[3]
+local leaseMs = tonumber(ARGV[4])
+local allowClaim = ARGV[5] == "1"
+if owner == instanceId then
+  redis.call("HSET", KEYS[1], "leaseExpiresAt", leaseIso, "leaseExpiresAtMs", tostring(leaseMs), "updatedAt", ARGV[6])
+  redis.call("EXPIRE", KEYS[1], ARGV[7])
+  redis.call("EXPIRE", KEYS[2], ARGV[7])
+  return {"renewed", owner, leaseIso}
+end
+local currentLeaseMs = tonumber(redis.call("HGET", KEYS[1], "leaseExpiresAtMs") or "0")
+if allowClaim and (owner == "" or currentLeaseMs <= nowMs) then
+  redis.call("HSET", KEYS[1], "instanceId", instanceId, "leaseExpiresAt", leaseIso, "leaseExpiresAtMs", tostring(leaseMs), "updatedAt", ARGV[6])
+  redis.call("EXPIRE", KEYS[1], ARGV[7])
+  redis.call("EXPIRE", KEYS[2], ARGV[7])
+  return {"claimed", owner, leaseIso}
+end
+return {"owned_by_other", owner, redis.call("HGET", KEYS[1], "leaseExpiresAt") or ""}
 `;
 
 function safeParseJson<T>(value: string | undefined, fallback: T): T {
@@ -87,11 +133,24 @@ function safeParseJson<T>(value: string | undefined, fallback: T): T {
   }
 }
 
+function parseLeaseMs(values: Record<string, string>): number {
+  const explicitLeaseMs = Number.parseInt(values.leaseExpiresAtMs ?? "0", 10);
+  if (Number.isFinite(explicitLeaseMs) && explicitLeaseMs > 0) {
+    return explicitLeaseMs;
+  }
+  const parsedFromIso = Date.parse(values.leaseExpiresAt ?? "");
+  if (Number.isFinite(parsedFromIso) && parsedFromIso > 0) {
+    return parsedFromIso;
+  }
+  return Date.now();
+}
+
 function toSession(values: Record<string, string>): StoredGatewaySession | null {
   if (!values.sessionId || !values.userId) {
     return null;
   }
 
+  const leaseExpiresAtMs = parseLeaseMs(values);
   return {
     sessionId: values.sessionId,
     resumeToken: values.resumeToken,
@@ -100,6 +159,7 @@ function toSession(values: Record<string, string>): StoredGatewaySession | null 
     subscriptions: safeParseJson(values.subscriptions, []),
     connectionId: values.connectionId || null,
     instanceId: values.instanceId || null,
+    leaseExpiresAt: values.leaseExpiresAt || new Date(leaseExpiresAtMs).toISOString(),
     ipAddress: values.ipAddress ?? "",
     authSessionId: values.authSessionId ?? "",
     userAgent: values.userAgent || null,
@@ -114,20 +174,65 @@ function toSession(values: Record<string, string>): StoredGatewaySession | null 
   };
 }
 
+function parseLeaseResult(raw: unknown): SessionLeaseResult {
+  if (!Array.isArray(raw)) {
+    return {
+      status: "missing",
+      ownerInstanceId: null,
+      leaseExpiresAt: null,
+    };
+  }
+  const statusRaw = String(raw[0] ?? "").trim();
+  const ownerRaw = String(raw[1] ?? "").trim() || null;
+  const leaseRaw = String(raw[2] ?? "").trim() || null;
+  if (statusRaw === "renewed" || statusRaw === "claimed" || statusRaw === "owned_by_other" || statusRaw === "missing") {
+    return {
+      status: statusRaw,
+      ownerInstanceId: ownerRaw,
+      leaseExpiresAt: leaseRaw,
+    };
+  }
+  return {
+    status: "missing",
+    ownerInstanceId: ownerRaw,
+    leaseExpiresAt: leaseRaw,
+  };
+}
+
 export class RedisSessionStore {
   constructor(
     private readonly redis: RedisManager,
     private readonly resumeTtlSeconds: number,
     private readonly bufferSize: number,
+    private readonly leaseDurationMs: number,
   ) {}
 
-  private async sessionExists(sessionId: string): Promise<boolean> {
-    return (await this.redis.command.hexists(gatewayRedisKeys.session(sessionId), "sessionId")) === 1;
+  private buildLeaseWindow(nowMs = Date.now()): { leaseExpiresAt: string; leaseExpiresAtMs: number } {
+    const leaseExpiresAtMs = nowMs + this.leaseDurationMs;
+    return {
+      leaseExpiresAt: new Date(leaseExpiresAtMs).toISOString(),
+      leaseExpiresAtMs,
+    };
+  }
+
+  async getAffinity(sessionId: string): Promise<string | null> {
+    const affinity = await this.redis.command.get(gatewayRedisKeys.affinity(sessionId));
+    return String(affinity ?? "").trim() || null;
+  }
+
+  async setAffinity(sessionId: string, instanceId: string): Promise<void> {
+    await this.redis.command.set(
+      gatewayRedisKeys.affinity(sessionId),
+      instanceId,
+      "EX",
+      this.resumeTtlSeconds,
+    );
   }
 
   async createSession(input: CreateSessionInput): Promise<StoredGatewaySession> {
     const now = new Date().toISOString();
     const sessionId = randomUUID();
+    const leaseWindow = this.buildLeaseWindow();
     const session: StoredGatewaySession = {
       sessionId,
       resumeToken: randomUUID(),
@@ -136,6 +241,7 @@ export class RedisSessionStore {
       subscriptions: input.subscriptions,
       connectionId: input.connectionId,
       instanceId: input.instanceId,
+      leaseExpiresAt: leaseWindow.leaseExpiresAt,
       ipAddress: input.ipAddress,
       authSessionId: input.authSessionId,
       userAgent: input.userAgent,
@@ -149,9 +255,10 @@ export class RedisSessionStore {
       lastDisconnectedAt: null,
     };
 
-    await this.writeSession(session);
+    await this.writeSession(session, leaseWindow.leaseExpiresAtMs);
     await this.redis.command.sadd(gatewayRedisKeys.userSessions(session.userId), session.sessionId);
     await this.redis.command.expire(gatewayRedisKeys.userSessions(session.userId), this.resumeTtlSeconds);
+    await this.setAffinity(session.sessionId, input.instanceId);
     return session;
   }
 
@@ -166,11 +273,13 @@ export class RedisSessionStore {
       return null;
     }
 
+    const leaseWindow = this.buildLeaseWindow();
     const nextSession: StoredGatewaySession = {
       ...session,
       subscriptions: input.subscriptions,
       connectionId: input.connectionId,
       instanceId: input.instanceId,
+      leaseExpiresAt: leaseWindow.leaseExpiresAt,
       ipAddress: input.ipAddress,
       authSessionId: input.authSessionId,
       userAgent: input.userAgent,
@@ -180,12 +289,18 @@ export class RedisSessionStore {
       lastHeartbeatAt: new Date().toISOString(),
       lastDisconnectedAt: null,
     };
-    await this.writeSession(nextSession);
+    await this.writeSession(nextSession, leaseWindow.leaseExpiresAtMs);
+    await this.setAffinity(nextSession.sessionId, input.instanceId);
     return nextSession;
   }
 
-  async updateSubscriptions(sessionId: string, subscriptions: GatewaySubscription[]): Promise<boolean> {
-    if (!(await this.sessionExists(sessionId))) {
+  async updateSubscriptions(
+    sessionId: string,
+    subscriptions: GatewaySubscription[],
+    instanceId: string,
+  ): Promise<boolean> {
+    const session = await this.getSession(sessionId);
+    if (!session || session.instanceId !== instanceId) {
       return false;
     }
 
@@ -194,42 +309,88 @@ export class RedisSessionStore {
       updatedAt: new Date().toISOString(),
     });
     await this.redis.command.expire(gatewayRedisKeys.session(sessionId), this.resumeTtlSeconds);
+    await this.redis.command.expire(gatewayRedisKeys.sessionEvents(sessionId), this.resumeTtlSeconds);
+    await this.setAffinity(sessionId, instanceId);
     return true;
   }
 
-  async touchHeartbeat(sessionId: string, lastAckedSequence: number | null): Promise<boolean> {
-    if (!(await this.sessionExists(sessionId))) {
+  async touchHeartbeat(
+    sessionId: string,
+    lastAckedSequence: number | null,
+    instanceId: string,
+  ): Promise<boolean> {
+    const session = await this.getSession(sessionId);
+    if (!session || session.instanceId !== instanceId) {
       return false;
     }
 
+    const leaseWindow = this.buildLeaseWindow();
     const payload: Record<string, string> = {
       lastHeartbeatAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
+      leaseExpiresAt: leaseWindow.leaseExpiresAt,
+      leaseExpiresAtMs: String(leaseWindow.leaseExpiresAtMs),
     };
     if (typeof lastAckedSequence === "number" && Number.isFinite(lastAckedSequence)) {
       payload.lastAckedSequence = String(Math.max(0, Math.floor(lastAckedSequence)));
     }
     await this.redis.command.hset(gatewayRedisKeys.session(sessionId), payload);
     await this.redis.command.expire(gatewayRedisKeys.session(sessionId), this.resumeTtlSeconds);
+    await this.redis.command.expire(gatewayRedisKeys.sessionEvents(sessionId), this.resumeTtlSeconds);
+    await this.setAffinity(sessionId, instanceId);
     return true;
   }
 
-  async markDisconnected(sessionId: string): Promise<StoredGatewaySession | null> {
+  async renewOrClaimLease(sessionId: string, instanceId: string, allowClaim: boolean): Promise<SessionLeaseResult> {
+    const nowMs = Date.now();
+    const leaseWindow = this.buildLeaseWindow(nowMs);
+    const resultRaw = await this.redis.command.eval(
+      RENEW_OR_CLAIM_LEASE_SCRIPT,
+      2,
+      gatewayRedisKeys.session(sessionId),
+      gatewayRedisKeys.sessionEvents(sessionId),
+      String(nowMs),
+      instanceId,
+      leaseWindow.leaseExpiresAt,
+      String(leaseWindow.leaseExpiresAtMs),
+      allowClaim ? "1" : "0",
+      new Date(nowMs).toISOString(),
+      String(this.resumeTtlSeconds),
+    );
+    const result = parseLeaseResult(resultRaw);
+    if (result.status === "renewed" || result.status === "claimed") {
+      await this.setAffinity(sessionId, instanceId);
+    }
+    return result;
+  }
+
+  async markDisconnected(sessionId: string, input: MarkDisconnectedInput = {}): Promise<StoredGatewaySession | null> {
     const session = await this.getSession(sessionId);
     if (!session) {
       return null;
     }
+    if (input.instanceId && session.instanceId !== input.instanceId) {
+      return null;
+    }
+    if (input.connectionId && session.connectionId !== input.connectionId) {
+      return null;
+    }
 
     const now = new Date().toISOString();
+    const leaseExpiresAtMs = parseLeaseMs({
+      leaseExpiresAt: session.leaseExpiresAt,
+    });
     const nextSession: StoredGatewaySession = {
       ...session,
       connectionId: null,
-      instanceId: null,
       status: "disconnected",
       updatedAt: now,
       lastDisconnectedAt: now,
     };
-    await this.writeSession(nextSession);
+    await this.writeSession(nextSession, leaseExpiresAtMs);
+    if (nextSession.instanceId) {
+      await this.setAffinity(nextSession.sessionId, nextSession.instanceId);
+    }
     return nextSession;
   }
 
@@ -241,11 +402,13 @@ export class RedisSessionStore {
     await Promise.all([
       this.redis.command.del(gatewayRedisKeys.session(sessionId)),
       this.redis.command.del(gatewayRedisKeys.sessionEvents(sessionId)),
+      this.redis.command.del(gatewayRedisKeys.affinity(sessionId)),
     ]);
   }
 
   async appendDispatchEvent<TEvent extends GatewayDispatchEvent>(input: {
     sessionId: string;
+    instanceId: string;
     eventId: string;
     event: TEvent;
     payload: GatewayDispatchPayloadMap[TEvent];
@@ -270,6 +433,8 @@ export class RedisSessionStore {
       String(this.resumeTtlSeconds),
       JSON.stringify(provisionalRecord),
       String(this.bufferSize),
+      input.instanceId,
+      String(Date.now()),
     );
     const nextSequence =
       typeof nextSequenceRaw === "number"
@@ -279,15 +444,13 @@ export class RedisSessionStore {
       return null;
     }
 
-    const record: SessionDispatchRecord<TEvent> = {
+    return {
       seq: nextSequence,
       eventId: input.eventId,
       event: input.event,
       payload: input.payload,
       occurredAt: input.occurredAt,
     };
-
-    return record;
   }
 
   async resolveResume(sessionId: string, resumeToken: string, sequence: number): Promise<SessionResumeResult | null> {
@@ -317,7 +480,7 @@ export class RedisSessionStore {
     };
   }
 
-  private async writeSession(session: StoredGatewaySession): Promise<void> {
+  private async writeSession(session: StoredGatewaySession, leaseExpiresAtMs: number): Promise<void> {
     await this.redis.command.hset(gatewayRedisKeys.session(session.sessionId), {
       sessionId: session.sessionId,
       resumeToken: session.resumeToken,
@@ -326,6 +489,8 @@ export class RedisSessionStore {
       subscriptions: JSON.stringify(session.subscriptions),
       connectionId: session.connectionId ?? "",
       instanceId: session.instanceId ?? "",
+      leaseExpiresAt: session.leaseExpiresAt,
+      leaseExpiresAtMs: String(leaseExpiresAtMs),
       ipAddress: session.ipAddress,
       authSessionId: session.authSessionId,
       userAgent: session.userAgent ?? "",

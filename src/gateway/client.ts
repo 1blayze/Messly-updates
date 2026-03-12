@@ -92,6 +92,7 @@ export class GatewayClient {
   private reconnectSuspendedUntil = 0;
   private resumeToken: string | null = null;
   private tokenHint: string | null = null;
+  private preferredInstanceId: string | null = null;
 
   constructor(options: GatewayClientOptions) {
     this.options = options;
@@ -142,7 +143,7 @@ export class GatewayClient {
       return;
     }
 
-    const resolvedSocketUrl = this.normalizeSocketUrl(this.options.url);
+    const resolvedSocketUrl = this.normalizeSocketUrl(this.options.url, this.preferredInstanceId);
     if (!resolvedSocketUrl) {
       this.updateState({
         status: "disabled",
@@ -232,6 +233,7 @@ export class GatewayClient {
     this.clearReconnectTimer();
     this.resumeToken = null;
     this.tokenHint = null;
+    this.preferredInstanceId = null;
     if (this.ws) {
       this.ws.close();
     }
@@ -264,6 +266,7 @@ export class GatewayClient {
   }
 
   private async handleHello(payload: GatewayHelloPayload): Promise<void> {
+    this.preferredInstanceId = String(payload.instanceId ?? "").trim() || null;
     this.stopHeartbeat();
     this.heartbeat = new GatewayHeartbeat({
       intervalMs: payload.heartbeatIntervalMs,
@@ -357,10 +360,21 @@ export class GatewayClient {
         });
         break;
       case "RECONNECT":
-        this.forceReconnect(
-          (frame.d as GatewayReconnectPayload | null)?.reason ?? "Gateway solicitou reconexao.",
-          (frame.d as GatewayReconnectPayload | null)?.retryAfterMs ?? null,
-        );
+        {
+          const reconnectPayload = (frame.d as GatewayReconnectPayload | null) ?? null;
+          const reconnectReason = reconnectPayload?.reason ?? "Gateway solicitou reconexao.";
+          const targetInstanceId = String(reconnectPayload?.targetInstanceId ?? "").trim() || null;
+          if (targetInstanceId) {
+            this.preferredInstanceId = targetInstanceId;
+            // Redirects should force a fresh IDENTIFY to avoid RESUME loops on stale routing.
+            this.resumeToken = null;
+            this.updateState({
+              sessionId: null,
+              seq: 0,
+            });
+          }
+          this.forceReconnect(reconnectReason, reconnectPayload?.retryAfterMs ?? null);
+        }
         break;
       case "INVALID_SESSION":
         this.handleInvalidSession(frame.d as GatewayInvalidSessionPayload);
@@ -437,6 +451,13 @@ export class GatewayClient {
       this.stopUnauthenticated("Sessao do gateway invalida: UNAUTHENTICATED.");
       return;
     }
+    if (closeCode === 4010 && closeReason?.toUpperCase().includes("SESSION")) {
+      this.resumeToken = null;
+      this.updateState({
+        sessionId: null,
+        seq: 0,
+      });
+    }
 
     if (this.state.status !== "connected") {
       this.connectionFailureStreak += 1;
@@ -503,7 +524,7 @@ export class GatewayClient {
     this.scheduleReconnect(reason, delayOverrideMs);
   }
 
-  private normalizeSocketUrl(valueRaw: string | null | undefined): string | null {
+  private normalizeSocketUrl(valueRaw: string | null | undefined, instanceIdHintRaw: string | null): string | null {
     const value = String(valueRaw ?? "").trim();
     if (!value) {
       return null;
@@ -537,6 +558,10 @@ export class GatewayClient {
       }
       parsed.hash = "";
       parsed.search = "";
+      const instanceIdHint = String(instanceIdHintRaw ?? "").trim();
+      if (instanceIdHint) {
+        parsed.searchParams.set("instanceId", instanceIdHint);
+      }
 
       return parsed.toString().replace(/\/+$/, "");
     } catch {
@@ -645,6 +670,7 @@ export class GatewayClient {
     this.stopHeartbeat();
     this.clearReconnectTimer();
     this.resumeToken = null;
+    this.preferredInstanceId = null;
     this.pendingFrames = [];
     this.updateState({
       status: "unauthenticated",

@@ -5,6 +5,8 @@ function withId(prefix: string, id: string): string {
 export const gatewayRedisKeys = {
   session: (sessionId: string) => withId("messly:gateway:session", sessionId),
   sessionEvents: (sessionId: string) => withId("messly:gateway:session-events", sessionId),
+  affinity: (sessionId: string) => withId("messly:gateway:affinity", sessionId),
+  instance: (instanceId: string) => withId("messly:gateway:instance", instanceId),
   userSessions: (userId: string) => withId("messly:gateway:user-sessions", userId),
   rateLimit: (bucket: string) => withId("messly:gateway:rate-limit", bucket),
   presenceSession: (sessionId: string) => withId("messly:gateway:presence:session", sessionId),

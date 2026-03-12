@@ -8,6 +8,39 @@ const DEFAULT_GATEWAY_METRICS_PATH = "/metrics";
 const DEFAULT_DISPATCH_CHANNEL = "messly:gateway:dispatch";
 const DEFAULT_CONTROL_CHANNEL = "messly:gateway:control";
 const DEFAULT_BRIDGE_LEASE_KEY = "messly:gateway:bridge:leader";
+const DEFAULT_NODE_ENV = "development";
+const DEFAULT_GATEWAY_PORT = "8788";
+const DEFAULT_GATEWAY_REDIS_URL = "redis://127.0.0.1:6379";
+const DEFAULT_ALLOWED_ORIGINS =
+  "https://messly.site,https://www.messly.site,http://localhost:5173,http://127.0.0.1:5173";
+const DEFAULT_GATEWAY_HEARTBEAT_INTERVAL_MS = "15000";
+const DEFAULT_GATEWAY_CLIENT_TIMEOUT_MS = "45000";
+const DEFAULT_GATEWAY_RESUME_TTL_SECONDS = "180";
+const DEFAULT_GATEWAY_SESSION_BUFFER_SIZE = "200";
+const DEFAULT_GATEWAY_LOG_LEVEL = "info";
+const DEFAULT_GATEWAY_METRICS_ENABLED = "true";
+const DEFAULT_GATEWAY_DRAIN_TIMEOUT_MS = "15000";
+const DEFAULT_GATEWAY_MAX_PAYLOAD_BYTES = "65536";
+const DEFAULT_GATEWAY_RATE_LIMIT_ENABLED = "true";
+
+function toNonEmptyString(value: unknown): string | null {
+  const normalized = String(value ?? "").trim();
+  return normalized || null;
+}
+
+function firstNonEmpty(...values: unknown[]): string | null {
+  for (const value of values) {
+    const normalized = toNonEmptyString(value);
+    if (normalized) {
+      return normalized;
+    }
+  }
+  return null;
+}
+
+function withFallback(value: unknown, fallback: string): string {
+  return firstNonEmpty(value) ?? fallback;
+}
 
 function parseBoolean(value: string): boolean {
   return value === "true" || value === "1" || value === "yes";
@@ -103,6 +136,10 @@ const envSchema = z
     MESSLY_BRIDGE_LEASE_KEY: z.string().trim().default(DEFAULT_BRIDGE_LEASE_KEY),
     MESSLY_BRIDGE_LEASE_TTL_MS: z.string().trim().default("30000"),
     MESSLY_BRIDGE_RENEW_INTERVAL_MS: z.string().trim().default("10000"),
+    MESSLY_SESSION_LEASE_DURATION_MS: z.string().trim().default("45000"),
+    MESSLY_INSTANCE_HEARTBEAT_INTERVAL_MS: z.string().trim().default("5000"),
+    MESSLY_INSTANCE_HEARTBEAT_TTL_MS: z.string().trim().default("20000"),
+    MESSLY_GATEWAY_REGION: z.string().trim().default("global"),
     SUPABASE_URL: z.string().trim().min(1),
     SUPABASE_PUBLISHABLE_KEY: z.string().trim().min(1),
     SUPABASE_SERVICE_ROLE_KEY: z.string().trim().min(1),
@@ -160,6 +197,10 @@ export interface GatewayEnv {
   bridgeLeaseKey: string;
   bridgeLeaseTtlMs: number;
   bridgeRenewIntervalMs: number;
+  sessionLeaseDurationMs: number;
+  instanceHeartbeatIntervalMs: number;
+  instanceHeartbeatTtlMs: number;
+  region: string;
   supabaseUrl: string;
   supabaseAnonKey: string;
   supabaseServiceRoleKey: string;
@@ -236,6 +277,22 @@ function toGatewayEnv(raw: z.infer<typeof envSchema>): GatewayEnv {
       "MESSLY_BRIDGE_RENEW_INTERVAL_MS",
       1_000,
     ),
+    sessionLeaseDurationMs: parseInteger(
+      raw.MESSLY_SESSION_LEASE_DURATION_MS,
+      "MESSLY_SESSION_LEASE_DURATION_MS",
+      5_000,
+    ),
+    instanceHeartbeatIntervalMs: parseInteger(
+      raw.MESSLY_INSTANCE_HEARTBEAT_INTERVAL_MS,
+      "MESSLY_INSTANCE_HEARTBEAT_INTERVAL_MS",
+      1_000,
+    ),
+    instanceHeartbeatTtlMs: parseInteger(
+      raw.MESSLY_INSTANCE_HEARTBEAT_TTL_MS,
+      "MESSLY_INSTANCE_HEARTBEAT_TTL_MS",
+      2_000,
+    ),
+    region: raw.MESSLY_GATEWAY_REGION,
     supabaseUrl: normalizeHttpUrl(raw.SUPABASE_URL, "SUPABASE_URL"),
     supabaseAnonKey: raw.SUPABASE_PUBLISHABLE_KEY,
     supabaseServiceRoleKey: raw.SUPABASE_SERVICE_ROLE_KEY,
@@ -297,7 +354,57 @@ function toGatewayEnv(raw: z.infer<typeof envSchema>): GatewayEnv {
 }
 
 export function readGatewayEnv(envSource: NodeJS.ProcessEnv = process.env): GatewayEnv {
-  const parsed = envSchema.safeParse(envSource);
+  const resolvedPort = withFallback(envSource.PORT, DEFAULT_GATEWAY_PORT);
+  const resolvedPublicGatewayUrl = withFallback(
+    firstNonEmpty(envSource.MESSLY_GATEWAY_PUBLIC_URL, envSource.VITE_MESSLY_GATEWAY_URL),
+    `ws://127.0.0.1:${resolvedPort}/gateway`,
+  );
+  const normalizedSource: NodeJS.ProcessEnv = {
+    ...envSource,
+    NODE_ENV: withFallback(envSource.NODE_ENV, DEFAULT_NODE_ENV),
+    PORT: resolvedPort,
+    MESSLY_GATEWAY_PUBLIC_URL: resolvedPublicGatewayUrl,
+    MESSLY_REDIS_URL: withFallback(envSource.MESSLY_REDIS_URL, DEFAULT_GATEWAY_REDIS_URL),
+    MESSLY_ALLOWED_ORIGINS: withFallback(envSource.MESSLY_ALLOWED_ORIGINS, DEFAULT_ALLOWED_ORIGINS),
+    MESSLY_HEARTBEAT_INTERVAL_MS: withFallback(
+      envSource.MESSLY_HEARTBEAT_INTERVAL_MS,
+      DEFAULT_GATEWAY_HEARTBEAT_INTERVAL_MS,
+    ),
+    MESSLY_CLIENT_TIMEOUT_MS: withFallback(envSource.MESSLY_CLIENT_TIMEOUT_MS, DEFAULT_GATEWAY_CLIENT_TIMEOUT_MS),
+    MESSLY_RESUME_TTL_SECONDS: withFallback(
+      envSource.MESSLY_RESUME_TTL_SECONDS,
+      DEFAULT_GATEWAY_RESUME_TTL_SECONDS,
+    ),
+    MESSLY_SESSION_BUFFER_SIZE: withFallback(
+      envSource.MESSLY_SESSION_BUFFER_SIZE,
+      DEFAULT_GATEWAY_SESSION_BUFFER_SIZE,
+    ),
+    MESSLY_LOG_LEVEL: withFallback(envSource.MESSLY_LOG_LEVEL, DEFAULT_GATEWAY_LOG_LEVEL),
+    MESSLY_METRICS_ENABLED: withFallback(envSource.MESSLY_METRICS_ENABLED, DEFAULT_GATEWAY_METRICS_ENABLED),
+    MESSLY_DRAIN_TIMEOUT_MS: withFallback(envSource.MESSLY_DRAIN_TIMEOUT_MS, DEFAULT_GATEWAY_DRAIN_TIMEOUT_MS),
+    MESSLY_MAX_PAYLOAD_BYTES: withFallback(
+      envSource.MESSLY_MAX_PAYLOAD_BYTES,
+      DEFAULT_GATEWAY_MAX_PAYLOAD_BYTES,
+    ),
+    MESSLY_RATE_LIMIT_ENABLED: withFallback(
+      envSource.MESSLY_RATE_LIMIT_ENABLED,
+      DEFAULT_GATEWAY_RATE_LIMIT_ENABLED,
+    ),
+    SUPABASE_URL: withFallback(
+      firstNonEmpty(envSource.SUPABASE_URL, envSource.VITE_SUPABASE_URL),
+      "",
+    ),
+    SUPABASE_PUBLISHABLE_KEY: withFallback(
+      firstNonEmpty(
+        envSource.SUPABASE_PUBLISHABLE_KEY,
+        envSource.VITE_SUPABASE_PUBLISHABLE_KEY,
+        envSource.VITE_SUPABASE_ANON_KEY,
+      ),
+      "",
+    ),
+  };
+
+  const parsed = envSchema.safeParse(normalizedSource);
   if (!parsed.success) {
     const formatted = parsed.error.issues
       .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
