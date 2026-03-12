@@ -6,6 +6,7 @@ import type {
   GatewayDispatchEventType,
   GatewayDispatchPayloadMap,
   GatewayFrame,
+  GatewayInvalidSessionPayload,
   GatewayPublishEventType,
   GatewayPublishPayloadMap,
   GatewaySubscription,
@@ -23,6 +24,7 @@ export type MesslyGatewayEventType =
   | "USER_UPDATE";
 
 type GatewayEventListener<TEvent extends MesslyGatewayEventType> = (payload: GatewayDispatchPayloadMap[TEvent]) => void;
+type GatewayStateListener = (state: GatewayClientState) => void;
 
 class MesslyGatewayService {
   private client: GatewayClient | null = null;
@@ -32,6 +34,7 @@ class MesslyGatewayService {
   private lastLoggedStateSignature: string | null = null;
   private readonly subscriptions = new Map<string, GatewaySubscription>();
   private readonly eventListeners = new Map<MesslyGatewayEventType, Set<(payload: unknown) => void>>();
+  private readonly stateListeners = new Set<GatewayStateListener>();
 
   async start(userId: string | null | undefined): Promise<void> {
     const normalizedUserId = String(userId ?? "").trim() || null;
@@ -138,6 +141,16 @@ class MesslyGatewayService {
     };
   }
 
+  subscribeState(listener: GatewayStateListener): () => void {
+    this.stateListeners.add(listener);
+    if (this.client) {
+      listener(this.client.getState());
+    }
+    return () => {
+      this.stateListeners.delete(listener);
+    };
+  }
+
   private replaceSubscriptions(subscriptions: GatewaySubscription[]): void {
     this.subscriptions.clear();
     subscriptions.forEach((subscription) => {
@@ -189,11 +202,15 @@ class MesslyGatewayService {
       }),
     );
     messlyStore.dispatch(gatewayActions.gatewayLatencyUpdated(state.latencyMs));
+    this.stateListeners.forEach((listener) => listener(state));
   }
 
   private handleGatewayFrame(frame: GatewayFrame): void {
     if (frame.op === "INVALID_SESSION") {
-      void authService.logout().catch(() => undefined);
+      const payload = (frame.d ?? null) as GatewayInvalidSessionPayload | null;
+      if (payload?.reason === "UNAUTHENTICATED" || payload?.reason === "SESSION_REVOKED") {
+        void authService.logout().catch(() => undefined);
+      }
       return;
     }
 

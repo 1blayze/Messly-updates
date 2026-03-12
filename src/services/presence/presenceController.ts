@@ -8,17 +8,10 @@ import {
   syncSpotifyConnection,
   type SpotifyConnectionState,
 } from "../connections/spotifyConnection";
-import {
-  disconnectPresenceGateway,
-  ensurePresenceGatewayConnected,
-  sendPresenceGatewayEvent,
-  setPresenceGatewayCurrentUser,
-  subscribePresenceGatewayState,
-} from "./presenceGateway";
+import { gatewayService } from "../gateway";
 import {
   PRESENCE_STALE_AFTER_MS,
   toPersistedPresenceStatus,
-  type PresenceGatewayEventType,
   type PresenceSpotifyActivity,
   type PresenceState,
 } from "./presenceTypes";
@@ -379,36 +372,14 @@ async function broadcastPresenceEvents(
   nextSnapshot: PresenceSemanticSnapshot,
   payload: PersistedPresencePayload,
 ): Promise<void> {
-  await ensurePresenceGatewayConnected();
-
-  const events = new Set<PresenceGatewayEventType>(["PRESENCE_UPDATE"]);
-  const nextIsInvisible = nextSnapshot.state === "invisivel";
-  const previousWasInvisible = previousSnapshot?.state === "invisivel" || !previousSnapshot;
-
-  if (!nextIsInvisible && previousWasInvisible) {
-    events.add("USER_ONLINE");
-  }
-  if (nextIsInvisible && previousSnapshot && previousSnapshot.state !== "invisivel") {
-    events.add("USER_OFFLINE");
-  }
-  if (!areSpotifyActivitiesMeaningfullyEqual(previousSnapshot?.activity ?? null, nextSnapshot.activity)) {
-    events.add("ACTIVITY_UPDATE");
-    events.add("SPOTIFY_UPDATE");
-  }
-
-  const timestamp = payload.updated_at;
-  const activities = payload.activities;
-  await Promise.all(
-    Array.from(events).map((event) =>
-      sendPresenceGatewayEvent({
-        event,
-        user_id: payload.user_id,
-        status: payload.status,
-        activities,
-        timestamp,
-      }),
-    ),
-  );
+  void previousSnapshot;
+  void nextSnapshot;
+  await gatewayService.publish("PRESENCE_UPDATE", {
+    presence: {
+      status: payload.status,
+      activities: payload.activities ?? [],
+    },
+  });
 }
 
 async function syncPresenceState(
@@ -663,8 +634,6 @@ export function stop(): void {
   lastBroadcastSnapshot = null;
   lastGatewayStatus = "idle";
   lastLocalActivitySyncAtMs = 0;
-  setPresenceGatewayCurrentUser(null);
-  disconnectPresenceGateway();
   notify();
 }
 
@@ -715,7 +684,6 @@ export function start(userId: string | null | undefined): void {
   lastActivityAtMs = Date.now();
   lastLocalActivitySyncAtMs = 0;
   currentState = resolveEffectiveState();
-  setPresenceGatewayCurrentUser(normalizedUserId);
   notify();
 
   bindLifecycleListeners();
@@ -723,7 +691,7 @@ export function start(userId: string | null | undefined): void {
   scheduleIdleTransition();
   bindSpotifyPresence();
 
-  gatewayStateUnsubscribe = subscribePresenceGatewayState((gatewayState) => {
+  gatewayStateUnsubscribe = gatewayService.subscribeState((gatewayState) => {
     const nextStatus = gatewayState.status;
     if (lastGatewayStatus !== "connected" && nextStatus === "connected" && currentUserId) {
       void syncPresenceState({
@@ -746,7 +714,6 @@ export function start(userId: string | null | undefined): void {
       preferredState = storedPreference;
     }
 
-    await ensurePresenceGatewayConnected();
     await syncPresenceState({
       forcePersist: true,
       forceBroadcast: lastBroadcastSnapshot == null,

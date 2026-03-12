@@ -20,7 +20,8 @@ export type GatewayOpcode =
   | "PUBLISH"
   | "DISPATCH"
   | "RECONNECT"
-  | "INVALID_SESSION";
+  | "INVALID_SESSION"
+  | "ERROR";
 
 export type GatewayDispatchEventType =
   | "READY"
@@ -35,15 +36,23 @@ export type GatewayDispatchEventType =
   | "FRIEND_REQUEST_CREATE"
   | "FRIEND_REQUEST_ACCEPT"
   | "USER_UPDATE"
-  | "SPOTIFY_UPDATE";
+  | "SPOTIFY_UPDATE"
+  | "CALL_OFFER"
+  | "CALL_ANSWER"
+  | "CALL_ICE"
+  | "CALL_END";
 
 export type GatewayPublishEventType =
   | "PRESENCE_UPDATE"
   | "TYPING_START"
   | "TYPING_STOP"
-  | "SPOTIFY_UPDATE";
+  | "SPOTIFY_UPDATE"
+  | "CALL_OFFER"
+  | "CALL_ANSWER"
+  | "CALL_ICE"
+  | "CALL_END";
 
-export type GatewaySubscriptionTopicType = "conversation" | "user" | "friends" | "notifications";
+export type GatewaySubscriptionTopicType = "conversation" | "user" | "friends" | "notifications" | "voice" | "room";
 
 export interface GatewaySubscription {
   type: GatewaySubscriptionTopicType;
@@ -59,8 +68,19 @@ export interface GatewayFrame<TPayload = unknown> {
 
 export interface GatewayHelloPayload {
   heartbeatIntervalMs: number;
+  clientTimeoutMs: number;
   connectionId: string;
+  instanceId: string;
   serverTime: string;
+  publicUrl: string;
+  resume: {
+    ttlSeconds: number;
+    bufferSize: number;
+  };
+  shard: {
+    id: number;
+    count: number;
+  };
 }
 
 export interface GatewayIdentifyPayload {
@@ -70,7 +90,7 @@ export interface GatewayIdentifyPayload {
     version: string;
     platform: string;
     clientType: "desktop" | "web" | "mobile" | "unknown";
-    deviceId: string;
+    deviceId?: string;
   };
   subscriptions: GatewaySubscription[];
 }
@@ -78,13 +98,41 @@ export interface GatewayIdentifyPayload {
 export interface GatewayResumePayload {
   token: string;
   sessionId: string;
+  resumeToken: string;
   seq: number;
+  subscriptions?: GatewaySubscription[];
+}
+
+export interface GatewayHeartbeatPayload {
+  lastSequence?: number | null;
+  nonce?: string;
+  sentAt?: string;
 }
 
 export interface GatewayReadyPayload {
   sessionId: string;
+  resumeToken: string;
   userId: string;
+  shardId: number;
+  shardCount: number;
   subscriptions: GatewaySubscription[];
+}
+
+export interface GatewayInvalidSessionPayload {
+  reason: string;
+  canResume: boolean;
+}
+
+export interface GatewayReconnectPayload {
+  reason: string;
+  retryAfterMs: number;
+}
+
+export interface GatewayErrorPayload {
+  code: string;
+  message: string;
+  retryAfterMs?: number;
+  details?: unknown;
 }
 
 export interface GatewayMessageDispatchPayload {
@@ -133,8 +181,23 @@ export interface GatewaySpotifyDispatchPayload {
   updatedAt: string;
 }
 
+export interface GatewayCallDispatchPayload {
+  type: "CALL_OFFER" | "CALL_ANSWER" | "CALL_ICE" | "CALL_END";
+  callId: string;
+  scopeType: "voice" | "dm" | "room";
+  scopeId: string;
+  fromUserId: string;
+  targetUserId: string;
+  signal: Record<string, unknown> | null;
+  updatedAt: string;
+}
+
 export interface GatewayPublishPresencePayload {
-  presence: UserPresenceEntity;
+  presence: {
+    status: UserPresenceEntity["status"];
+    activities: unknown[];
+    metadata?: Record<string, unknown> | null;
+  };
 }
 
 export interface GatewayPublishTypingPayload {
@@ -142,9 +205,17 @@ export interface GatewayPublishTypingPayload {
 }
 
 export interface GatewayPublishSpotifyPayload {
-  userId: string;
+  userId?: string;
   status: UserPresenceEntity["status"];
   activity: SpotifyActivityEntity | null;
+}
+
+export interface GatewayPublishCallPayload {
+  callId: string;
+  scopeType: "voice" | "dm" | "room";
+  scopeId: string;
+  targetUserId: string;
+  signal: Record<string, unknown> | null;
 }
 
 export interface GatewayDispatchPayloadMap {
@@ -161,6 +232,10 @@ export interface GatewayDispatchPayloadMap {
   FRIEND_REQUEST_ACCEPT: GatewayFriendRequestDispatchPayload;
   USER_UPDATE: GatewayUserUpdateDispatchPayload;
   SPOTIFY_UPDATE: GatewaySpotifyDispatchPayload;
+  CALL_OFFER: GatewayCallDispatchPayload;
+  CALL_ANSWER: GatewayCallDispatchPayload;
+  CALL_ICE: GatewayCallDispatchPayload;
+  CALL_END: GatewayCallDispatchPayload;
 }
 
 export interface GatewayPublishPayloadMap {
@@ -168,6 +243,10 @@ export interface GatewayPublishPayloadMap {
   TYPING_START: GatewayPublishTypingPayload;
   TYPING_STOP: GatewayPublishTypingPayload;
   SPOTIFY_UPDATE: GatewayPublishSpotifyPayload;
+  CALL_OFFER: GatewayPublishCallPayload;
+  CALL_ANSWER: GatewayPublishCallPayload;
+  CALL_ICE: GatewayPublishCallPayload;
+  CALL_END: GatewayPublishCallPayload;
 }
 
 export function isGatewayDispatchEventType(value: unknown): value is GatewayDispatchEventType {
@@ -185,6 +264,10 @@ export function isGatewayDispatchEventType(value: unknown): value is GatewayDisp
     case "FRIEND_REQUEST_ACCEPT":
     case "USER_UPDATE":
     case "SPOTIFY_UPDATE":
+    case "CALL_OFFER":
+    case "CALL_ANSWER":
+    case "CALL_ICE":
+    case "CALL_END":
       return true;
     default:
       return false;

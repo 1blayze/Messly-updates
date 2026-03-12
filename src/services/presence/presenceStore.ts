@@ -17,7 +17,7 @@ import {
   getPresenceTableName,
   resolvePresenceSelectColumns,
 } from "./presenceTable";
-import { subscribePresenceGatewayEvents } from "./presenceGateway";
+import { gatewayService } from "../gateway";
 
 const MAX_USER_IDS_PER_FILTER = 100;
 const PRESENCE_UI_DEBOUNCE_MS = 50;
@@ -608,7 +608,15 @@ async function ensureRealtimeSubscription(): Promise<void> {
     }
 
     if (!unsubscribeGatewayEvents) {
-      unsubscribeGatewayEvents = subscribePresenceGatewayEvents(handlePresenceGatewayPayload);
+      unsubscribeGatewayEvents = gatewayService.subscribeEvent("PRESENCE_UPDATE", (payload) => {
+        handlePresenceGatewayPayload({
+          event: "PRESENCE_UPDATE",
+          user_id: payload.presence.userId,
+          status: payload.presence.status === "offline" ? "invisible" : payload.presence.status,
+          activities: payload.presence.activities,
+          timestamp: payload.presence.lastSeen,
+        });
+      });
     }
 
     if (realtimeChannel) {

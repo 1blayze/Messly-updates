@@ -1,23 +1,32 @@
 # Gateway backend domain (producao)
 
-Objetivo: criar um backend real para o gateway e ligar `gateway.messly.site` no Cloudflare sem apontar para Pages.
+Objetivo: publicar o gateway do Messly no Google Cloud Run e expor `gateway.messly.site` via Cloudflare proxy.
 
-## 1) Subir o gateway
-
-Este repositorio agora inclui `render.yaml` para criar o servico `messly-gateway` no Render.
+## 1) Subir o servico no Google Cloud Run
 
 Passos:
 
-1. No Render, escolha **Blueprint** e conecte este repositorio.
-2. Aplique o `render.yaml`.
-3. Configure os env vars obrigatorios (`SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `TURNSTILE_SECRET_KEY`, R2).
-4. Deploy.
+1. Build da imagem com o `Dockerfile` deste repositorio.
+2. Publique a imagem no Artifact Registry ou Container Registry.
+3. Deploy no Cloud Run com WebSocket habilitado.
+4. Configure as envs obrigatorias do gateway.
 
-Ao terminar, o Render mostra um host publico do backend, por exemplo:
+Exemplo:
 
-- `https://messly-gateway.onrender.com`
+```bash
+gcloud run deploy messly-gateway \
+  --image us-central1-docker.pkg.dev/<project>/<repo>/messly-gateway:latest \
+  --region us-central1 \
+  --platform managed \
+  --allow-unauthenticated \
+  --port 8080
+```
 
-Esse e o seu dominio real de backend.
+Ao terminar, o Cloud Run fornece um host publico, por exemplo:
+
+- `https://messly-gateway-abcde-uc.a.run.app`
+
+Esse e o origin do gateway.
 
 ## 2) Configurar DNS no Cloudflare
 
@@ -25,7 +34,7 @@ No DNS da zona `messly.site`, configure:
 
 - Type: `CNAME`
 - Name: `gateway`
-- Target: `messly-gateway.onrender.com` (ou o host real do seu provedor)
+- Target: `<cloud-run-service>.a.run.app`
 - Proxy status: `Proxied`
 - TTL: `Auto`
 
@@ -39,6 +48,7 @@ Frontend e desktop devem continuar com:
 
 Teste:
 
-1. Abra `https://gateway.messly.site/` e confirme JSON `service: "messly-gateway"`.
-2. Abra `https://gateway.messly.site/gateway` no browser e confirme retorno `426 upgrade_required`.
-3. No app, valide que o WebSocket conecta em `wss://gateway.messly.site/gateway`.
+1. Abra `https://gateway.messly.site/healthz`.
+2. Abra `https://gateway.messly.site/readyz`.
+3. Abra `https://gateway.messly.site/gateway` no browser e confirme retorno `426 upgrade_required`.
+4. No app, valide que o WebSocket conecta em `wss://gateway.messly.site/gateway`.

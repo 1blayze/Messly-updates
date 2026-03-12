@@ -1,13 +1,17 @@
 import { GatewayHeartbeat } from "./heartbeat";
 import type {
   GatewayDispatchEventType,
+  GatewayErrorPayload,
   GatewayFrame,
   GatewayHelloPayload,
   GatewayIdentifyPayload,
+  GatewayInvalidSessionPayload,
   GatewayOpcode,
   GatewayPublishEventType,
   GatewayPublishPayloadMap,
   GatewayReadyPayload,
+  GatewayReconnectPayload,
+  GatewayHeartbeatPayload,
   GatewayResumePayload,
   GatewaySubscription,
 } from "./protocol";
@@ -83,6 +87,7 @@ export class GatewayClient {
   private pendingHeartbeatAtMs: number | null = null;
   private connectionFailureStreak = 0;
   private reconnectSuspendedUntil = 0;
+  private resumeToken: string | null = null;
 
   constructor(options: GatewayClientOptions) {
     this.options = options;
@@ -210,6 +215,7 @@ export class GatewayClient {
     this.intentionalClose = true;
     this.stopHeartbeat();
     this.clearReconnectTimer();
+    this.resumeToken = null;
     if (this.ws) {
       this.ws.close();
     }
@@ -246,7 +252,10 @@ export class GatewayClient {
           op: "HEARTBEAT",
           s: this.state.seq,
           t: null,
-          d: {},
+          d: {
+            lastSequence: this.state.seq ?? 0,
+            sentAt: new Date().toISOString(),
+          } satisfies GatewayHeartbeatPayload,
         });
       },
       onTimeout: () => {
@@ -261,11 +270,13 @@ export class GatewayClient {
       return;
     }
 
-    if (this.state.sessionId && typeof this.state.seq === "number") {
+    if (this.state.sessionId && this.resumeToken && typeof this.state.seq === "number") {
       const payloadResume: GatewayResumePayload = {
         token,
         sessionId: this.state.sessionId,
+        resumeToken: this.resumeToken,
         seq: this.state.seq,
+        subscriptions: [...this.subscriptions.values()],
       };
       this.sendFrame({
         op: "RESUME",
@@ -325,14 +336,16 @@ export class GatewayClient {
         });
         break;
       case "RECONNECT":
-        this.forceReconnect("Gateway solicitou reconexao.");
+        this.forceReconnect(
+          (frame.d as GatewayReconnectPayload | null)?.reason ?? "Gateway solicitou reconexao.",
+          (frame.d as GatewayReconnectPayload | null)?.retryAfterMs ?? null,
+        );
         break;
       case "INVALID_SESSION":
-        this.updateState({
-          sessionId: null,
-          seq: null,
-        });
-        this.forceReconnect("Sessao do gateway invalidada.");
+        this.handleInvalidSession(frame.d as GatewayInvalidSessionPayload);
+        break;
+      case "ERROR":
+        this.handleGatewayError(frame.d as GatewayErrorPayload);
         break;
       case "DISPATCH":
         this.handleDispatchFrame(frame);
@@ -347,8 +360,10 @@ export class GatewayClient {
   private handleDispatchFrame(frame: GatewayFrame): void {
     if (frame.t === "READY" || frame.t === "RESUMED") {
       const payload = frame.d as GatewayReadyPayload;
+      this.resumeToken = payload.resumeToken;
       this.updateState({
         sessionId: payload.sessionId,
+        seq: typeof frame.s === "number" ? frame.s : this.state.seq,
         status: "connected",
         reconnectAttempt: 0,
         lastError: null,
@@ -422,11 +437,32 @@ export class GatewayClient {
     });
   }
 
-  private forceReconnect(reason: string): void {
+  private handleInvalidSession(payload: GatewayInvalidSessionPayload): void {
+    const shouldClearSession = !payload.canResume || payload.reason === "UNAUTHENTICATED" || payload.reason === "SESSION_REVOKED";
+    if (shouldClearSession) {
+      this.resumeToken = null;
+      this.updateState({
+        sessionId: null,
+        seq: 0,
+      });
+    }
+    this.forceReconnect(`Sessao do gateway invalidada: ${payload.reason}.`);
+  }
+
+  private handleGatewayError(payload: GatewayErrorPayload): void {
+    this.updateState({
+      lastError: payload.message,
+    });
+    if (typeof payload.retryAfterMs === "number" && payload.retryAfterMs > 0) {
+      this.scheduleReconnect(payload.message, payload.retryAfterMs);
+    }
+  }
+
+  private forceReconnect(reason: string, delayOverrideMs: number | null = null): void {
     if (this.ws) {
       this.ws.close();
     }
-    this.scheduleReconnect(reason);
+    this.scheduleReconnect(reason, delayOverrideMs);
   }
 
   private normalizeSocketUrl(valueRaw: string | null | undefined): string | null {
@@ -486,7 +522,7 @@ export class GatewayClient {
     logger(`[gateway:client] ${message}`, context);
   }
 
-  private scheduleReconnect(reason: string): void {
+  private scheduleReconnect(reason: string, delayOverrideMs: number | null = null): void {
     this.stopHeartbeat();
     this.clearReconnectTimer();
 
@@ -507,12 +543,15 @@ export class GatewayClient {
     const nextAttempt = this.state.reconnectAttempt + 1;
     const useSlowBackoff = nextAttempt >= 6;
     const normalizedAttempt = useSlowBackoff ? nextAttempt - 5 : nextAttempt;
-    const delayMs = computeReconnectDelayMs({
-      attempt: normalizedAttempt,
-      baseDelayMs: useSlowBackoff ? 30_000 : 1_000,
-      maxDelayMs: useSlowBackoff ? 10 * 60_000 : 30_000,
-      jitterRatio: 0.25,
-    });
+    const delayMs =
+      typeof delayOverrideMs === "number" && delayOverrideMs > 0
+        ? delayOverrideMs
+        : computeReconnectDelayMs({
+            attempt: normalizedAttempt,
+            baseDelayMs: useSlowBackoff ? 30_000 : 1_000,
+            maxDelayMs: useSlowBackoff ? 10 * 60_000 : 30_000,
+            jitterRatio: 0.25,
+          });
     const shouldShowSlowBackoffMessage = useSlowBackoff && reason.includes("WebSocket");
     const lastError = shouldShowSlowBackoffMessage
       ? "Gateway indisponivel no momento. Nova tentativa automatica em breve."

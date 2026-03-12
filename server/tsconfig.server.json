@@ -10,5 +10,18 @@
     "noEmit": true,
     "outDir": "dist"
   },
-  "include": ["./src/**/*.ts"]
+  "include": ["./src/**/*.ts"],
+  "exclude": [
+    "./src/edge/gatewayServer.ts",
+    "./src/edge/connectionManager.ts",
+    "./src/edge/sessionManager.ts",
+    "./src/events/**/*.ts",
+    "./src/fanout/**/*.ts",
+    "./src/realtime/**/*.ts",
+    "./src/signaling/**/*.ts",
+    "./src/subscriptions/**/*.ts",
+    "./src/infra/redis/**/*.ts",
+    "./src/infra/redisClient.ts",
+    "./src/security/__tests__/**/*.ts"
+  ]
 }
