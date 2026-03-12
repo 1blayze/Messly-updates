@@ -170,11 +170,13 @@ supabase.auth.onAuthStateChange((_event, session) => {
   cachedAuthUid = String(session?.user?.id ?? "").trim() || null;
   cachedAuthSessionId = decodeSupabaseSessionId(session?.access_token ?? null);
   cachedAuthSessionObservedAtMs = cachedAuthSessionId ? Date.now() : 0;
-  clearSessionsEdgeUnauthorizedCooldown();
-
-  if (cachedAuthUid) {
-    sessionsMutationApiTemporarilyDisabled = false;
-    sessionsDirectApiTemporarilyDisabled = false;
+  const didAuthPrincipalChange = previousUid !== cachedAuthUid;
+  if (didAuthPrincipalChange) {
+    clearSessionsEdgeUnauthorizedCooldown();
+    if (cachedAuthUid) {
+      sessionsMutationApiTemporarilyDisabled = false;
+      sessionsDirectApiTemporarilyDisabled = false;
+    }
   }
 
   if (previousUid) {
@@ -525,6 +527,7 @@ export async function recordLoginSession(): Promise<LoginSessionView | null> {
     return parsed.session;
   } catch (error) {
     if (isUnauthorizedSessionsEdgeError(error)) {
+      sessionsMutationApiTemporarilyDisabled = true;
       activateSessionsEdgeUnauthorizedCooldown();
       return null;
     }
@@ -579,6 +582,7 @@ export async function endCurrentLoginSession(): Promise<void> {
     clearSessionsEdgeUnauthorizedCooldown();
   } catch (error) {
     if (isUnauthorizedSessionsEdgeError(error)) {
+      sessionsMutationApiTemporarilyDisabled = true;
       activateSessionsEdgeUnauthorizedCooldown();
       return;
     }
@@ -638,6 +642,7 @@ export async function endLoginSessionById(sessionId: string): Promise<void> {
     invalidateListSessionsCache(uid);
   } catch (error) {
     if (isUnauthorizedSessionsEdgeError(error)) {
+      sessionsMutationApiTemporarilyDisabled = true;
       activateSessionsEdgeUnauthorizedCooldown();
       return;
     }
@@ -733,6 +738,8 @@ async function listActiveLoginSessionsDetailed(): Promise<ListActiveLoginSession
         };
       } catch (error) {
         if (isUnauthorizedSessionsEdgeError(error)) {
+          sessionsMutationApiTemporarilyDisabled = true;
+          sessionsDirectApiTemporarilyDisabled = true;
           activateSessionsEdgeUnauthorizedCooldown();
           return {
             sessions: [],
