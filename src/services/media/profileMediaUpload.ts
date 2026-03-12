@@ -1026,32 +1026,6 @@ export async function uploadProfileMediaAsset(
   const normalizedFile = await normalizeProfileMedia(kind, file, userId);
 
   try {
-    const presignUpload = await uploadProfileMediaViaPresign(kind, userId, normalizedFile);
-    if (presignUpload) {
-      return presignUpload;
-    }
-  } catch (error) {
-    logProfileMediaUpload("upload fallback selected", {
-      transport: "web",
-      kind,
-      userId,
-      from: "supabase-presign-direct",
-      to: "official-profile-proxy",
-      reason: error instanceof Error ? error.message : String(error ?? "unknown_error"),
-    }, "warn");
-    return uploadProfileMediaViaOfficialProxy(kind, userId, normalizedFile);
-  }
-
-  logProfileMediaUpload("upload fallback selected", {
-    transport: "web",
-    kind,
-    userId,
-    from: "supabase-presign-direct",
-    to: "official-profile-proxy",
-    reason: "presign_unavailable",
-  }, "warn");
-
-  try {
     return await uploadProfileMediaViaOfficialProxy(kind, userId, normalizedFile);
   } catch (proxyError) {
     logProfileMediaUpload("upload fallback selected", {
@@ -1059,8 +1033,33 @@ export async function uploadProfileMediaAsset(
       kind,
       userId,
       from: "official-profile-proxy",
-      to: "supabase-edge-binary",
+      to: "supabase-presign-direct",
       reason: proxyError instanceof Error ? proxyError.message : String(proxyError ?? "unknown_error"),
+    }, "warn");
+  }
+
+  try {
+    const presignUpload = await uploadProfileMediaViaPresign(kind, userId, normalizedFile);
+    if (presignUpload) {
+      return presignUpload;
+    }
+
+    logProfileMediaUpload("upload fallback selected", {
+      transport: "web",
+      kind,
+      userId,
+      from: "supabase-presign-direct",
+      to: "supabase-edge-binary",
+      reason: "presign_unavailable",
+    }, "warn");
+  } catch (error) {
+    logProfileMediaUpload("upload fallback selected", {
+      transport: "web",
+      kind,
+      userId,
+      from: "supabase-presign-direct",
+      to: "supabase-edge-binary",
+      reason: error instanceof Error ? error.message : String(error ?? "unknown_error"),
     }, "warn");
   }
 

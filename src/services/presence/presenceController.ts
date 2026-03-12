@@ -391,7 +391,9 @@ function persistPresenceWithKeepalive(
 
     const response = await upsertPresenceViaRest(tableName, keepalivePayload, accessToken, true);
     if (isPresenceAuthStatus(response.status)) {
-      void authService.clearLocalSession().catch(() => undefined);
+      logPresenceControllerDebug("keepalive_auth_rejected", {
+        status: response.status,
+      });
     }
   };
 
@@ -506,7 +508,9 @@ async function syncPresenceState(
       lastPersistedSnapshot = nextSnapshot;
     } catch (error) {
       if (isPresenceAuthError(error)) {
-        await authService.clearLocalSession().catch(() => undefined);
+        logPresenceControllerDebug("persist_presence_auth_rejected", {
+          reason: error instanceof Error ? error.message : String(error),
+        });
         return;
       }
       // Keep trying on the next heartbeat or semantic change.

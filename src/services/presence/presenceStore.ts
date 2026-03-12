@@ -395,12 +395,10 @@ async function fetchPresenceRows(userIds: string[]): Promise<void> {
 
     if (error) {
       shouldRetry = !isPresenceAuthError(error);
-      if (isPresenceAuthError(error)) {
-        void authService.clearLocalSession().catch(() => undefined);
-      }
       logPresenceDebug("fetch_rows_failed", {
         reason: String((error as { message?: unknown } | null)?.message ?? "unknown"),
         userCount: userIds.length,
+        authRejected: isPresenceAuthError(error),
       });
     } else {
       userIds.forEach((userId) => {
@@ -414,12 +412,10 @@ async function fetchPresenceRows(userIds: string[]): Promise<void> {
     }
   } catch (error) {
     shouldRetry = !isPresenceAuthError(error);
-    if (isPresenceAuthError(error)) {
-      void authService.clearLocalSession().catch(() => undefined);
-    }
     logPresenceDebug("fetch_rows_threw", {
       reason: error instanceof Error ? error.message : String(error),
       userCount: userIds.length,
+      authRejected: isPresenceAuthError(error),
     });
   } finally {
     userIds.forEach((userId) => {
