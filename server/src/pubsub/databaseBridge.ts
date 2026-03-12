@@ -107,13 +107,21 @@ export class SupabaseRealtimeBridge {
       return;
     }
 
-    if (change.eventType === "DELETE") {
+    const messageId = safeString(record.id);
+    const deletedAt = safeString(record.deleted_at);
+    const isSoftDelete = change.eventType === "UPDATE" && Boolean(deletedAt);
+
+    if (!messageId) {
+      return;
+    }
+
+    if (change.eventType === "DELETE" || isSoftDelete) {
       await this.publisher.publishDispatch({
         event: "MESSAGE_DELETE",
         payload: {
           conversationId,
-          messageId: safeString(record.id),
-          deletedAt: new Date().toISOString(),
+          messageId,
+          deletedAt: deletedAt || new Date().toISOString(),
         },
         targets: [{ type: "conversation", id: conversationId }],
       });

@@ -8,6 +8,7 @@ import { conversationsActions } from "../stores/conversationsSlice";
 import { messagesActions } from "../stores/messagesSlice";
 import { notificationsActions } from "../stores/notificationsSlice";
 import { profilesActions } from "../stores/profilesSlice";
+import { removeCachedInitialChatMessageById } from "../services/chat/chatApi";
 import { createClientNonce } from "../utils/ids";
 
 interface MessageEventContext {
@@ -66,6 +67,10 @@ function resolveNotificationContextLabel(conversationType: "dm" | "group" | "cha
   return "Conversa";
 }
 
+function isDeletedGatewayMessage(payload: GatewayMessageDispatchPayload): boolean {
+  return Boolean(String(payload.message.deletedAt ?? "").trim());
+}
+
 export function buildMessageCreateActions(
   payload: GatewayMessageDispatchPayload,
   context: MessageEventContext,
@@ -82,6 +87,17 @@ export function buildMessageCreateActions(
         id: payload.conversation.id,
       }),
     );
+  }
+
+  if (isDeletedGatewayMessage(payload)) {
+    removeCachedInitialChatMessageById(payload.message.conversationId, payload.message.id);
+    actions.push(
+      messagesActions.messageRemoved({
+        conversationId: payload.message.conversationId,
+        messageId: payload.message.id,
+      }),
+    );
+    return actions;
   }
 
   actions.push(
@@ -144,6 +160,18 @@ export function buildMessageUpdateActions(payload: GatewayMessageDispatchPayload
   if (payload.profiles?.length) {
     actions.push(profilesActions.profilesUpserted(payload.profiles));
   }
+
+  if (isDeletedGatewayMessage(payload)) {
+    removeCachedInitialChatMessageById(payload.message.conversationId, payload.message.id);
+    actions.push(
+      messagesActions.messageRemoved({
+        conversationId: payload.message.conversationId,
+        messageId: payload.message.id,
+      }),
+    );
+    return actions;
+  }
+
   actions.push(
     messagesActions.messagesUpserted({
       conversationId: payload.message.conversationId,
@@ -154,6 +182,7 @@ export function buildMessageUpdateActions(payload: GatewayMessageDispatchPayload
 }
 
 export function buildMessageDeleteActions(payload: GatewayMessageDeleteDispatchPayload): UnknownAction[] {
+  removeCachedInitialChatMessageById(payload.conversationId, payload.messageId);
   return [
     messagesActions.messageRemoved({
       conversationId: payload.conversationId,

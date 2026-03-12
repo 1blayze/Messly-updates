@@ -163,7 +163,15 @@ export class RealtimeCore {
       scopeId: conversationId,
     };
 
-    if (change.eventType === "DELETE") {
+    const messageId = safeString(record.id);
+    const deletedAt = safeString(record.deleted_at);
+    const isSoftDelete = change.eventType === "UPDATE" && Boolean(deletedAt);
+
+    if (!messageId) {
+      return;
+    }
+
+    if (change.eventType === "DELETE" || isSoftDelete) {
       const identity = normalizeEventIdentity("MESSAGE_DELETE");
       await this.eventBus.publish({
         ...identity,
@@ -173,8 +181,8 @@ export class RealtimeCore {
         routingKey: `conversation:${conversationId}`,
         payload: {
           conversationId,
-          messageId: safeString(record.id),
-          deletedAt: new Date().toISOString(),
+          messageId,
+          deletedAt: deletedAt || new Date().toISOString(),
         },
         occurredAt: identity.occurredAt,
       });

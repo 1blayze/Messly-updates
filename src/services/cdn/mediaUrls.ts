@@ -33,6 +33,9 @@ const DEFAULT_AVATAR_INNER_SVG = defaultAvatarSvgRaw
 
 const SIGNED_URL_EXPIRES_SECONDS = 300;
 const SIGNED_URL_REFRESH_BUFFER_MS = 30 * 1000;
+const MEDIA_DIAGNOSTICS_ENABLED =
+  import.meta.env.DEV ||
+  String(import.meta.env.VITE_MESSLY_VERBOSE_LOGS ?? "").trim().toLowerCase() === "true";
 const DEFAULT_BANNER_PLACEHOLDER = `data:image/svg+xml,${encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 480"><rect width="1200" height="480" fill="#000"/></svg>',
 )}`;
@@ -43,6 +46,9 @@ const signedMediaKeyByCacheKey = new Map<string, string>();
 const warmedImageUrls = new Map<string, number>();
 
 function logMediaUrl(level: "info" | "warn" | "error", message: string, details: Record<string, unknown>): void {
+  if (!MEDIA_DIAGNOSTICS_ENABLED && level === "info") {
+    return;
+  }
   const writer = level === "warn" ? console.warn : level === "error" ? console.error : console.info;
   writer(message, details);
 }

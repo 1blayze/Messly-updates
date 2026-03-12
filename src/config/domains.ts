@@ -13,6 +13,9 @@ const LOCAL_GATEWAY_MEDIA_URL = "http://127.0.0.1:8788/media/public";
 const LOCAL_GATEWAY_WS_URL = "ws://127.0.0.1:8788/gateway";
 const DEV_API_PROXY_PATH = "/__messly_api";
 const LEGACY_PUBLIC_MEDIA_ENV_KEYS = ["VITE_MEDIA_PUBLIC_BASE_URL", "VITE_R2_PUBLIC_BASE_URL"] as const;
+const DOMAIN_DIAGNOSTICS_ENABLED =
+  import.meta.env.DEV ||
+  String(import.meta.env.VITE_MESSLY_VERBOSE_LOGS ?? "").trim().toLowerCase() === "true";
 
 let cachedCdnBaseUrl: string | null = null;
 let cachedCdnBaseUrlInitialized = false;
@@ -289,11 +292,13 @@ function ensureCdnBaseUrlResolved(): string {
     assertProductionMediaBaseUrl(resolved.url);
   }
 
-  console.info("public media base url selected", {
-    mode,
-    source: resolved.source,
-    url: resolved.url,
-  });
+  if (DOMAIN_DIAGNOSTICS_ENABLED) {
+    console.info("public media base url selected", {
+      mode,
+      source: resolved.source,
+      url: resolved.url,
+    });
+  }
   if (resolved.fallbackDetected) {
     console.warn("cdn fallback detected", {
       mode,
@@ -306,10 +311,12 @@ function ensureCdnBaseUrlResolved(): string {
     const parsed = new URL(resolved.url);
     const hostname = parsed.hostname.toLowerCase();
     if (!isLocalHostname(hostname) && !isRawR2StorageHostname(hostname)) {
-      console.info("custom domain active", {
-        mode,
-        hostname,
-      });
+      if (DOMAIN_DIAGNOSTICS_ENABLED) {
+        console.info("custom domain active", {
+          mode,
+          hostname,
+        });
+      }
     }
   } catch {
     // noop

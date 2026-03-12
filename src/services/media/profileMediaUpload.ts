@@ -87,6 +87,10 @@ type ProfileMediaUploadLogEvent =
   | "upload final strategy"
   | "upload persisted profile";
 
+const PROFILE_MEDIA_DIAGNOSTICS_ENABLED =
+  import.meta.env.DEV ||
+  String(import.meta.env.VITE_MESSLY_VERBOSE_LOGS ?? "").trim().toLowerCase() === "true";
+
 function getUploadRuntimeEnvironment():
   | "web"
   | "desktop" {
@@ -109,6 +113,9 @@ function logProfileMediaUpload(
   details: Record<string, unknown>,
   level: "info" | "warn" | "error" = "info",
 ): void {
+  if (!PROFILE_MEDIA_DIAGNOSTICS_ENABLED && level === "info") {
+    return;
+  }
   const payload = {
     ...getUploadDiagnosticContext(),
     ...details,
@@ -606,12 +613,14 @@ async function uploadProfileMediaViaElectron(
     });
     const versionedUrl = typeof uploaded.versionedUrl === "string" ? uploaded.versionedUrl.trim() : "";
     if (versionedUrl) {
-      console.info("media public url generated", {
-        strategy: "profile-upload",
-        transport: "electron-ipc",
-        key: uploaded.key,
-        url: versionedUrl,
-      });
+      if (PROFILE_MEDIA_DIAGNOSTICS_ENABLED) {
+        console.info("media public url generated", {
+          strategy: "profile-upload",
+          transport: "electron-ipc",
+          key: uploaded.key,
+          url: versionedUrl,
+        });
+      }
     } else {
       console.warn("cdn fallback detected", {
         reason: "missing-versioned-url",
@@ -695,12 +704,14 @@ async function uploadProfileMediaViaOfficialProxy(
         ? (uploaded.persistedProfile as PersistedProfileMediaFields)
         : null;
     if (versionedUrl) {
-      console.info("media public url generated", {
-        strategy: "profile-upload",
-        transport: "official-profile-proxy",
-        key,
-        url: versionedUrl,
-      });
+      if (PROFILE_MEDIA_DIAGNOSTICS_ENABLED) {
+        console.info("media public url generated", {
+          strategy: "profile-upload",
+          transport: "official-profile-proxy",
+          key,
+          url: versionedUrl,
+        });
+      }
     } else {
       console.warn("cdn fallback detected", {
         reason: "missing-versioned-url",

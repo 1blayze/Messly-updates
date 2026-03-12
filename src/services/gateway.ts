@@ -27,6 +27,10 @@ export type MesslyGatewayEventType =
 type GatewayEventListener<TEvent extends MesslyGatewayEventType> = (payload: GatewayDispatchPayloadMap[TEvent]) => void;
 type GatewayStateListener = (state: GatewayClientState) => void;
 
+const GATEWAY_DIAGNOSTICS_ENABLED =
+  import.meta.env.DEV ||
+  String(import.meta.env.VITE_MESSLY_VERBOSE_LOGS ?? "").trim().toLowerCase() === "true";
+
 class MesslyGatewayService {
   private client: GatewayClient | null = null;
   private unsubscribeState: (() => void) | null = null;
@@ -50,12 +54,14 @@ class MesslyGatewayService {
     this.currentUserId = normalizedUserId;
     this.authRecoveryInFlight = false;
     const resolvedGatewayUrl = getGatewayUrl();
-    console.info("[gateway:service] start", {
-      userId: normalizedUserId,
-      gatewayUrl: resolvedGatewayUrl,
-      environment: import.meta.env.PROD ? "production" : "development",
-      platform: typeof window !== "undefined" ? String(window.electronAPI?.platform ?? "web") : "web",
-    });
+    if (GATEWAY_DIAGNOSTICS_ENABLED) {
+      console.info("[gateway:service] start", {
+        userId: normalizedUserId,
+        gatewayUrl: resolvedGatewayUrl,
+        environment: import.meta.env.PROD ? "production" : "development",
+        platform: typeof window !== "undefined" ? String(window.electronAPI?.platform ?? "web") : "web",
+      });
+    }
 
     this.ensureAuthStateListener();
 
@@ -201,7 +207,7 @@ class MesslyGatewayService {
     }
 
     const stateSignature = `${state.status}|${state.reconnectAttempt}|${state.lastError ?? ""}|${state.sessionId ?? ""}`;
-    if (stateSignature !== this.lastLoggedStateSignature) {
+    if (GATEWAY_DIAGNOSTICS_ENABLED && stateSignature !== this.lastLoggedStateSignature) {
       this.lastLoggedStateSignature = stateSignature;
       console.info("[gateway:service] state", {
         status: state.status,

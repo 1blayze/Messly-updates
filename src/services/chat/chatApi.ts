@@ -1030,10 +1030,18 @@ export async function primeInitialChatCacheForStartup(options: {
 function writeInitialMessagesCache(conversationId: string, response: ListMessagesResponse): void {
   hydrateInitialMessagesCacheFromStorage();
 
+  const normalizedMessages = (response.messages ?? [])
+    .map(cloneChatMessage)
+    .filter((message) => !String(message.deleted_at ?? "").trim())
+    .sort(compareMessagesAsc);
+
   initialMessagesCache.delete(conversationId);
   initialMessagesCache.set(conversationId, {
     conversationId,
-    response: cloneListMessagesResponse(response),
+    response: {
+      messages: normalizedMessages,
+      nextCursor: response.nextCursor ? { ...response.nextCursor } : null,
+    },
     cachedAt: Date.now(),
   });
 
@@ -1141,6 +1149,29 @@ export function removeCachedInitialChatMessageByClientId(conversationIdRaw: stri
   });
 }
 
+export function removeCachedInitialChatMessageById(conversationIdRaw: string, messageIdRaw: string): void {
+  const conversationId = String(conversationIdRaw ?? "").trim();
+  const messageId = String(messageIdRaw ?? "").trim();
+  if (!conversationId || !messageId) {
+    return;
+  }
+
+  const current = readInitialMessagesCache(conversationId, Number.MAX_SAFE_INTEGER);
+  if (!current || !Array.isArray(current.messages) || current.messages.length === 0) {
+    return;
+  }
+
+  const nextMessages = current.messages.filter((message) => String(message.id ?? "").trim() !== messageId);
+  if (nextMessages.length === current.messages.length) {
+    return;
+  }
+
+  writeInitialMessagesCache(conversationId, {
+    messages: nextMessages,
+    nextCursor: current.nextCursor ?? null,
+  });
+}
+
 function readInitialMessagesCache(conversationId: string, maxAgeMs = INITIAL_MESSAGES_CACHE_TTL_MS): ListMessagesResponse | null {
   hydrateInitialMessagesCacheFromStorage();
 
@@ -1153,6 +1184,19 @@ function readInitialMessagesCache(conversationId: string, maxAgeMs = INITIAL_MES
     initialMessagesCache.delete(conversationId);
     persistInitialMessagesCacheToStorage();
     return null;
+  }
+
+  const filteredMessages = (entry.response.messages ?? [])
+    .map(cloneChatMessage)
+    .filter((message) => !String(message.deleted_at ?? "").trim())
+    .sort(compareMessagesAsc);
+  if (filteredMessages.length !== entry.response.messages.length) {
+    entry.response = {
+      messages: filteredMessages,
+      nextCursor: entry.response.nextCursor ? { ...entry.response.nextCursor } : null,
+    };
+    persistInitialMessagesCacheToStorage();
+    persistInitialMessagesSnapshotDebounced(conversationId);
   }
 
   // Keep recent entries at the tail for LRU eviction.
@@ -1417,6 +1461,7 @@ async function listChatMessagesDirect(params: {
     .from("messages")
     .select(DIRECT_MESSAGE_SELECT_COLUMNS)
     .eq("conversation_id", conversationId)
+    .is("deleted_at", null)
     .order("created_at", { ascending: false })
     .order("id", { ascending: false })
     .limit(limit);
@@ -1677,20 +1722,44 @@ async function editChatMessageDirect(messageIdRaw: string, contentRaw: string): 
   return mapDirectMessageRow(updateResult.data as DirectMessageRow, null);
 }
 
+function syncCachedConversationMessageAfterMutation(message: ChatMessageServer): ChatMessageServer {
+  const conversationId = String(message.conversation_id ?? "").trim();
+  if (!conversationId) {
+    return message;
+  }
+
+  upsertCachedInitialChatMessages(conversationId, message);
+  return message;
+}
+
+function syncCachedConversationDeleteAfterMutation(message: ChatMessageServer): ChatMessageServer {
+  const conversationId = String(message.conversation_id ?? "").trim();
+  if (!conversationId) {
+    return message;
+  }
+
+  removeCachedInitialChatMessageById(conversationId, message.id);
+  if (message.client_id) {
+    removeCachedInitialChatMessageByClientId(conversationId, message.client_id);
+  }
+  upsertCachedInitialChatMessages(conversationId, message);
+  return message;
+}
+
 export async function sendChatMessage(payload: SendChatMessageInput): Promise<ChatMessageServer> {
   if (shouldPreferDirectChatAccess() && isDirectSendFallbackCandidate(payload)) {
-    return sendChatMessageDirect(payload);
+    return syncCachedConversationMessageAfterMutation(await sendChatMessageDirect(payload));
   }
 
   if (isDirectSendFallbackCandidate(payload) && isEdgeSendMessagesUnauthorizedBypassActive()) {
-    return sendChatMessageDirect(payload);
+    return syncCachedConversationMessageAfterMutation(await sendChatMessageDirect(payload));
   }
 
   if (isDirectSendFallbackCandidate(payload)) {
     const accessToken = await authService.getValidatedEdgeAccessToken();
     if (!accessToken) {
       activateEdgeSendMessagesUnauthorizedBypass();
-      return sendChatMessageDirect(payload);
+      return syncCachedConversationMessageAfterMutation(await sendChatMessageDirect(payload));
     }
   }
 
@@ -1718,7 +1787,7 @@ export async function sendChatMessage(payload: SendChatMessageInput): Promise<Ch
   try {
     const response = await trySend(requestWithPayload);
     clearEdgeSendMessagesUnauthorizedBypass();
-    return response.message;
+    return syncCachedConversationMessageAfterMutation(response.message);
   } catch (error) {
     const unauthorized = isUnauthorizedChatMessagesError(error);
     const invalidPayload =
@@ -1734,14 +1803,14 @@ export async function sendChatMessage(payload: SendChatMessageInput): Promise<Ch
         try {
           const retryResponse = await trySend(buildRequest(true));
           clearEdgeSendMessagesUnauthorizedBypass();
-          return retryResponse.message;
+          return syncCachedConversationMessageAfterMutation(retryResponse.message);
         } catch {
           // fall through to payload stripping / final throw
         }
       }
 
       if (isDirectSendFallbackCandidate(payload)) {
-        return sendChatMessageDirect(payload);
+        return syncCachedConversationMessageAfterMutation(await sendChatMessageDirect(payload));
       }
     }
 
@@ -1750,19 +1819,19 @@ export async function sendChatMessage(payload: SendChatMessageInput): Promise<Ch
     }
 
     const fallbackResponse = await trySend(buildRequest(false));
-    return fallbackResponse.message;
+    return syncCachedConversationMessageAfterMutation(fallbackResponse.message);
   }
 }
 
 export async function editChatMessage(messageId: string, content: string): Promise<ChatMessageServer> {
   if (shouldPreferDirectChatAccess() || isEdgeChatMessagesUnauthorizedBypassActive()) {
-    return editChatMessageDirect(messageId, content);
+    return syncCachedConversationMessageAfterMutation(await editChatMessageDirect(messageId, content));
   }
 
   const accessToken = await authService.getValidatedEdgeAccessToken();
   if (!accessToken) {
     activateEdgeDeleteMessagesUnauthorizedBypass();
-    return editChatMessageDirect(messageId, content);
+    return syncCachedConversationMessageAfterMutation(await editChatMessageDirect(messageId, content));
   }
 
   const request: EditMessageRequest = {
@@ -1778,23 +1847,23 @@ export async function editChatMessage(messageId: string, content: string): Promi
       timeoutMs: 18_000,
     });
     clearEdgeDeleteMessagesUnauthorizedBypass();
-    return response.message;
+    return syncCachedConversationMessageAfterMutation(response.message);
   } catch (error) {
     if (!isUnauthorizedChatMessagesError(error) && !isFallbackEligibleChatMessagesError(error)) {
       throw error;
     }
     activateEdgeDeleteMessagesUnauthorizedBypass();
-    return editChatMessageDirect(messageId, content);
+    return syncCachedConversationMessageAfterMutation(await editChatMessageDirect(messageId, content));
   }
 }
 
 export async function deleteChatMessage(messageId: string): Promise<ChatMessageServer> {
   if (shouldPreferDirectChatAccess()) {
-    return deleteChatMessageDirect(messageId);
+    return syncCachedConversationDeleteAfterMutation(await deleteChatMessageDirect(messageId));
   }
 
   if (isEdgeDeleteMessagesUnauthorizedBypassActive()) {
-    return deleteChatMessageDirect(messageId);
+    return syncCachedConversationDeleteAfterMutation(await deleteChatMessageDirect(messageId));
   }
 
   const request: DeleteMessageRequest = {
@@ -1809,7 +1878,7 @@ export async function deleteChatMessage(messageId: string): Promise<ChatMessageS
       timeoutMs: 18_000,
     });
     clearEdgeDeleteMessagesUnauthorizedBypass();
-    return response.message;
+    return syncCachedConversationDeleteAfterMutation(response.message);
   } catch (error) {
     const unauthorized = isUnauthorizedChatMessagesError(error);
     const fallbackEligible = isFallbackEligibleChatMessagesError(error);
@@ -1828,13 +1897,13 @@ export async function deleteChatMessage(messageId: string): Promise<ChatMessageS
             timeoutMs: 18_000,
           });
           clearEdgeDeleteMessagesUnauthorizedBypass();
-          return retryResponse.message;
+          return syncCachedConversationDeleteAfterMutation(retryResponse.message);
         } catch {
           // Fall through to direct fallback.
         }
       }
     }
 
-    return deleteChatMessageDirect(messageId);
+    return syncCachedConversationDeleteAfterMutation(await deleteChatMessageDirect(messageId));
   }
 }

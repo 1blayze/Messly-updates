@@ -2,6 +2,10 @@ import { getApiBaseUrl, getProfileMediaUploadUrl, toCdnUrl } from "../config/dom
 import { getRuntimeAppApiUrl } from "../config/runtimeApiConfig";
 import { getSupabaseAccessToken } from "./client";
 
+const MEDIA_DIAGNOSTICS_ENABLED =
+  import.meta.env.DEV ||
+  String(import.meta.env.VITE_MESSLY_VERBOSE_LOGS ?? "").trim().toLowerCase() === "true";
+
 export type MediaUploadKind =
   | "avatar"
   | "banner"
@@ -218,11 +222,13 @@ export async function createMediaUpload(payload: CreateMediaUploadRequest): Prom
       selectedCdnUrl,
     });
   }
-  console.info("media public url generated", {
-    strategy: "upload-create",
-    fileKey: response.fileKey,
-    url: selectedCdnUrl,
-  });
+  if (MEDIA_DIAGNOSTICS_ENABLED) {
+    console.info("media public url generated", {
+      strategy: "upload-create",
+      fileKey: response.fileKey,
+      url: selectedCdnUrl,
+    });
+  }
   return {
     ...response,
     cdnUrl: selectedCdnUrl,

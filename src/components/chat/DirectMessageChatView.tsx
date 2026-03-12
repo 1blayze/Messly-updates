@@ -862,6 +862,17 @@ function collectDeletedMessageIds(messages: ChatMessageItem[]): string[] {
   return ids;
 }
 
+function filterMessagesByVisibilityAndDeletedIds(
+  messages: ChatMessageItem[],
+  deletedMessageIds: ReadonlySet<string>,
+): ChatMessageItem[] {
+  if (deletedMessageIds.size === 0) {
+    return messages.filter(isVisibleChatMessage);
+  }
+
+  return messages.filter((message) => !deletedMessageIds.has(message.id) && isVisibleChatMessage(message));
+}
+
 interface NormalizedMessageWindow {
   normalizedMessages: ChatMessageItem[];
   deletedIds: string[];
@@ -2183,6 +2194,7 @@ export default function DirectMessageChatView({
   const scrollbarThumbRef = useRef<HTMLDivElement | null>(null);
   const messageRefs = useRef<Map<string, HTMLElement>>(new Map());
   const messagesRef = useRef<ChatMessageItem[]>([]);
+  const deletedMessageIdsRef = useRef<Set<string>>(new Set());
   const pendingVirtualScrollMessageIdRef = useRef<string | null>(null);
   const forceNextAutoScrollRef = useRef(false);
   const previousMessageCountRef = useRef(0);
@@ -3493,6 +3505,10 @@ export default function DirectMessageChatView({
   }, [messages]);
 
   useEffect(() => {
+    deletedMessageIdsRef.current = deletedMessageIds;
+  }, [deletedMessageIds]);
+
+  useEffect(() => {
     if (messages.length <= ACTIVE_MESSAGE_WINDOW_MAX) {
       return;
     }
@@ -3565,6 +3581,24 @@ export default function DirectMessageChatView({
     [],
   );
 
+  const registerDeletedMessageId = useCallback((messageIdRaw: string): void => {
+    const messageId = String(messageIdRaw ?? "").trim();
+    if (!messageId) {
+      return;
+    }
+
+    setDeletedMessageIds((current) => {
+      if (current.has(messageId)) {
+        deletedMessageIdsRef.current = current;
+        return current;
+      }
+      const next = new Set(current);
+      next.add(messageId);
+      deletedMessageIdsRef.current = next;
+      return next;
+    });
+  }, []);
+
   const loadConversationMessages = useCallback(async (reason: string = "manual"): Promise<void> => {
     const startedAt = Date.now();
     const fetchStartedAt = performance.now();
@@ -3587,22 +3621,34 @@ export default function DirectMessageChatView({
             });
       const fetchElapsedMs = performance.now() - fetchStartedAt;
       const { deletedIds, visibleMessages: serverMessages } = normalizeListedMessages(listed.messages ?? []);
-      if (deletedIds.length > 0) {
-        setDeletedMessageIds((current) => {
-          const next = new Set(current);
-          deletedIds.forEach((id) => next.add(id));
-          return next;
-        });
+      const knownDeletedMessageIds = new Set(deletedMessageIdsRef.current);
+      let hasNewDeletedMessageId = false;
+      deletedIds.forEach((id) => {
+        if (!knownDeletedMessageIds.has(id)) {
+          knownDeletedMessageIds.add(id);
+          hasNewDeletedMessageId = true;
+        }
+      });
+      if (hasNewDeletedMessageId) {
+        deletedMessageIdsRef.current = knownDeletedMessageIds;
+        setDeletedMessageIds(knownDeletedMessageIds);
       }
-      const optimisticMessages = messagesRef.current.filter((message) => message.optimistic || message.failed);
+
+      const visibleServerMessages = serverMessages.filter((message) => !knownDeletedMessageIds.has(message.id));
+      const optimisticMessages = messagesRef.current.filter(
+        (message) => (message.optimistic || message.failed) && !knownDeletedMessageIds.has(message.id),
+      );
       const serverClientIds = new Set(
-        serverMessages.map((message) => (message.clientId ? message.clientId : "")).filter(Boolean),
+        visibleServerMessages.map((message) => (message.clientId ? message.clientId : "")).filter(Boolean),
       );
 
       const carryOverMessages = optimisticMessages.filter(
         (message) => !message.clientId || !serverClientIds.has(message.clientId),
       );
-      const mergedMessages = sortMessages([...serverMessages, ...carryOverMessages]).filter(isVisibleChatMessage);
+      const mergedMessages = filterMessagesByVisibilityAndDeletedIds(
+        sortMessages([...visibleServerMessages, ...carryOverMessages]),
+        knownDeletedMessageIds,
+      );
       const trimmed = trimMessagesToActiveWindow(mergedMessages, "drop-older");
       const derivedOlderCursor = buildOlderCursorFromMessages(trimmed.messages);
       const resolvedCursor = trimmed.droppedOlder.length > 0
@@ -3616,14 +3662,14 @@ export default function DirectMessageChatView({
       setHasTrimmedNewerMessages(false);
 
       setLoadError(null);
-      void markConversationAsRead(serverMessages);
+      void markConversationAsRead(visibleServerMessages);
       recordLatency("chat_initial_load", startedAt);
       lastSuccessfulLoadAtRef.current = Date.now();
       logChatPerf("open:fetch", {
         conversationId,
         reason,
         fetchMs: Number(fetchElapsedMs.toFixed(1)),
-        messageCount: serverMessages.length,
+        messageCount: visibleServerMessages.length,
       });
     } catch (error) {
       reportClientError(error, {
@@ -3656,22 +3702,32 @@ export default function DirectMessageChatView({
       });
 
       const { deletedIds, visibleMessages: olderMessages } = normalizeListedMessages(listed.messages ?? []);
-      if (deletedIds.length > 0) {
-        setDeletedMessageIds((current) => {
-          const next = new Set(current);
-          deletedIds.forEach((id) => next.add(id));
-          return next;
-        });
+      const knownDeletedMessageIds = new Set(deletedMessageIdsRef.current);
+      let hasNewDeletedMessageId = false;
+      deletedIds.forEach((id) => {
+        if (!knownDeletedMessageIds.has(id)) {
+          knownDeletedMessageIds.add(id);
+          hasNewDeletedMessageId = true;
+        }
+      });
+      if (hasNewDeletedMessageId) {
+        deletedMessageIdsRef.current = knownDeletedMessageIds;
+        setDeletedMessageIds(knownDeletedMessageIds);
       }
-      if (olderMessages.length > 0) {
+
+      const visibleOlderMessages = olderMessages.filter((message) => !knownDeletedMessageIds.has(message.id));
+      if (visibleOlderMessages.length > 0) {
         const currentById = new Map(messagesRef.current.map((message) => [message.id, message]));
-        olderMessages.forEach((message) => {
+        visibleOlderMessages.forEach((message) => {
           currentById.set(message.id, {
             ...currentById.get(message.id),
             ...message,
           });
         });
-        const mergedMessages = sortMessages(Array.from(currentById.values())).filter(isVisibleChatMessage);
+        const mergedMessages = filterMessagesByVisibilityAndDeletedIds(
+          sortMessages(Array.from(currentById.values())),
+          knownDeletedMessageIds,
+        );
         const trimmed = trimMessagesToActiveWindow(mergedMessages, "drop-newer");
         if (trimmed.droppedNewer.length > 0) {
           setHasTrimmedNewerMessages(true);
@@ -3913,12 +3969,9 @@ export default function DirectMessageChatView({
           },
           (payload) => {
             const incoming = normalizeMessageRow(payload.new as MessageRow);
-            if (!isVisibleChatMessage(incoming)) {
-              setDeletedMessageIds((current) => {
-                const next = new Set(current);
-                next.add(incoming.id);
-                return next;
-              });
+            if (!isVisibleChatMessage(incoming) || deletedMessageIdsRef.current.has(incoming.id)) {
+              registerDeletedMessageId(incoming.id);
+              setMessages((current) => current.filter((message) => message.id !== incoming.id));
               return;
             }
             setMessages((current) => {
@@ -3932,7 +3985,10 @@ export default function DirectMessageChatView({
                 optimistic: false,
                 failed: false,
               });
-              return sortMessages(Array.from(currentById.values())).filter(isVisibleChatMessage);
+              return filterMessagesByVisibilityAndDeletedIds(
+                sortMessages(Array.from(currentById.values())),
+                deletedMessageIdsRef.current,
+              );
             });
 
             if (incoming.senderId !== currentUserId) {
@@ -3954,29 +4010,28 @@ export default function DirectMessageChatView({
           },
           (payload) => {
             const incoming = normalizeMessageRow(payload.new as MessageRow);
-            if (!isVisibleChatMessage(incoming)) {
-              setDeletedMessageIds((previous) => {
-                const next = new Set(previous);
-                next.add(incoming.id);
-                return next;
-              });
+            if (!isVisibleChatMessage(incoming) || deletedMessageIdsRef.current.has(incoming.id)) {
+              registerDeletedMessageId(incoming.id);
               setMessages((current) => current.filter((message) => message.id !== incoming.id));
               return;
             }
 
             setMessages((current) => {
-              return sortMessages(
-                current.map((message) =>
-                  message.id === incoming.id
-                    ? {
-                        ...message,
-                        ...incoming,
-                        optimistic: false,
-                        failed: false,
-                      }
-                    : message,
+              return filterMessagesByVisibilityAndDeletedIds(
+                sortMessages(
+                  current.map((message) =>
+                    message.id === incoming.id
+                      ? {
+                          ...message,
+                          ...incoming,
+                          optimistic: false,
+                          failed: false,
+                        }
+                      : message,
+                  ),
                 ),
-              ).filter(isVisibleChatMessage);
+                deletedMessageIdsRef.current,
+              );
             });
 
             if (incoming.type !== "text" && incoming.type !== "call_event" && !incoming.attachment) {
@@ -3999,7 +4054,7 @@ export default function DirectMessageChatView({
         void supabase.removeChannel(channel);
       }
     };
-  }, [conversationId, currentUserId, loadConversationMessages, markConversationAsRead]);
+  }, [conversationId, currentUserId, loadConversationMessages, markConversationAsRead, registerDeletedMessageId]);
 
   useEffect(() => {
     const container = scrollContainerRef.current;
@@ -4998,11 +5053,7 @@ export default function DirectMessageChatView({
       return next;
     });
     setDeleteTarget(null);
-    setDeletedMessageIds((current) => {
-      const next = new Set(current);
-      next.add(targetId);
-      return next;
-    });
+    registerDeletedMessageId(targetId);
     setMessages((current) => current.filter((message) => message.id !== targetId));
 
     try {
@@ -5023,6 +5074,7 @@ export default function DirectMessageChatView({
         setDeletedMessageIds((current) => {
           const next = new Set(current);
           next.delete(targetId);
+          deletedMessageIdsRef.current = next;
           return next;
         });
       }
@@ -5042,7 +5094,7 @@ export default function DirectMessageChatView({
         return next;
       });
     }
-  }, [canDeleteMessage, deleteTarget, deletedMessageIds, deletingMessageIds, messages]);
+  }, [canDeleteMessage, deleteTarget, deletedMessageIds, deletingMessageIds, messages, registerDeletedMessageId]);
 
   const handlePickAttachments = useCallback((event: ChangeEvent<HTMLInputElement>): void => {
     const pickedFiles = Array.from(event.currentTarget.files ?? []);

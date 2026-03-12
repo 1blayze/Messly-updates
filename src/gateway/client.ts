@@ -45,6 +45,10 @@ interface GatewayClientOptions {
 type StateListener = (state: GatewayClientState) => void;
 type FrameListener = (frame: GatewayFrame) => void;
 
+const GATEWAY_DIAGNOSTICS_ENABLED =
+  import.meta.env.DEV ||
+  String(import.meta.env.VITE_MESSLY_VERBOSE_LOGS ?? "").trim().toLowerCase() === "true";
+
 function parseGatewayFrame(raw: string): GatewayFrame | null {
   try {
     const parsed = JSON.parse(raw) as GatewayFrame;
@@ -581,6 +585,9 @@ export class GatewayClient {
   }
 
   private log(level: "info" | "warn" | "error", message: string, context: Record<string, unknown>): void {
+    if (!GATEWAY_DIAGNOSTICS_ENABLED && level !== "error") {
+      return;
+    }
     const logger = level === "error" ? console.error : level === "warn" ? console.warn : console.info;
     logger(`[gateway:client] ${message}`, context);
   }

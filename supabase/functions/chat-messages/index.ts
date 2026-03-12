@@ -607,6 +607,7 @@ async function listMessages(payload: ListPayload, userId: string, context: Reque
     .from("messages")
     .select(MESSAGE_SELECT_COLUMNS)
     .eq("conversation_id", payload.conversationId)
+    .is("deleted_at", null)
     .order("created_at", { ascending: false })
     .order("id", { ascending: false })
     .limit(limit + 1);

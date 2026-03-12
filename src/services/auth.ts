@@ -616,7 +616,8 @@ class AuthService {
       }
     } catch (error) {
       const canFallbackToDirectSupabase =
-        shouldFallbackToDirectSupabaseLogin(error) || isSupabaseSessionCorruptedError(error);
+        shouldFallbackToDirectSupabaseLogin(error) ||
+        (!(error instanceof AuthApiError) && isSupabaseSessionCorruptedError(error));
       if (!canFallbackToDirectSupabase) {
         throw error;
       }
