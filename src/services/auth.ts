@@ -26,6 +26,10 @@ const PENDING_VERIFICATION_KEY = "messly.auth.pending-verification";
 const LEGACY_SESSION_STORAGE_KEY = "messly.auth.session";
 const SESSION_REFRESH_BUFFER_MS = 30_000;
 const EDGE_ACCESS_TOKEN_VALIDATION_TTL_MS = 15_000;
+const AUTH_SESSION_READ_TIMEOUT_MS = 8_000;
+const AUTH_SESSION_REFRESH_TIMEOUT_MS = 10_000;
+const AUTH_LOGIN_TIMEOUT_MS = 12_000;
+const AUTH_TOKEN_VALIDATION_TIMEOUT_MS = 8_000;
 
 let refreshSessionPromise: Promise<Session | null> | null = null;
 let authStateSyncInitialized = false;
@@ -56,6 +60,23 @@ function resolveClientDescriptor(): AuthClientDescriptor {
     ...descriptor,
     version: String(descriptor.version || appPackage.version || "0.0.5"),
   };
+}
+
+async function withTimeout<T>(task: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new Error(message));
+    }, Math.max(1_000, timeoutMs));
+  });
+
+  try {
+    return await Promise.race([task, timeoutPromise]);
+  } finally {
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+    }
+  }
 }
 
 async function setPendingVerificationState(state: PendingVerificationState | null): Promise<void> {
@@ -205,7 +226,11 @@ async function clearSessionState(): Promise<void> {
 
 async function readSupabaseClientSession(): Promise<Session | null> {
   try {
-    const result = await supabase.auth.getSession();
+    const result = await withTimeout(
+      supabase.auth.getSession(),
+      AUTH_SESSION_READ_TIMEOUT_MS,
+      "Tempo limite ao ler sessao local do Supabase.",
+    );
     if (result.error) {
       if (isSupabaseSessionCorruptedError(result.error)) {
         await clearSessionState();
@@ -355,10 +380,14 @@ function shouldPreferDirectSupabaseSignup(): boolean {
 }
 
 async function applyRemoteSession(accessToken: string, refreshToken: string): Promise<Session> {
-  const sessionResult = await supabase.auth.setSession({
-    access_token: accessToken,
-    refresh_token: refreshToken,
-  });
+  const sessionResult = await withTimeout(
+    supabase.auth.setSession({
+      access_token: accessToken,
+      refresh_token: refreshToken,
+    }),
+    AUTH_LOGIN_TIMEOUT_MS,
+    "Tempo limite ao aplicar sessao remota.",
+  );
   if (sessionResult.error || !sessionResult.data.session) {
     throw sessionResult.error ?? new Error("Supabase session was not returned.");
   }
@@ -368,10 +397,14 @@ async function applyRemoteSession(accessToken: string, refreshToken: string): Pr
 }
 
 async function signInWithDirectSupabase(email: string, password: string): Promise<Session> {
-  const signInResult = await supabase.auth.signInWithPassword({
-    email,
-    password,
-  });
+  const signInResult = await withTimeout(
+    supabase.auth.signInWithPassword({
+      email,
+      password,
+    }),
+    AUTH_LOGIN_TIMEOUT_MS,
+    "Tempo limite ao autenticar direto no Supabase.",
+  );
 
   if (signInResult.error || !signInResult.data.session) {
     throw signInResult.error ?? new Error("Supabase session was not returned.");
@@ -425,9 +458,13 @@ async function refreshSessionWithStoredToken(refreshTokenRaw?: string | null): P
       return null;
     }
 
-    const result = await supabase.auth.refreshSession({
-      refresh_token: fallbackRefreshToken,
-    });
+    const result = await withTimeout(
+      supabase.auth.refreshSession({
+        refresh_token: fallbackRefreshToken,
+      }),
+      AUTH_SESSION_REFRESH_TIMEOUT_MS,
+      "Tempo limite ao renovar sessao.",
+    );
 
     if (result.error) {
       if (isInvalidRefreshTokenError(result.error)) {
@@ -492,7 +529,11 @@ class AuthService {
     }
 
     try {
-      const result = await supabase.auth.getUser(accessToken);
+      const result = await withTimeout(
+        supabase.auth.getUser(accessToken),
+        AUTH_TOKEN_VALIDATION_TIMEOUT_MS,
+        "Tempo limite ao validar token no Supabase.",
+      );
       const accepted = !result.error && Boolean(result.data.user?.id);
       if (accepted) {
         this.markValidatedEdgeAccessToken(accessToken);
@@ -609,7 +650,15 @@ class AuthService {
       });
       session = await applyRemoteSession(response.access_token, response.refresh_token);
 
-      const remoteAccessTokenAccepted = await this.isAccessTokenAcceptedBySupabase(session.access_token);
+      let remoteAccessTokenAccepted = true;
+      try {
+        remoteAccessTokenAccepted = await this.isAccessTokenAcceptedBySupabase(session.access_token);
+      } catch (validationError) {
+        if (import.meta.env.DEV) {
+          console.warn("[auth:login] validacao de token remota indisponivel", validationError);
+        }
+        remoteAccessTokenAccepted = true;
+      }
       if (!remoteAccessTokenAccepted) {
         await clearSessionState();
         session = await signInWithDirectSupabase(email, password);
@@ -710,8 +759,12 @@ class AuthService {
 
   async getValidatedEdgeAccessToken(): Promise<string | null> {
     const currentAccessToken = await this.getCurrentAccessToken();
-    if (await this.isAccessTokenAcceptedBySupabase(currentAccessToken)) {
-      return currentAccessToken;
+    try {
+      if (await this.isAccessTokenAcceptedBySupabase(currentAccessToken)) {
+        return currentAccessToken;
+      }
+    } catch {
+      return isLikelyJwt(currentAccessToken) ? currentAccessToken : null;
     }
 
     let refreshedSession: Session | null;
@@ -722,8 +775,12 @@ class AuthService {
       return null;
     }
     const refreshedAccessToken = String(refreshedSession?.access_token ?? "").trim();
-    if (await this.isAccessTokenAcceptedBySupabase(refreshedAccessToken)) {
-      return refreshedAccessToken;
+    try {
+      if (await this.isAccessTokenAcceptedBySupabase(refreshedAccessToken)) {
+        return refreshedAccessToken;
+      }
+    } catch {
+      return isLikelyJwt(refreshedAccessToken) ? refreshedAccessToken : null;
     }
 
     await clearSessionState();

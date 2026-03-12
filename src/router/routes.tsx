@@ -131,6 +131,8 @@ function AppShellRoute() {
   const bootstrap = useAppBootstrapSnapshot();
   const currentUserId = String(user?.uid ?? "").trim();
   const isBootstrapReady = bootstrap.phase === "ready" && bootstrap.userId === currentUserId;
+  const shouldRenderAppShell =
+    isBootstrapReady || (bootstrap.phase === "error" && bootstrap.userId === currentUserId);
 
   if (!currentUserId) {
     return (
@@ -142,7 +144,7 @@ function AppShellRoute() {
     );
   }
 
-  if (!isBootstrapReady) {
+  if (!shouldRenderAppShell) {
     return (
       <div className="startup-auth-surface" data-messly-startup-surface="shell">
         <AppStartupScreen

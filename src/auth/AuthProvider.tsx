@@ -165,11 +165,34 @@ function mapSupabaseUser(rawUser: User | null): AuthUser | null {
 }
 
 let bootstrapSessionPromise: Promise<Session | null> | null = null;
+const AUTH_BOOTSTRAP_SESSION_TIMEOUT_MS = 10_000;
+const AUTH_SESSION_HINT_TIMEOUT_MS = 4_000;
+
+async function withTimeout<T>(task: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new Error(message));
+    }, Math.max(800, timeoutMs));
+  });
+
+  try {
+    return await Promise.race([task, timeoutPromise]);
+  } finally {
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+    }
+  }
+}
 
 async function getInitialSessionOnce(): Promise<Session | null> {
   if (!bootstrapSessionPromise) {
     bootstrapSessionPromise = (async () => {
-      return authService.getCurrentSession();
+      return withTimeout(
+        authService.getCurrentSession(),
+        AUTH_BOOTSTRAP_SESSION_TIMEOUT_MS,
+        "Tempo limite ao carregar sessao inicial.",
+      );
     })().catch((error) => {
       bootstrapSessionPromise = null;
       throw error;
@@ -442,8 +465,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       publishHint();
     }
 
-    void authService
-      .hasStoredSessionHint()
+    void withTimeout(
+      authService.hasStoredSessionHint(),
+      AUTH_SESSION_HINT_TIMEOUT_MS,
+      "Tempo limite ao verificar indicio de sessao.",
+    )
       .then((hasHint) => {
         if (!isMounted) {
           return;

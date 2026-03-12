@@ -40,6 +40,9 @@ const DEFAULT_SNAPSHOT: AppBootstrapSnapshot = {
   error: null,
   updatedAt: Date.now(),
 };
+const BOOTSTRAP_SESSION_VALIDATION_TIMEOUT_MS = 12_000;
+const BOOTSTRAP_OPTIONAL_TASK_TIMEOUT_MS = 12_000;
+const BOOTSTRAP_CACHE_WARMUP_TIMEOUT_MS = 8_000;
 
 function normalizeProgress(value: number): number {
   if (!Number.isFinite(value)) {
@@ -58,6 +61,23 @@ function resolveErrorMessage(error: unknown): string {
   return "Falha ao inicializar o Messly.";
 }
 
+async function withTimeout<T>(task: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timeoutId: number | null = null;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = window.setTimeout(() => {
+      reject(new Error(message));
+    }, Math.max(1_000, timeoutMs));
+  });
+
+  try {
+    return await Promise.race([task, timeoutPromise]);
+  } finally {
+    if (timeoutId !== null) {
+      window.clearTimeout(timeoutId);
+    }
+  }
+}
+
 function stopRuntimeServices(): void {
   gatewayService.stop();
   presenceService.stop();
@@ -68,6 +88,11 @@ function stopRuntimeServices(): void {
 }
 
 async function warmSupabaseRealtime(): Promise<void> {
+  if (import.meta.env.PROD && (typeof window === "undefined" || !window.electronAPI)) {
+    // Avoid eager websocket preconnect on public web; realtime channels connect on demand.
+    return;
+  }
+
   const accessToken = await authService.getValidatedEdgeAccessToken();
   if (accessToken) {
     try {
@@ -285,7 +310,11 @@ class AppBootstrapController {
 
       const runOptionalTask = async (taskId: string, task: () => Promise<void>): Promise<void> => {
         try {
-          await task();
+          await withTimeout(
+            task(),
+            BOOTSTRAP_OPTIONAL_TASK_TIMEOUT_MS,
+            `Bootstrap optional task timed out: ${taskId}`,
+          );
         } catch (error) {
           if (import.meta.env.DEV) {
             console.warn(`[app-bootstrap] etapa ignorada: ${taskId}`, error);
@@ -297,24 +326,56 @@ class AppBootstrapController {
         return;
       }
 
-      const validatedToken = await authService.getValidatedEdgeAccessToken();
+      let validatedToken: string | null = null;
+      try {
+        validatedToken = await withTimeout(
+          authService.getValidatedEdgeAccessToken(),
+          BOOTSTRAP_SESSION_VALIDATION_TIMEOUT_MS,
+          "Tempo limite ao validar sessao.",
+        );
+      } catch (validationError) {
+        if (import.meta.env.DEV) {
+          console.warn("[app-bootstrap] validacao da sessao excedeu tempo limite", validationError);
+        }
+        validatedToken = await withTimeout(
+          authService.getCurrentAccessToken().catch(() => null),
+          Math.max(3_000, Math.trunc(BOOTSTRAP_SESSION_VALIDATION_TIMEOUT_MS / 2)),
+          "Tempo limite ao recuperar token de acesso atual.",
+        ).catch(() => null);
+      }
+
       if (!validatedToken) {
-        await authService.clearLocalSession().catch(() => undefined);
-        stopRuntimeServices();
-        throw new Error("Sessao invalida. Faca login novamente.");
+        if (import.meta.env.DEV) {
+          console.warn("[app-bootstrap] token validado indisponivel; continuando com inicializacao degradada");
+        }
       }
 
       if (!updateRunning("Carregando cache local", 0.16, "Restaurando dados locais")) {
         return;
       }
-      const [cacheSnapshot] = await Promise.all([
-        warmLocalRuntimeCache(),
-        primeInitialChatCacheForStartup({
-          accountId: userId,
-          maxEntries: 12,
-          maxAgeMs: 15 * 60_000,
-        }),
-      ]);
+      let cacheSnapshot: RuntimeCacheSnapshot = {
+        profiles: null,
+        conversations: null,
+        presence: null,
+      };
+      try {
+        [cacheSnapshot] = await withTimeout(
+          Promise.all([
+            warmLocalRuntimeCache(),
+            primeInitialChatCacheForStartup({
+              accountId: userId,
+              maxEntries: 12,
+              maxAgeMs: 15 * 60_000,
+            }),
+          ]),
+          BOOTSTRAP_CACHE_WARMUP_TIMEOUT_MS,
+          "Tempo limite ao carregar cache local.",
+        );
+      } catch (cacheWarmupError) {
+        if (import.meta.env.DEV) {
+          console.warn("[app-bootstrap] warmup de cache ignorado", cacheWarmupError);
+        }
+      }
       hydrateStoreFromRuntimeCache(cacheSnapshot);
 
       if (!updateRunning("Preparando interface", 0.72, "Aquecendo componentes principais")) {
