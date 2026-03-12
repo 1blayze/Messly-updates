@@ -299,6 +299,8 @@ class AppBootstrapController {
 
       const validatedToken = await authService.getValidatedEdgeAccessToken();
       if (!validatedToken) {
+        await authService.clearLocalSession().catch(() => undefined);
+        stopRuntimeServices();
         throw new Error("Sessao invalida. Faca login novamente.");
       }
 

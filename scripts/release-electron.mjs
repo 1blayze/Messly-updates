@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import dotenv from "dotenv";
 
@@ -60,6 +60,43 @@ function runOrThrow(command, args) {
   if (result.status !== 0) {
     process.exit(result.status ?? 1);
   }
+}
+
+function readBooleanFlag(rawValue, fallback) {
+  const normalized = String(rawValue ?? "").trim().toLowerCase();
+  if (!normalized) {
+    return fallback;
+  }
+  return !["0", "false", "off", "no"].includes(normalized);
+}
+
+function bumpPatchVersion(versionRaw) {
+  const normalizedVersion = String(versionRaw ?? "").trim();
+  const semverMatch = normalizedVersion.match(/^(\d+)\.(\d+)\.(\d+)$/);
+  if (!semverMatch) {
+    throw new Error(`Invalid package version "${normalizedVersion}". Expected format: X.Y.Z`);
+  }
+  const major = Number.parseInt(semverMatch[1], 10);
+  const minor = Number.parseInt(semverMatch[2], 10);
+  const patch = Number.parseInt(semverMatch[3], 10);
+  return `${major}.${minor}.${patch + 1}`;
+}
+
+function bumpPackageVersion() {
+  const packageJsonPath = resolve(process.cwd(), "package.json");
+  const rawPackageJson = readFileSync(packageJsonPath, "utf8");
+  const parsedPackageJson = JSON.parse(rawPackageJson);
+  const currentVersion = String(parsedPackageJson.version ?? "").trim();
+  const nextVersion = bumpPatchVersion(currentVersion);
+  parsedPackageJson.version = nextVersion;
+  writeFileSync(packageJsonPath, `${JSON.stringify(parsedPackageJson, null, 2)}\n`, "utf8");
+  process.stdout.write(`[release] version bumped: ${currentVersion} -> ${nextVersion}\n`);
+}
+
+if (readBooleanFlag(process.env.MESSLY_AUTO_BUMP_VERSION, true)) {
+  bumpPackageVersion();
+} else {
+  process.stdout.write("[release] automatic version bump disabled by MESSLY_AUTO_BUMP_VERSION.\n");
 }
 
 if (npmExecPath) {

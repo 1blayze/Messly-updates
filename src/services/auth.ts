@@ -11,7 +11,7 @@ import {
   type AuthClientDescriptor,
 } from "../api/authApi";
 import { getRuntimeAppApiUrl, getRuntimeAuthApiUrl } from "../config/runtimeApiConfig";
-import { supabase } from "../lib/supabaseClient";
+import { supabase, supabaseUrl } from "../lib/supabaseClient";
 import {
   clearAccessToken,
   getAccessToken,
@@ -150,10 +150,55 @@ async function persistSessionState(session: Session | null, fallbackRefreshToken
   await clearRefreshToken();
 }
 
+function clearSupabaseLocalSessionStorage(): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  let projectRef = "";
+  try {
+    projectRef = String(new URL(supabaseUrl).hostname.split(".")[0] ?? "").trim();
+  } catch {
+    projectRef = "";
+  }
+
+  const keyPatterns = [
+    /^sb-[a-z0-9_-]+-auth-token$/i,
+    /^sb-[a-z0-9_-]+-auth-token-code-verifier$/i,
+  ];
+
+  if (projectRef) {
+    keyPatterns.push(new RegExp(`^sb-${projectRef}-auth-token$`, "i"));
+    keyPatterns.push(new RegExp(`^sb-${projectRef}-auth-token-code-verifier$`, "i"));
+  }
+
+  try {
+    const keysToRemove: string[] = [];
+    for (let index = 0; index < window.localStorage.length; index += 1) {
+      const key = String(window.localStorage.key(index) ?? "").trim();
+      if (!key) {
+        continue;
+      }
+
+      if (keyPatterns.some((pattern) => pattern.test(key))) {
+        keysToRemove.push(key);
+      }
+    }
+
+    keysToRemove.forEach((key) => {
+      window.localStorage.removeItem(key);
+    });
+  } catch {
+    // Ignore storage access failures.
+  }
+}
+
 async function clearSessionState(): Promise<void> {
   clearAccessToken();
   lastValidatedEdgeAccessToken = null;
+  clearSupabaseLocalSessionStorage();
   await supabase.auth.signOut({ scope: "local" }).catch(() => undefined);
+  clearSupabaseLocalSessionStorage();
   await removeSecureItem(LEGACY_SESSION_STORAGE_KEY).catch(() => undefined);
   await clearRefreshToken();
 }

@@ -80,7 +80,7 @@ const WINDOWS_BEHAVIOR_SETTINGS_FILE = "windows-behavior-settings.json";
 const HIDDEN_DIRECT_MESSAGES_STATE_FILE = "hidden-direct-messages-state.json";
 const SECURE_AUTH_STORAGE_FILE = "secure-auth-storage.json";
 const SECURE_AUTH_STORAGE_KEY_REGEX = /^[a-z0-9:_./-]{1,200}$/i;
-const REFRESH_TOKEN_STORAGE_KEY = "messly.auth.refresh-token";
+const LEGACY_REFRESH_TOKEN_STORAGE_KEY = "messly.auth.refresh-token";
 const LEGACY_SESSION_STORAGE_KEY = "messly.auth.session";
 const DEFAULT_WINDOWS_BEHAVIOR_SETTINGS = Object.freeze({
   startMinimized: true,
@@ -107,6 +107,24 @@ const isPackagedDevToolsEnabled = PACKAGED_DEVTOOLS_ENV
   ? !["0", "false", "off", "no"].includes(PACKAGED_DEVTOOLS_ENV)
   : true;
 const areDevToolsEnabled = !app.isPackaged || isPackagedDevToolsEnabled;
+const PROJECT_SCOPED_REFRESH_TOKEN_STORAGE_KEY = (() => {
+  const supabaseUrlRaw = String(process.env.VITE_SUPABASE_URL ?? process.env.SUPABASE_URL ?? "").trim();
+  if (!supabaseUrlRaw) {
+    return LEGACY_REFRESH_TOKEN_STORAGE_KEY;
+  }
+
+  try {
+    const parsed = new URL(supabaseUrlRaw);
+    const projectRef = String(parsed.hostname.split(".")[0] ?? "").trim();
+    if (projectRef) {
+      return `messly.auth.refresh-token.${projectRef}`;
+    }
+  } catch {
+    // Fallback below.
+  }
+
+  return LEGACY_REFRESH_TOKEN_STORAGE_KEY;
+})();
 const TURNSTILE_CSP_SOURCE = "https://challenges.cloudflare.com";
 const CLOUDFLARE_INSIGHTS_SCRIPT_SOURCE = "https://static.cloudflareinsights.com";
 const STATUS_PANEL_ENABLED = (() => {
@@ -114,7 +132,8 @@ const STATUS_PANEL_ENABLED = (() => {
   if (rawValue) {
     return !["0", "false", "off", "no"].includes(rawValue);
   }
-  return app.isPackaged;
+  // Disabled by default to avoid startup UI churn on first launch after install.
+  return false;
 })();
 const STATUS_PANEL_PROGRESS_BYTES_VISIBILITY_THRESHOLD = 12 * 1024 * 1024;
 const STATUS_PANEL_PHASE = Object.freeze({
@@ -236,6 +255,7 @@ const STATUS_PANEL_MIN_VISIBLE_MS = Object.freeze({
 });
 const MAIN_WINDOW_FIRST_FRAME_TIMEOUT_MS = 12_000;
 const STARTUP_AUTO_UPDATE_BLOCK_TIMEOUT_MS = 8_000;
+const BLOCK_MAIN_WINDOW_ON_STARTUP_UPDATE = readBooleanEnvFlag(process.env.AUTO_UPDATE_BLOCK_STARTUP, false);
 const STARTUP_STATUS_PANEL_HARD_TIMEOUT_MS = 16_000;
 const RENDERER_BOOTSTRAP_MAX_RETRIES = 3;
 const RENDERER_BOOTSTRAP_RETRY_DELAYS_MS = Object.freeze([700, 1400, 2600]);
@@ -2232,6 +2252,50 @@ function removeSecureAuthStorageValue(rawKey) {
   return { removed: existed, persistent: true };
 }
 
+function getStoredRefreshTokenFromSecureStorage() {
+  const scopedToken = String(getSecureAuthStorageValue(PROJECT_SCOPED_REFRESH_TOKEN_STORAGE_KEY) ?? "").trim();
+  if (scopedToken) {
+    return scopedToken;
+  }
+
+  if (PROJECT_SCOPED_REFRESH_TOKEN_STORAGE_KEY !== LEGACY_REFRESH_TOKEN_STORAGE_KEY) {
+    const legacyToken = String(getSecureAuthStorageValue(LEGACY_REFRESH_TOKEN_STORAGE_KEY) ?? "").trim();
+    if (legacyToken) {
+      try {
+        setSecureAuthStorageValue(PROJECT_SCOPED_REFRESH_TOKEN_STORAGE_KEY, legacyToken);
+        removeSecureAuthStorageValue(LEGACY_REFRESH_TOKEN_STORAGE_KEY);
+      } catch {
+        // Best effort migration only.
+      }
+      return legacyToken;
+    }
+  }
+
+  return null;
+}
+
+function setStoredRefreshTokenInSecureStorage(rawToken) {
+  const token = String(rawToken ?? "");
+  const result = setSecureAuthStorageValue(PROJECT_SCOPED_REFRESH_TOKEN_STORAGE_KEY, token);
+  if (PROJECT_SCOPED_REFRESH_TOKEN_STORAGE_KEY !== LEGACY_REFRESH_TOKEN_STORAGE_KEY) {
+    removeSecureAuthStorageValue(LEGACY_REFRESH_TOKEN_STORAGE_KEY);
+  }
+  return result;
+}
+
+function clearStoredRefreshTokenInSecureStorage() {
+  const scopedResult = removeSecureAuthStorageValue(PROJECT_SCOPED_REFRESH_TOKEN_STORAGE_KEY);
+  if (PROJECT_SCOPED_REFRESH_TOKEN_STORAGE_KEY === LEGACY_REFRESH_TOKEN_STORAGE_KEY) {
+    return scopedResult;
+  }
+
+  const legacyResult = removeSecureAuthStorageValue(LEGACY_REFRESH_TOKEN_STORAGE_KEY);
+  return {
+    removed: Boolean(scopedResult?.removed || legacyResult?.removed),
+    persistent: Boolean(scopedResult?.persistent ?? legacyResult?.persistent),
+  };
+}
+
 function normalizeHiddenDirectMessageConversationIds(ids) {
   if (!Array.isArray(ids)) {
     return [];
@@ -2514,7 +2578,7 @@ function getConfiguredWebOrigin() {
 }
 
 function buildStartupSnapshot() {
-  const refreshToken = String(getSecureAuthStorageValue(REFRESH_TOKEN_STORAGE_KEY) ?? "").trim();
+  const refreshToken = String(getStoredRefreshTokenFromSecureStorage() ?? "").trim();
   const hiddenState = loadHiddenDirectMessagesState();
   const scopeMap =
     hiddenState?.hiddenConversationIdsByScope && typeof hiddenState.hiddenConversationIdsByScope === "object"
@@ -4433,13 +4497,13 @@ function registerIpcHandlers() {
     return removeSecureAuthStorageValue(payload?.key);
   });
   ipcMain.handle("auth:refresh-token:get", async () => {
-    return getSecureAuthStorageValue(REFRESH_TOKEN_STORAGE_KEY);
+    return getStoredRefreshTokenFromSecureStorage();
   });
   ipcMain.handle("auth:refresh-token:set", async (_event, token) => {
-    return setSecureAuthStorageValue(REFRESH_TOKEN_STORAGE_KEY, token);
+    return setStoredRefreshTokenInSecureStorage(token);
   });
   ipcMain.handle("auth:refresh-token:remove", async () => {
-    return removeSecureAuthStorageValue(REFRESH_TOKEN_STORAGE_KEY);
+    return clearStoredRefreshTokenInSecureStorage();
   });
   ipcMain.handle("diagnostics:log", logRendererDiagnosticsHandler);
   ipcMain.handle("app:get-startup-snapshot", async () => {
@@ -5035,6 +5099,9 @@ function createMainWindow() {
 }
 
 function isUpdaterBlockingMainWindowCreation() {
+  if (!BLOCK_MAIN_WINDOW_ON_STARTUP_UPDATE) {
+    return false;
+  }
   if (!app.isPackaged || !appUpdater?.getState) {
     return false;
   }
@@ -5118,30 +5185,63 @@ app.whenReady().then(async () => {
   appUpdater.setBroadcaster(broadcastUpdaterState);
   registerIpcHandlers();
 
-  try {
-    await prepareIconImages();
-  } catch {}
-
-  markMainStartupPerf("main:tray-init:start");
-  await createAppTray();
-  refreshAppTrayMenu();
-  markMainStartupPerf("main:tray-init:done");
-  measureMainStartupPerf("main_tray_init_duration", "main:tray-init:start", "main:tray-init:done");
-
   const shouldStartMinimized = shouldStartMinimizedThisLaunch();
   startupStatusPanelLifecycleActive = false;
   clearStartupStatusPanelHardStopTimer();
-  if (STATUS_PANEL_ENABLED && app.isPackaged && !shouldStartMinimized) {
+  const shouldUseStartupStatusPanel =
+    STATUS_PANEL_ENABLED &&
+    app.isPackaged &&
+    !shouldStartMinimized &&
+    BLOCK_MAIN_WINDOW_ON_STARTUP_UPDATE;
+  if (shouldUseStartupStatusPanel) {
     beginStartupStatusPanelLifecycle();
     setStatusPanelPhase(STATUS_PANEL_PHASE.CHECKING, {}, { force: true });
   }
 
-  try {
-    await runStartupAutoUpdateWithGuardTimeout();
-  } catch {}
+  const initializeTray = async () => {
+    markMainStartupPerf("main:tray-init:start");
+    try {
+      await createAppTray();
+      refreshAppTrayMenu();
+    } finally {
+      markMainStartupPerf("main:tray-init:done");
+      measureMainStartupPerf("main_tray_init_duration", "main:tray-init:start", "main:tray-init:done");
+    }
+  };
+
+  const primeIconsAndApply = async () => {
+    try {
+      await prepareIconImages();
+    } catch {}
+
+    const mainWindow = getMainWindow();
+    if (mainWindow && !mainWindow.isDestroyed() && mainWindowIconImageCache && typeof mainWindow.setIcon === "function") {
+      mainWindow.setIcon(mainWindowIconImageCache);
+    }
+    if (appTray && trayIconImageCache && !appTray.isDestroyed?.()) {
+      appTray.setImage(trayIconImageCache);
+    }
+  };
+
+  if (shouldStartMinimized) {
+    await initializeTray();
+  } else {
+    void initializeTray();
+  }
+  void primeIconsAndApply();
+
+  if (BLOCK_MAIN_WINDOW_ON_STARTUP_UPDATE) {
+    try {
+      await runStartupAutoUpdateWithGuardTimeout();
+    } catch {}
+  }
 
   if (!isAppQuitting) {
     createMainWindow();
+  }
+
+  if (!BLOCK_MAIN_WINDOW_ON_STARTUP_UPDATE) {
+    void runStartupAutoUpdateWithGuardTimeout().catch(() => {});
   }
 
   markMainStartupPerf("main:critical-startup-complete");
@@ -5168,14 +5268,6 @@ app.whenReady().then(async () => {
       waitForOAuthCallback: waitForSpotifyOAuthCallback,
     });
   }, 0);
-
-  const mainWindow = getMainWindow();
-  if (mainWindow && !mainWindow.isDestroyed() && mainWindowIconImageCache && typeof mainWindow.setIcon === "function") {
-    mainWindow.setIcon(mainWindowIconImageCache);
-  }
-  if (appTray && trayIconImageCache && !appTray.isDestroyed?.()) {
-    appTray.setImage(trayIconImageCache);
-  }
 
   const autoCheckIntervalMs = Number.parseInt(String(process.env.AUTO_UPDATE_CHECK_INTERVAL_MS ?? ""), 10);
   setTimeout(() => {

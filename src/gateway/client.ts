@@ -658,11 +658,7 @@ export class GatewayClient {
       this.tokenHint = provided;
       return provided;
     }
-
-    if (this.isLikelyJwt(this.tokenHint)) {
-      return this.tokenHint;
-    }
-
+    this.tokenHint = null;
     return null;
   }
 

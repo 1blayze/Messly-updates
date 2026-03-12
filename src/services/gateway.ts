@@ -32,6 +32,7 @@ class MesslyGatewayService {
   private unsubscribeState: (() => void) | null = null;
   private unsubscribeFrames: (() => void) | null = null;
   private currentUserId: string | null = null;
+  private authRecoveryInFlight = false;
   private lastLoggedStateSignature: string | null = null;
   private latestAccessToken: string | null = null;
   private unsubscribeAuthState: (() => void) | null = null;
@@ -47,6 +48,7 @@ class MesslyGatewayService {
     }
 
     this.currentUserId = normalizedUserId;
+    this.authRecoveryInFlight = false;
     const resolvedGatewayUrl = getGatewayUrl();
     console.info("[gateway:service] start", {
       userId: normalizedUserId,
@@ -95,6 +97,7 @@ class MesslyGatewayService {
 
   stop(): void {
     this.currentUserId = null;
+    this.authRecoveryInFlight = false;
     this.lastLoggedStateSignature = null;
     this.client?.disconnect();
     this.unsubscribeFrames?.();
@@ -193,6 +196,10 @@ class MesslyGatewayService {
   }
 
   private handleClientState(state: GatewayClientState): void {
+    if (state.status !== "unauthenticated") {
+      this.authRecoveryInFlight = false;
+    }
+
     const stateSignature = `${state.status}|${state.reconnectAttempt}|${state.lastError ?? ""}|${state.sessionId ?? ""}`;
     if (stateSignature !== this.lastLoggedStateSignature) {
       this.lastLoggedStateSignature = stateSignature;
@@ -220,6 +227,11 @@ class MesslyGatewayService {
     );
     messlyStore.dispatch(gatewayActions.gatewayLatencyUpdated(state.latencyMs));
     this.stateListeners.forEach((listener) => listener(state));
+
+    if (state.status === "unauthenticated" && !this.authRecoveryInFlight) {
+      this.authRecoveryInFlight = true;
+      void authService.clearLocalSession().catch(() => undefined);
+    }
   }
 
   private handleGatewayFrame(frame: GatewayFrame): void {

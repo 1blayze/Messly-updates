@@ -16,8 +16,8 @@
 !macroend
 
 !macro customInit
-  ; Hide default NSIS progress window to keep startup UX closer to Discord.
-  SetSilent silent
+  ; Keep installer UI visible so users get immediate feedback.
+  SetSilent normal
 !macroend
 
 !ifdef BUILD_UNINSTALLER
@@ -42,41 +42,33 @@ FunctionEnd
 !endif
 
 !macro customInstall
-  ; Hidden execution to avoid command window flashes during install/update.
+  DetailPrint "Preparando instalacao..."
+
+  ; Ensure stale app processes are closed before file replacement.
   nsExec::Exec '"$SYSDIR\taskkill.exe" /F /T /IM ${MESSLY_EXECUTABLE_NAME}'
   Pop $0
-  Sleep 220
+  Sleep 120
 
-  ; Keep a Discord-like layout contract expected by enterprise scripts.
-  CreateDirectory "$INSTDIR\packages"
-  CreateDirectory "$INSTDIR\app-${VERSION}"
-  IfFileExists "$INSTDIR\${MESSLY_EXECUTABLE_NAME}" 0 +2
-    CopyFiles /SILENT "$INSTDIR\${MESSLY_EXECUTABLE_NAME}" "$INSTDIR\app-${VERSION}\${MESSLY_EXECUTABLE_NAME}"
+  DetailPrint "Instalando Messly..."
 
-  ; Create Update.exe shim by copying the generated uninstaller binary.
-  Delete "$INSTDIR\Update.exe"
-  IfFileExists "$INSTDIR\Uninstall Messly.exe" copy_named_uninstaller try_plain_uninstall
-copy_named_uninstaller:
-  CopyFiles /SILENT "$INSTDIR\Uninstall Messly.exe" "$INSTDIR\Update.exe"
-  Goto update_shim_done
-try_plain_uninstall:
-  IfFileExists "$INSTDIR\uninstall.exe" 0 update_shim_done
-  CopyFiles /SILENT "$INSTDIR\uninstall.exe" "$INSTDIR\Update.exe"
-update_shim_done:
+  ; Always ensure Start Menu shortcuts exist for current user installs.
+  CreateDirectory "$SMPROGRAMS\Messly"
+  CreateShortcut "$SMPROGRAMS\Messly\Messly.lnk" "$INSTDIR\${MESSLY_EXECUTABLE_NAME}" "" "$INSTDIR\${MESSLY_EXECUTABLE_NAME}" 0
+  ; Legacy root link for compatibility with existing uninstall cleanup.
+  CreateShortcut "$SMPROGRAMS\Messly.lnk" "$INSTDIR\${MESSLY_EXECUTABLE_NAME}" "" "$INSTDIR\${MESSLY_EXECUTABLE_NAME}" 0
 
-  WriteRegStr HKCU "${MESSLY_UNINSTALL_REG_KEY}" "DisplayName" "Messly"
-  WriteRegStr HKCU "${MESSLY_UNINSTALL_REG_KEY}" "Publisher" "${MESSLY_PUBLISHER}"
-  WriteRegStr HKCU "${MESSLY_UNINSTALL_REG_KEY}" "DisplayVersion" "${VERSION}"
-  WriteRegStr HKCU "${MESSLY_UNINSTALL_REG_KEY}" "DisplayIcon" "$INSTDIR\${MESSLY_EXECUTABLE_NAME}"
-  WriteRegStr HKCU "${MESSLY_UNINSTALL_REG_KEY}" "InstallLocation" "$INSTDIR"
-  WriteRegStr HKCU "${MESSLY_UNINSTALL_REG_KEY}" "UninstallString" '$\"$INSTDIR\Update.exe$\" --uninstall -s'
-  WriteRegStr HKCU "${MESSLY_UNINSTALL_REG_KEY}" "QuietUninstallString" '$\"$INSTDIR\Update.exe$\" --uninstall -s'
-  WriteRegDWORD HKCU "${MESSLY_UNINSTALL_REG_KEY}" "NoModify" 1
-  WriteRegDWORD HKCU "${MESSLY_UNINSTALL_REG_KEY}" "NoRepair" 1
+  ; Desktop shortcut remains optional (respects no-desktop-shortcut installs).
+  ${IfNot} ${isNoDesktopShortcut}
+    CreateShortcut "$DESKTOP\Messly.lnk" "$INSTDIR\${MESSLY_EXECUTABLE_NAME}" "" "$INSTDIR\${MESSLY_EXECUTABLE_NAME}" 0
+  ${EndIf}
 
-  ; In silent one-click mode there is no finish page, so launch explicitly.
-  IfSilent 0 +2
-  ExecShell "" "$INSTDIR\${MESSLY_EXECUTABLE_NAME}"
+  IfFileExists "$INSTDIR\Uninstall Messly.exe" 0 +2
+    CreateShortcut "$SMPROGRAMS\Messly\Desinstalar Messly.lnk" "$INSTDIR\Uninstall Messly.exe"
+  IfFileExists "$INSTDIR\uninstall.exe" 0 +2
+    CreateShortcut "$SMPROGRAMS\Messly\Desinstalar Messly.lnk" "$INSTDIR\uninstall.exe"
+
+  DetailPrint "Finalizando instalacao..."
+  DetailPrint "Instalacao concluida."
 !macroend
 
 !ifdef BUILD_UNINSTALLER
