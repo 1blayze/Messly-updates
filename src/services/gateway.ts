@@ -266,8 +266,8 @@ class MesslyGatewayService {
       return validatedToken;
     }
 
-    const hintedToken = String(this.latestAccessToken ?? "").trim();
-    return hintedToken || null;
+    this.latestAccessToken = null;
+    return null;
   }
 
   private ensureAuthStateListener(): void {
@@ -276,18 +276,24 @@ class MesslyGatewayService {
     }
 
     const authState = supabase.auth.onAuthStateChange((event, session) => {
-      const nextAccessToken = String(session?.access_token ?? "").trim() || null;
-      this.latestAccessToken = nextAccessToken;
-
       if (
         event === "TOKEN_REFRESHED" ||
         event === "SIGNED_IN" ||
         event === "USER_UPDATED"
       ) {
-        this.client?.updateToken(nextAccessToken);
+        void (async () => {
+          const validatedToken = String(await authService.getValidatedEdgeAccessToken() ?? "").trim() || null;
+          this.latestAccessToken = validatedToken;
+          this.client?.updateToken(validatedToken);
+          if (!validatedToken) {
+            this.client?.disconnect();
+            this.updateUnauthenticatedState("Sessao invalida ou expirada. Faca login novamente.");
+          }
+        })();
       }
 
       if (event === "SIGNED_OUT") {
+        this.latestAccessToken = null;
         this.client?.disconnect();
         this.updateUnauthenticatedState("Sessao encerrada.");
       }

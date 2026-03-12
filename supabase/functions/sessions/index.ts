@@ -87,7 +87,6 @@ interface UserSessionRow {
   user_agent: string | null;
   suspicious: boolean;
   suspicious_reason: string | null;
-  security_notification_sent_at: string | null;
   created_at: string;
   last_seen_at: string;
   ended_at: string | null;
@@ -538,7 +537,6 @@ async function insertLoginSession(
       user_agent: toNullableText(clientInfo.userAgent, 512),
       suspicious,
       suspicious_reason: suspicious ? SESSION_REASON_NEW_LOCATION : null,
-      security_notification_sent_at: suspicious ? nowIso : null,
       created_at: nowIso,
       last_seen_at: nowIso,
     })
