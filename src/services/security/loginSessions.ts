@@ -20,6 +20,7 @@ const listSessionsInFlightByUid = new Map<string, Promise<ListActiveLoginSession
 let cachedAuthUid: string | null = null;
 let cachedAuthSessionId: string | null = null;
 let cachedAuthSessionObservedAtMs = 0;
+const confirmedSessionIdsByUid = new Map<string, Set<string>>();
 
 const sessionViewSchema = z.object({
   id: z.string().uuid(),
@@ -127,6 +128,39 @@ function updateCachedAuthState(): void {
   }
 }
 
+function normalizeSessionIdentity(valueRaw: string | null | undefined): string {
+  return String(valueRaw ?? "").trim();
+}
+
+function markSessionAsConfirmed(uidRaw: string | null | undefined, sessionIdRaw: string | null | undefined): void {
+  const uid = normalizeSessionIdentity(uidRaw);
+  const sessionId = normalizeSessionIdentity(sessionIdRaw);
+  if (!uid || !sessionId) {
+    return;
+  }
+
+  const current = confirmedSessionIdsByUid.get(uid) ?? new Set<string>();
+  current.add(sessionId);
+  confirmedSessionIdsByUid.set(uid, current);
+}
+
+function hasConfirmedSession(uidRaw: string | null | undefined, sessionIdRaw: string | null | undefined): boolean {
+  const uid = normalizeSessionIdentity(uidRaw);
+  const sessionId = normalizeSessionIdentity(sessionIdRaw);
+  if (!uid || !sessionId) {
+    return false;
+  }
+  return confirmedSessionIdsByUid.get(uid)?.has(sessionId) ?? false;
+}
+
+function clearConfirmedSessions(uidRaw: string | null | undefined): void {
+  const uid = normalizeSessionIdentity(uidRaw);
+  if (!uid) {
+    return;
+  }
+  confirmedSessionIdsByUid.delete(uid);
+}
+
 void authService.getCurrentSession().then(() => {
   updateCachedAuthState();
 }).catch(() => undefined);
@@ -145,6 +179,7 @@ supabase.auth.onAuthStateChange((_event, session) => {
 
   if (previousUid) {
     invalidateListSessionsCache(previousUid);
+    clearConfirmedSessions(previousUid);
   }
   if (cachedAuthUid) {
     invalidateListSessionsCache(cachedAuthUid);
@@ -485,6 +520,7 @@ export async function recordLoginSession(): Promise<LoginSessionView | null> {
     clearSessionsEdgeUnauthorizedCooldown();
     cachedAuthSessionId = parsed.session.id;
     setStoredSessionId(uid, parsed.session.id);
+    markSessionAsConfirmed(uid, parsed.session.id);
     invalidateListSessionsCache(uid);
     return parsed.session;
   } catch (error) {
@@ -726,6 +762,11 @@ export async function listActiveLoginSessions(): Promise<LoginSessionView[]> {
 }
 
 export async function getCurrentLoginSessionStatus(): Promise<CurrentLoginSessionStatus> {
+  const uid = getCurrentAuthUid();
+  if (!uid) {
+    return "unknown";
+  }
+
   const sessionId = getCurrentAuthSessionId();
   if (!sessionId) {
     return "unknown";
@@ -738,7 +779,12 @@ export async function getCurrentLoginSessionStatus(): Promise<CurrentLoginSessio
 
   const hasCurrentSession = result.sessions.some((session) => session.id === sessionId);
   if (hasCurrentSession) {
+    markSessionAsConfirmed(uid, sessionId);
     return "active";
+  }
+
+  if (!hasConfirmedSession(uid, sessionId)) {
+    return "unknown";
   }
 
   const inGracePeriod =
