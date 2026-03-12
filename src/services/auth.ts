@@ -571,6 +571,11 @@ class AuthService {
     await setPendingVerificationState(null);
   }
 
+  async clearLocalSession(): Promise<void> {
+    await clearSessionState();
+    await setPendingVerificationState(null);
+  }
+
   async refreshSession(): Promise<Session | null> {
     const currentSession = getInMemorySession();
     const supabaseSession = await readSupabaseClientSession();
