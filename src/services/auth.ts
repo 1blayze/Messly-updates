@@ -103,6 +103,8 @@ function isInvalidRefreshTokenError(error: unknown): boolean {
     message.includes("refresh-token") ||
     message.includes("invalid grant") ||
     message.includes("session not found") ||
+    message.includes("session from session_id claim in jwt does not exist") ||
+    message.includes("session_id claim") ||
     message.includes("token has expired") ||
     message.includes("token expired") ||
     combined.includes("refresh token has expired")
@@ -124,9 +126,13 @@ function isSupabaseSessionCorruptedError(error: unknown): boolean {
     code === "INVALID_JWT" ||
     code === "JWT_EXPIRED" ||
     code === "PGRST301" ||
+    code === "SESSION_NOT_FOUND" ||
     combined.includes("invalid jwt") ||
     combined.includes("jwt expired") ||
     combined.includes("invalid session") ||
+    combined.includes("session not found") ||
+    combined.includes("session from session_id claim in jwt does not exist") ||
+    combined.includes("session_id claim") ||
     combined.includes("session is invalid") ||
     combined.includes("not able to parse auth token")
   );
@@ -228,7 +234,19 @@ function ensureAuthStateSync(): void {
   });
 }
 
+function canUseDirectSupabaseAuthFallback(): boolean {
+  if (import.meta.env.DEV) {
+    return true;
+  }
+
+  return String(import.meta.env.VITE_MESSLY_ALLOW_DIRECT_SUPABASE_AUTH_FALLBACK ?? "").trim().toLowerCase() === "true";
+}
+
 function shouldFallbackToDirectSupabaseLogin(error: unknown): boolean {
+  if (!canUseDirectSupabaseAuthFallback()) {
+    return false;
+  }
+
   if (!(error instanceof AuthApiError)) {
     return false;
   }
@@ -428,17 +446,31 @@ class AuthService {
       return true;
     }
 
-    const result = await supabase.auth.getUser(accessToken);
-    const accepted = !result.error && Boolean(result.data.user?.id);
-    if (accepted) {
-      this.markValidatedEdgeAccessToken(accessToken);
-      return true;
-    }
+    try {
+      const result = await supabase.auth.getUser(accessToken);
+      const accepted = !result.error && Boolean(result.data.user?.id);
+      if (accepted) {
+        this.markValidatedEdgeAccessToken(accessToken);
+        return true;
+      }
 
-    if (lastValidatedEdgeAccessToken?.token === accessToken) {
-      lastValidatedEdgeAccessToken = null;
+      if (isSupabaseSessionCorruptedError(result.error)) {
+        await clearSessionState();
+      }
+      if (lastValidatedEdgeAccessToken?.token === accessToken) {
+        lastValidatedEdgeAccessToken = null;
+      }
+      return false;
+    } catch (error) {
+      if (isSupabaseSessionCorruptedError(error)) {
+        await clearSessionState();
+        if (lastValidatedEdgeAccessToken?.token === accessToken) {
+          lastValidatedEdgeAccessToken = null;
+        }
+        return false;
+      }
+      throw error;
     }
-    return false;
   }
 
   async signup(input: SignupInput): Promise<PendingVerificationState> {

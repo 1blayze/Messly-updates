@@ -275,10 +275,71 @@ function shouldDisableSessionsApiForDirectError(error: unknown): boolean {
   return (
     code === "PGRST301" ||
     message.includes("jwt") ||
+    message.includes("session not found") ||
+    message.includes("session from session_id claim in jwt does not exist") ||
     message.includes("not authenticated") ||
     message.includes("permission denied") ||
     message.includes("row level security")
   );
+}
+
+function shouldClearLocalSessionForAuthError(error: unknown): boolean {
+  if (error instanceof EdgeFunctionError) {
+    const status = Number(error.status ?? 0);
+    const code = String(error.code ?? "").trim().toUpperCase();
+    const message = String(error.message ?? "").trim().toLowerCase();
+
+    if (status === 401 || status === 403) {
+      return true;
+    }
+
+    return (
+      code === "UNAUTHENTICATED" ||
+      code === "UNAUTHORIZED" ||
+      code === "INVALID_TOKEN" ||
+      code === "SESSION_NOT_FOUND" ||
+      message.includes("invalid jwt") ||
+      message.includes("jwt expired") ||
+      message.includes("session not found") ||
+      message.includes("session from session_id claim in jwt does not exist")
+    );
+  }
+
+  const status = Number((error as { status?: unknown } | null)?.status ?? 0);
+  const code = String((error as { code?: unknown } | null)?.code ?? "").trim().toUpperCase();
+  const message = String((error as { message?: unknown } | null)?.message ?? "").trim().toLowerCase();
+  const details = String((error as { details?: unknown } | null)?.details ?? "").trim().toLowerCase();
+  const combined = `${code} ${message} ${details}`;
+
+  return (
+    status === 401 ||
+    status === 403 ||
+    code === "UNAUTHENTICATED" ||
+    code === "UNAUTHORIZED" ||
+    code === "INVALID_TOKEN" ||
+    code === "INVALID_JWT" ||
+    code === "JWT_EXPIRED" ||
+    code === "SESSION_NOT_FOUND" ||
+    code === "PGRST301" ||
+    combined.includes("invalid jwt") ||
+    combined.includes("jwt expired") ||
+    combined.includes("session not found") ||
+    combined.includes("session from session_id claim in jwt does not exist") ||
+    combined.includes("session_id claim")
+  );
+}
+
+function clearLocalSessionIfInvalid(error: unknown, uidRaw?: string | null): void {
+  if (!shouldClearLocalSessionForAuthError(error)) {
+    return;
+  }
+
+  const uid = normalizeSessionIdentity(uidRaw);
+  if (uid) {
+    clearStoredSessionId(uid);
+    invalidateListSessionsCache(uid);
+  }
+  void authService.clearLocalSession().catch(() => undefined);
 }
 
 function shouldFallbackToEdgeSessionsList(error: unknown): boolean {
@@ -529,10 +590,12 @@ export async function recordLoginSession(): Promise<LoginSessionView | null> {
     if (isUnauthorizedSessionsEdgeError(error)) {
       sessionsMutationApiTemporarilyDisabled = true;
       activateSessionsEdgeUnauthorizedCooldown();
+      clearLocalSessionIfInvalid(error, uid);
       return null;
     }
     if (shouldDisableSessionsMutationApiForError(error)) {
       sessionsMutationApiTemporarilyDisabled = true;
+      clearLocalSessionIfInvalid(error, uid);
       return null;
     }
     throw error;
@@ -584,10 +647,12 @@ export async function endCurrentLoginSession(): Promise<void> {
     if (isUnauthorizedSessionsEdgeError(error)) {
       sessionsMutationApiTemporarilyDisabled = true;
       activateSessionsEdgeUnauthorizedCooldown();
+      clearLocalSessionIfInvalid(error, uid);
       return;
     }
     if (shouldDisableSessionsMutationApiForError(error)) {
       sessionsMutationApiTemporarilyDisabled = true;
+      clearLocalSessionIfInvalid(error, uid);
       return;
     }
     throw error;
@@ -644,10 +709,12 @@ export async function endLoginSessionById(sessionId: string): Promise<void> {
     if (isUnauthorizedSessionsEdgeError(error)) {
       sessionsMutationApiTemporarilyDisabled = true;
       activateSessionsEdgeUnauthorizedCooldown();
+      clearLocalSessionIfInvalid(error, uid);
       return;
     }
     if (shouldDisableSessionsMutationApiForError(error)) {
       sessionsMutationApiTemporarilyDisabled = true;
+      clearLocalSessionIfInvalid(error, uid);
       return;
     }
     throw error;
@@ -708,6 +775,7 @@ async function listActiveLoginSessionsDetailed(): Promise<ListActiveLoginSession
           const shouldFallback = shouldFallbackToEdgeSessionsList(error);
           if (shouldDisableSessionsApiForDirectError(error)) {
             sessionsDirectApiTemporarilyDisabled = true;
+            clearLocalSessionIfInvalid(error, uid);
           }
           if (shouldFallback) {
             sessionsDirectApiTemporarilyDisabled = true;
@@ -741,12 +809,14 @@ async function listActiveLoginSessionsDetailed(): Promise<ListActiveLoginSession
           sessionsMutationApiTemporarilyDisabled = true;
           sessionsDirectApiTemporarilyDisabled = true;
           activateSessionsEdgeUnauthorizedCooldown();
+          clearLocalSessionIfInvalid(error, uid);
           return {
             sessions: [],
             authoritative: false,
           };
         }
         if (shouldDisableSessionsMutationApiForError(error)) {
+          clearLocalSessionIfInvalid(error, uid);
           return {
             sessions: [],
             authoritative: false,

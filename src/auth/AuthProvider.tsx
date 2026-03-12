@@ -195,6 +195,45 @@ function isTableMissing(error: unknown): boolean {
   return code === "42P01" || code === "PGRST114" || status === 404 || message.includes("does not exist");
 }
 
+function isAuthSessionInvalidError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const casted = error as {
+    code?: unknown;
+    status?: unknown;
+    message?: unknown;
+    details?: unknown;
+    name?: unknown;
+  };
+  const status = Number(casted.status ?? 0);
+  const code = String(casted.code ?? "").trim().toUpperCase();
+  const name = String(casted.name ?? "").trim().toUpperCase();
+  const message = String(casted.message ?? "").trim().toLowerCase();
+  const details = String(casted.details ?? "").trim().toLowerCase();
+  const combined = `${code} ${name} ${message} ${details}`;
+
+  return (
+    status === 401 ||
+    status === 403 ||
+    code === "UNAUTHENTICATED" ||
+    code === "UNAUTHORIZED" ||
+    code === "INVALID_TOKEN" ||
+    code === "INVALID_JWT" ||
+    code === "JWT_EXPIRED" ||
+    code === "SESSION_NOT_FOUND" ||
+    code === "PGRST301" ||
+    combined.includes("invalid jwt") ||
+    combined.includes("jwt expired") ||
+    combined.includes("session not found") ||
+    combined.includes("session from session_id claim in jwt does not exist") ||
+    combined.includes("session_id claim") ||
+    combined.includes("token has expired") ||
+    combined.includes("token expired")
+  );
+}
+
 async function profileExists(uid: string): Promise<boolean> {
   try {
     const { data, error } = await supabase.from("profiles").select("id").eq("id", uid).limit(1).maybeSingle();
@@ -310,7 +349,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (!ensuredProfile) {
           const exists = await profileExists(mappedUser.uid);
           if (!exists) {
-            await supabase.auth.signOut({ scope: "local" });
+            await authService.clearLocalSession().catch(() => undefined);
             setSession(null);
             setUser(null);
             setProfile(null);
@@ -338,6 +377,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (import.meta.env.DEV) {
           console.error("[auth:profile]", profileError);
         }
+        if (isAuthSessionInvalidError(profileError)) {
+          await authService.clearLocalSession().catch(() => undefined);
+          setSession(null);
+          setUser(null);
+          setProfile(null);
+          setError("Sessão inválida ou expirada. Faça login novamente.");
+          dispatch(authActions.authErrorChanged("Sessão inválida ou expirada. Faça login novamente."));
+          dispatch(authActions.authSignedOut());
+          return;
+        }
+
         setError("Falha ao carregar ou criar o perfil.");
         setProfile(null);
         dispatch(authActions.authErrorChanged("Falha ao carregar ou criar o perfil."));

@@ -9,6 +9,7 @@ interface ImportMetaEnv {
   readonly VITE_CALLS_USE_EDGE_FUNCTIONS_IN_DEV?: string;
   readonly VITE_MESSLY_GATEWAY_URL?: string;
   readonly VITE_MESSLY_AUTH_API_URL?: string;
+  readonly VITE_MESSLY_ALLOW_DIRECT_SUPABASE_AUTH_FALLBACK?: string;
   readonly VITE_TURNSTILE_SITE_KEY?: string;
   readonly VITE_MESSLY_API_URL?: string;
   readonly VITE_MESSLY_CDN_URL?: string;
