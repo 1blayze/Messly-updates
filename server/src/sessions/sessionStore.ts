@@ -61,6 +61,21 @@ export interface SessionResumeResult {
   replay: SessionDispatchRecord[];
 }
 
+const APPEND_DISPATCH_EVENT_SCRIPT = `
+if redis.call("HEXISTS", KEYS[1], "sessionId") == 0 then
+  return 0
+end
+local nextSeq = redis.call("HINCRBY", KEYS[1], "lastSequence", 1)
+local record = cjson.decode(ARGV[3])
+record["seq"] = nextSeq
+redis.call("HSET", KEYS[1], "updatedAt", ARGV[1])
+redis.call("EXPIRE", KEYS[1], ARGV[2])
+redis.call("RPUSH", KEYS[2], cjson.encode(record))
+redis.call("LTRIM", KEYS[2], -tonumber(ARGV[4]), -1)
+redis.call("EXPIRE", KEYS[2], ARGV[2])
+return nextSeq
+`;
+
 function safeParseJson<T>(value: string | undefined, fallback: T): T {
   if (!value) {
     return fallback;
@@ -105,6 +120,10 @@ export class RedisSessionStore {
     private readonly resumeTtlSeconds: number,
     private readonly bufferSize: number,
   ) {}
+
+  private async sessionExists(sessionId: string): Promise<boolean> {
+    return (await this.redis.command.hexists(gatewayRedisKeys.session(sessionId), "sessionId")) === 1;
+  }
 
   async createSession(input: CreateSessionInput): Promise<StoredGatewaySession> {
     const now = new Date().toISOString();
@@ -165,15 +184,24 @@ export class RedisSessionStore {
     return nextSession;
   }
 
-  async updateSubscriptions(sessionId: string, subscriptions: GatewaySubscription[]): Promise<void> {
+  async updateSubscriptions(sessionId: string, subscriptions: GatewaySubscription[]): Promise<boolean> {
+    if (!(await this.sessionExists(sessionId))) {
+      return false;
+    }
+
     await this.redis.command.hset(gatewayRedisKeys.session(sessionId), {
       subscriptions: JSON.stringify(subscriptions),
       updatedAt: new Date().toISOString(),
     });
     await this.redis.command.expire(gatewayRedisKeys.session(sessionId), this.resumeTtlSeconds);
+    return true;
   }
 
-  async touchHeartbeat(sessionId: string, lastAckedSequence: number | null): Promise<void> {
+  async touchHeartbeat(sessionId: string, lastAckedSequence: number | null): Promise<boolean> {
+    if (!(await this.sessionExists(sessionId))) {
+      return false;
+    }
+
     const payload: Record<string, string> = {
       lastHeartbeatAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -183,6 +211,7 @@ export class RedisSessionStore {
     }
     await this.redis.command.hset(gatewayRedisKeys.session(sessionId), payload);
     await this.redis.command.expire(gatewayRedisKeys.session(sessionId), this.resumeTtlSeconds);
+    return true;
   }
 
   async markDisconnected(sessionId: string): Promise<StoredGatewaySession | null> {
@@ -222,14 +251,34 @@ export class RedisSessionStore {
     payload: GatewayDispatchPayloadMap[TEvent];
     occurredAt: string;
   }): Promise<SessionDispatchRecord<TEvent> | null> {
-    const session = await this.getSession(input.sessionId);
-    if (!session) {
+    const sessionKey = gatewayRedisKeys.session(input.sessionId);
+    const eventsKey = gatewayRedisKeys.sessionEvents(input.sessionId);
+    const updatedAt = new Date().toISOString();
+    const provisionalRecord = {
+      seq: 0,
+      eventId: input.eventId,
+      event: input.event,
+      payload: input.payload,
+      occurredAt: input.occurredAt,
+    };
+    const nextSequenceRaw = await this.redis.command.eval(
+      APPEND_DISPATCH_EVENT_SCRIPT,
+      2,
+      sessionKey,
+      eventsKey,
+      updatedAt,
+      String(this.resumeTtlSeconds),
+      JSON.stringify(provisionalRecord),
+      String(this.bufferSize),
+    );
+    const nextSequence =
+      typeof nextSequenceRaw === "number"
+        ? nextSequenceRaw
+        : Number.parseInt(String(nextSequenceRaw ?? "0"), 10);
+    if (!Number.isFinite(nextSequence) || nextSequence <= 0) {
       return null;
     }
 
-    const sessionKey = gatewayRedisKeys.session(input.sessionId);
-    const eventsKey = gatewayRedisKeys.sessionEvents(input.sessionId);
-    const nextSequence = await this.redis.command.hincrby(sessionKey, "lastSequence", 1);
     const record: SessionDispatchRecord<TEvent> = {
       seq: nextSequence,
       eventId: input.eventId,
@@ -237,17 +286,6 @@ export class RedisSessionStore {
       payload: input.payload,
       occurredAt: input.occurredAt,
     };
-
-    await this.redis.command
-      .multi()
-      .hset(sessionKey, {
-        updatedAt: new Date().toISOString(),
-      })
-      .expire(sessionKey, this.resumeTtlSeconds)
-      .rpush(eventsKey, JSON.stringify(record))
-      .ltrim(eventsKey, -this.bufferSize, -1)
-      .expire(eventsKey, this.resumeTtlSeconds)
-      .exec();
 
     return record;
   }

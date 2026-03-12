@@ -1,5 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { decodeSupabaseJwtClaims } from "../auth/jwtClaims";
+import { decodeSupabaseJwtClaims, type SupabaseJwtClaims } from "../auth/jwtClaims";
 import type { Logger } from "../infra/logger";
 import { getLoginLocation } from "./loginLocation";
 
@@ -270,11 +270,47 @@ export class AuthSessionManager {
     private readonly minTouchIntervalMs = 60_000,
   ) {}
 
-  async upsertFromAccessToken(input: UpsertSessionInput): Promise<SessionView> {
-    const claims = decodeSupabaseJwtClaims(input.accessToken);
-    if (!claims?.sessionId || claims.userId !== input.userId) {
+  private async resolveValidatedClaims(
+    accessTokenRaw: string,
+    expectedUserIdRaw?: string | null,
+  ): Promise<SupabaseJwtClaims & { sessionId: string }> {
+    const accessToken = String(accessTokenRaw ?? "").trim();
+    if (!accessToken) {
+      throw new Error("Missing Supabase access token.");
+    }
+
+    const expectedUserId = String(expectedUserIdRaw ?? "").trim();
+    const authResult = await this.supabase.auth.getUser(accessToken);
+    const tokenUserId = String(authResult.data.user?.id ?? "").trim();
+    if (authResult.error || !tokenUserId) {
+      throw new Error("Invalid Supabase access token.");
+    }
+
+    if (expectedUserId && expectedUserId !== tokenUserId) {
+      throw new Error("Supabase access token user mismatch.");
+    }
+
+    const claims = decodeSupabaseJwtClaims(accessToken);
+    if (!claims?.sessionId || !claims.userId) {
       throw new Error("Invalid Supabase session claims.");
     }
+
+    if (claims.userId !== tokenUserId) {
+      throw new Error("Supabase token subject mismatch.");
+    }
+
+    if (claims.expiresAt && claims.expiresAt * 1000 <= Date.now()) {
+      throw new Error("Supabase access token is expired.");
+    }
+
+    return {
+      ...claims,
+      sessionId: claims.sessionId,
+    };
+  }
+
+  async upsertFromAccessToken(input: UpsertSessionInput): Promise<SessionView> {
+    const claims = await this.resolveValidatedClaims(input.accessToken, input.userId);
 
     const sessionKey = normalizeSessionKey(claims.sessionId);
     if (!sessionKey) {
@@ -322,8 +358,14 @@ export class AuthSessionManager {
   }
 
   async touchFromAccessToken(input: UpsertSessionInput): Promise<void> {
-    const claims = decodeSupabaseJwtClaims(input.accessToken);
-    const authSessionId = normalizeSessionKey(claims?.sessionId);
+    let authSessionId: string | null = null;
+    try {
+      const claims = await this.resolveValidatedClaims(input.accessToken, input.userId);
+      authSessionId = normalizeSessionKey(claims.sessionId);
+    } catch {
+      return;
+    }
+
     if (!authSessionId) {
       return;
     }
@@ -394,12 +436,12 @@ export class AuthSessionManager {
   }
 
   async validateAccessTokenSession(accessToken: string, userId: string): Promise<boolean> {
-    const claims = decodeSupabaseJwtClaims(accessToken);
-    if (!claims?.sessionId || claims.userId !== userId) {
+    try {
+      const claims = await this.resolveValidatedClaims(accessToken, userId);
+      return this.validateAuthSessionId(claims.sessionId, userId);
+    } catch {
       return false;
     }
-
-    return this.validateAuthSessionId(claims.sessionId, userId);
   }
 
   async validateAuthSessionId(authSessionIdRaw: string, userId: string): Promise<boolean> {
@@ -418,8 +460,10 @@ export class AuthSessionManager {
   }
 
   async revokeCurrentAccessToken(accessToken: string, userId: string): Promise<boolean> {
-    const claims = decodeSupabaseJwtClaims(accessToken);
-    if (!claims?.sessionId || claims.userId !== userId) {
+    let claims: SupabaseJwtClaims & { sessionId: string };
+    try {
+      claims = await this.resolveValidatedClaims(accessToken, userId);
+    } catch {
       return false;
     }
 

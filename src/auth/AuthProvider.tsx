@@ -169,11 +169,6 @@ let bootstrapSessionPromise: Promise<Session | null> | null = null;
 async function getInitialSessionOnce(): Promise<Session | null> {
   if (!bootstrapSessionPromise) {
     bootstrapSessionPromise = (async () => {
-      const validatedAccessToken = await authService.getValidatedEdgeAccessToken();
-      if (!validatedAccessToken) {
-        return null;
-      }
-
       return authService.getCurrentSession();
     })().catch((error) => {
       bootstrapSessionPromise = null;
@@ -507,14 +502,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       void (async () => {
-        if (event === "INITIAL_SESSION" && nextSession?.access_token) {
-          const validatedAccessToken = await authService.getValidatedEdgeAccessToken();
-          if (!validatedAccessToken) {
-            await applySessionAndProfile(null, { skipProfile: true });
-            return;
-          }
-        }
-
         await applySessionAndProfile(nextSession);
       })();
     });

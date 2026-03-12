@@ -109,8 +109,8 @@ function decodeSupabaseSessionId(tokenRaw: string | null | undefined): string | 
     const normalizedPayload = payloadSegment.replace(/-/g, "+").replace(/_/g, "/");
     const paddedPayload = normalizedPayload.padEnd(Math.ceil(normalizedPayload.length / 4) * 4, "=");
     const payloadText = window.atob(paddedPayload);
-    const payload = JSON.parse(payloadText) as { session_id?: unknown };
-    const sessionId = String(payload.session_id ?? "").trim();
+    const payload = JSON.parse(payloadText) as { session_id?: unknown; sessionId?: unknown };
+    const sessionId = String(payload.session_id ?? payload.sessionId ?? "").trim();
     return sessionId || null;
   } catch {
     return null;
@@ -535,13 +535,24 @@ function getClientVersion(): string {
   return String(appPackage.version ?? "0.0.0").trim() || "0.0.0";
 }
 
+async function resolveSessionsAccessToken(): Promise<string | null> {
+  const currentAccessToken = String(await authService.getCurrentAccessToken() ?? "").trim();
+  if (currentAccessToken) {
+    return currentAccessToken;
+  }
+
+  const refreshedSession = await authService.refreshSession().catch(() => null);
+  const refreshedToken = String(refreshedSession?.access_token ?? "").trim();
+  return refreshedToken || null;
+}
+
 export async function recordLoginSession(): Promise<LoginSessionView | null> {
   if (isSessionsEdgeUnauthorizedCooldownActive()) {
     return null;
   }
 
   const uid = getCurrentAuthUid();
-  const accessToken = await authService.getValidatedEdgeAccessToken();
+  const accessToken = await resolveSessionsAccessToken();
   const sessionId = getCurrentAuthSessionId() ?? decodeSupabaseSessionId(accessToken);
   if (!uid || !sessionId || sessionsMutationApiTemporarilyDisabled) {
     return null;
@@ -608,7 +619,7 @@ export async function endCurrentLoginSession(): Promise<void> {
   }
 
   const uid = getCurrentAuthUid();
-  const accessToken = await authService.getValidatedEdgeAccessToken();
+  const accessToken = await resolveSessionsAccessToken();
   const sessionId = getCurrentAuthSessionId() ?? decodeSupabaseSessionId(accessToken);
   if (!uid) {
     return;
@@ -680,7 +691,7 @@ export async function endLoginSessionById(sessionId: string): Promise<void> {
     return;
   }
 
-  if (!(await authService.getValidatedEdgeAccessToken())) {
+  if (!(await resolveSessionsAccessToken())) {
     return;
   }
 
@@ -737,7 +748,7 @@ async function listActiveLoginSessionsDetailed(): Promise<ListActiveLoginSession
     };
   }
 
-  if (!(await authService.getValidatedEdgeAccessToken())) {
+  if (!(await resolveSessionsAccessToken())) {
     return {
       sessions: [],
       authoritative: false,

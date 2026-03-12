@@ -1,4 +1,4 @@
-import { getGatewayUrl, getSupabaseAccessToken } from "../api/client";
+import { getGatewayUrl } from "../api/client";
 import { GatewayClient, type GatewayClientState } from "../gateway/client";
 import { createGatewayEventRouter } from "../gateway/router";
 import { authService } from "./auth";
@@ -260,10 +260,17 @@ class MesslyGatewayService {
   }
 
   private async resolveGatewayToken(): Promise<string | null> {
-    const validatedToken = String(await getSupabaseAccessToken() ?? "").trim();
-    if (validatedToken) {
-      this.latestAccessToken = validatedToken;
-      return validatedToken;
+    const currentToken = String(await authService.getCurrentAccessToken() ?? "").trim();
+    if (currentToken) {
+      this.latestAccessToken = currentToken;
+      return currentToken;
+    }
+
+    const refreshed = await authService.refreshSession().catch(() => null);
+    const refreshedToken = String(refreshed?.access_token ?? "").trim();
+    if (refreshedToken) {
+      this.latestAccessToken = refreshedToken;
+      return refreshedToken;
     }
 
     this.latestAccessToken = null;
@@ -282,10 +289,10 @@ class MesslyGatewayService {
         event === "USER_UPDATED"
       ) {
         void (async () => {
-          const validatedToken = String(await authService.getValidatedEdgeAccessToken() ?? "").trim() || null;
-          this.latestAccessToken = validatedToken;
-          this.client?.updateToken(validatedToken);
-          if (!validatedToken) {
+          const currentToken = String(await authService.getCurrentAccessToken() ?? "").trim() || null;
+          this.latestAccessToken = currentToken;
+          this.client?.updateToken(currentToken);
+          if (!currentToken) {
             this.client?.disconnect();
             this.updateUnauthenticatedState("Sessao invalida ou expirada. Faca login novamente.");
           }

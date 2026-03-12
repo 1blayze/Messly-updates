@@ -26,8 +26,6 @@ export class GatewayHeartbeat {
       this.expectAck();
       this.onHeartbeat();
     }, this.intervalMs);
-    this.expectAck();
-    this.onHeartbeat();
   }
 
   ack(): void {

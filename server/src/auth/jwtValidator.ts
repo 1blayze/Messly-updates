@@ -8,11 +8,17 @@ export interface AuthenticatedGatewayUser {
   authSessionId: string;
 }
 
+interface ValidateGatewayJwtOptions {
+  requireSession?: boolean;
+}
+
 export async function validateGatewayJwt(
   supabase: SupabaseClient,
   token: string,
   sessionManager?: AuthSessionManager,
+  options: ValidateGatewayJwtOptions = {},
 ): Promise<AuthenticatedGatewayUser | null> {
+  const requireSession = options.requireSession ?? true;
   const normalizedToken = String(token ?? "").trim();
   if (!normalizedToken) {
     return null;
@@ -36,7 +42,7 @@ export async function validateGatewayJwt(
     return null;
   }
 
-  if (sessionManager) {
+  if (requireSession && sessionManager) {
     const isValidSession = await sessionManager.validateAuthSessionId(claims.sessionId, data.user.id);
     if (!isValidSession) {
       return null;

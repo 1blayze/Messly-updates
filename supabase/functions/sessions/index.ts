@@ -213,8 +213,8 @@ function decodeSupabaseSessionId(tokenRaw: string): string | null {
     const normalizedPayload = payloadSegment.replace(/-/g, "+").replace(/_/g, "/");
     const paddedPayload = normalizedPayload.padEnd(Math.ceil(normalizedPayload.length / 4) * 4, "=");
     const payloadText = atob(paddedPayload);
-    const payload = JSON.parse(payloadText) as { session_id?: unknown };
-    const sessionId = String(payload.session_id ?? "").trim();
+    const payload = JSON.parse(payloadText) as { session_id?: unknown; sessionId?: unknown };
+    const sessionId = String(payload.session_id ?? payload.sessionId ?? "").trim();
     return sessionId || null;
   } catch {
     return null;

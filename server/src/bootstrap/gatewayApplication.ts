@@ -38,7 +38,7 @@ import type { GatewayPublishEvent } from "../protocol/opcodes";
 import { validateGatewayJwt } from "../auth/jwtValidator";
 import { AuthRouter } from "../auth/router";
 import { MediaRouter } from "../media/router";
-import { AuthSessionManager } from "../sessions/sessionManager";
+import { AuthSessionManager, type SessionClientInfo } from "../sessions/sessionManager";
 import { extractClientIpFromHeaders } from "../sessions/loginLocation";
 
 function getInstanceId(): string {
@@ -476,63 +476,86 @@ export class GatewayApplication {
       return;
     }
 
-    switch (frame.op) {
-      case "PING":
-        this.sendFrame(connection.socket, {
-          op: "PONG",
-          s: resolveSequence(frame),
-          t: null,
-          d: {
-            acknowledgedAt: new Date().toISOString(),
-          },
-        });
-        return;
-      case "PONG":
-        return;
-      case "HEARTBEAT":
-        await this.handleHeartbeat(connection, frame.d as GatewayHeartbeatPayload);
-        return;
-      case "IDENTIFY":
-        await this.handleIdentify(connection, frame.d as GatewayIdentifyPayload);
-        return;
-      case "RESUME":
-        await this.handleResume(connection, frame.d as GatewayResumePayload);
-        return;
-      case "SUBSCRIBE":
-        await this.handleSubscriptionReplace(
-          connection,
-          (frame.d as { subscriptions: GatewaySubscription[] }).subscriptions,
-          "subscribe",
-        );
-        return;
-      case "UNSUBSCRIBE":
-        await this.handleSubscriptionReplace(
-          connection,
-          (frame.d as { subscriptions: GatewaySubscription[] }).subscriptions,
-          "unsubscribe",
-        );
-        return;
-      case "PUBLISH":
-        await this.handlePublish(
-          connection,
-          frame.t as GatewayPublishEvent,
-          frame.d as GatewayPublishPayloadMap[GatewayPublishEvent],
-        );
-        return;
+    try {
+      switch (frame.op) {
+        case "PING":
+          this.sendFrame(connection.socket, {
+            op: "PONG",
+            s: resolveSequence(frame),
+            t: null,
+            d: {
+              acknowledgedAt: new Date().toISOString(),
+            },
+          });
+          return;
+        case "PONG":
+          return;
+        case "HEARTBEAT":
+          await this.handleHeartbeat(connection, frame.d as GatewayHeartbeatPayload);
+          return;
+        case "IDENTIFY":
+          await this.handleIdentify(connection, frame.d as GatewayIdentifyPayload);
+          return;
+        case "RESUME":
+          await this.handleResume(connection, frame.d as GatewayResumePayload);
+          return;
+        case "SUBSCRIBE":
+          await this.handleSubscriptionReplace(
+            connection,
+            (frame.d as { subscriptions: GatewaySubscription[] }).subscriptions,
+            "subscribe",
+          );
+          return;
+        case "UNSUBSCRIBE":
+          await this.handleSubscriptionReplace(
+            connection,
+            (frame.d as { subscriptions: GatewaySubscription[] }).subscriptions,
+            "unsubscribe",
+          );
+          return;
+        case "PUBLISH":
+          await this.handlePublish(
+            connection,
+            frame.t as GatewayPublishEvent,
+            frame.d as GatewayPublishPayloadMap[GatewayPublishEvent],
+          );
+          return;
+      }
+    } catch (error) {
+      this.logger.warn("ws_message_handler_failed", {
+        connectionId: connection.connectionId,
+        op: frame.op,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      this.sendReconnect(connection, "INTERNAL_ERROR", 1_000);
+      connection.socket.close(1011, "INTERNAL_ERROR");
     }
   }
 
   private async handleHeartbeat(connection: LocalGatewayConnection, payload: GatewayHeartbeatPayload): Promise<void> {
     if (!connection.sessionId || !connection.userId || !connection.authSessionId) {
-      this.sendInvalidSession(connection.socket, {
-        reason: "UNAUTHENTICATED",
-        canResume: false,
+      // Heartbeats can arrive before IDENTIFY/RESUME due client scheduling; ack without mutating session state.
+      this.sendFrame(connection.socket, {
+        op: "HEARTBEAT_ACK",
+        s: normalizeHeartbeatSequence(payload),
+        t: null,
+        d: {
+          acknowledgedAt: new Date().toISOString(),
+        },
       });
       return;
     }
 
     this.registry.touchHeartbeat(connection.connectionId);
-    await this.sessions.touchHeartbeat(connection.sessionId, normalizeHeartbeatSequence(payload));
+    const heartbeatUpdated = await this.sessions.touchHeartbeat(connection.sessionId, normalizeHeartbeatSequence(payload));
+    if (!heartbeatUpdated) {
+      this.sendInvalidSession(connection.socket, {
+        reason: "INVALID_SESSION",
+        canResume: false,
+      });
+      connection.socket.close(4001, "INVALID_SESSION");
+      return;
+    }
     await this.presence.touchSession(connection.sessionId);
     const sessionStillActive = await this.authSessions.touchAuthSessionId(connection.authSessionId, {
       userId: connection.userId,
@@ -588,14 +611,25 @@ export class GatewayApplication {
       return;
     }
 
-    const subscriptions = await this.normalizeSubscriptions(user.id, payload.subscriptions);
-    await this.authSessions.touchFromAccessToken({
+    const authSessionState = await this.ensureAuthSessionRegistration({
       accessToken: payload.token,
       userId: user.id,
+      authSessionId: user.authSessionId,
       ipAddress: connection.ipAddress,
       userAgent: connection.userAgent,
       client: payload.client ?? null,
     });
+    if (authSessionState !== "ok") {
+      this.metrics.trackIdentifyFailure();
+      this.sendInvalidSession(connection.socket, {
+        reason: authSessionState,
+        canResume: false,
+      });
+      connection.socket.close(4001, authSessionState);
+      return;
+    }
+
+    const subscriptions = await this.normalizeSubscriptions(user.id, payload.subscriptions);
 
     const session = await this.sessions.createSession({
       userId: user.id,
@@ -666,16 +700,46 @@ export class GatewayApplication {
         reason: "UNAUTHENTICATED",
         canResume: false,
       });
+      connection.socket.close(4001, "UNAUTHENTICATED");
+      return;
+    }
+
+    const authSessionState = await this.ensureAuthSessionRegistration({
+      accessToken: payload.token,
+      userId: user.id,
+      authSessionId: user.authSessionId,
+      ipAddress: connection.ipAddress,
+      userAgent: connection.userAgent,
+      client: connection.client,
+    });
+    if (authSessionState !== "ok") {
+      this.metrics.trackResumeFailure();
+      this.sendInvalidSession(connection.socket, {
+        reason: authSessionState,
+        canResume: false,
+      });
+      connection.socket.close(4001, authSessionState);
       return;
     }
 
     const resume = await this.sessions.resolveResume(payload.sessionId, payload.resumeToken, payload.seq);
-    if (!resume || resume.session.userId !== user.id) {
+    if (!resume) {
       this.metrics.trackResumeFailure();
       this.sendInvalidSession(connection.socket, {
         reason: "INVALID_SESSION",
         canResume: false,
       });
+      connection.socket.close(4001, "INVALID_SESSION");
+      return;
+    }
+
+    if (resume.session.userId !== user.id || resume.session.authSessionId !== user.authSessionId) {
+      this.metrics.trackResumeFailure();
+      this.sendInvalidSession(connection.socket, {
+        reason: "UNAUTHENTICATED",
+        canResume: false,
+      });
+      connection.socket.close(4001, "UNAUTHENTICATED");
       return;
     }
 
@@ -704,7 +768,7 @@ export class GatewayApplication {
       ipAddress: connection.ipAddress,
       authSessionId: user.authSessionId,
       userAgent: connection.userAgent,
-      client: connection.client,
+      client: resume.session.client,
       subscriptions,
     });
     if (!reboundSession) {
@@ -713,6 +777,7 @@ export class GatewayApplication {
         reason: "INVALID_SESSION",
         canResume: false,
       });
+      connection.socket.close(4001, "INVALID_SESSION");
       return;
     }
 
@@ -724,6 +789,15 @@ export class GatewayApplication {
       client: reboundSession.client,
     });
     this.metrics.trackResumeSuccess();
+
+    for (const record of resume.replay) {
+      this.sendFrame(connection.socket, {
+        op: "DISPATCH",
+        s: record.seq,
+        t: record.event,
+        d: record.payload,
+      });
+    }
 
     this.sendFrame(connection.socket, {
       op: "DISPATCH",
@@ -738,15 +812,6 @@ export class GatewayApplication {
         shardCount: 1,
       } satisfies GatewayReadyPayload,
     });
-
-    for (const record of resume.replay) {
-      this.sendFrame(connection.socket, {
-        op: "DISPATCH",
-        s: record.seq,
-        t: record.event,
-        d: record.payload,
-      });
-    }
 
     const aggregatedPresence = await this.presence.connectSession({
       userId: reboundSession.userId,
@@ -775,6 +840,7 @@ export class GatewayApplication {
         reason: "UNAUTHENTICATED",
         canResume: false,
       });
+      connection.socket.close(4001, "UNAUTHENTICATED");
       return;
     }
 
@@ -789,7 +855,14 @@ export class GatewayApplication {
       });
       const nextSubscriptions = [...unique.values()];
       this.registry.replaceSubscriptions(connection.connectionId, nextSubscriptions);
-      await this.sessions.updateSubscriptions(connection.sessionId, nextSubscriptions);
+      const updated = await this.sessions.updateSubscriptions(connection.sessionId, nextSubscriptions);
+      if (!updated) {
+        this.sendInvalidSession(connection.socket, {
+          reason: "INVALID_SESSION",
+          canResume: false,
+        });
+        connection.socket.close(4001, "INVALID_SESSION");
+      }
       return;
     }
 
@@ -798,7 +871,14 @@ export class GatewayApplication {
       return !removal.has(`${subscription.type}:${subscription.id}`);
     });
     this.registry.replaceSubscriptions(connection.connectionId, nextSubscriptions);
-    await this.sessions.updateSubscriptions(connection.sessionId, nextSubscriptions);
+    const updated = await this.sessions.updateSubscriptions(connection.sessionId, nextSubscriptions);
+    if (!updated) {
+      this.sendInvalidSession(connection.socket, {
+        reason: "INVALID_SESSION",
+        canResume: false,
+      });
+      connection.socket.close(4001, "INVALID_SESSION");
+    }
   }
 
   private async handlePublish(
@@ -811,6 +891,7 @@ export class GatewayApplication {
         reason: "UNAUTHENTICATED",
         canResume: false,
       });
+      connection.socket.close(4001, "UNAUTHENTICATED");
       return;
     }
 
@@ -999,8 +1080,48 @@ export class GatewayApplication {
     return [...unique.values()];
   }
 
+  private async ensureAuthSessionRegistration(input: {
+    accessToken: string;
+    userId: string;
+    authSessionId: string;
+    ipAddress: string;
+    userAgent: string | null;
+    client: SessionClientInfo | null;
+  }): Promise<"ok" | "UNAUTHENTICATED" | "SESSION_REVOKED"> {
+    try {
+      const active = await this.authSessions.validateAuthSessionId(input.authSessionId, input.userId);
+      if (active) {
+        await this.authSessions.touchFromAccessToken({
+          accessToken: input.accessToken,
+          userId: input.userId,
+          ipAddress: input.ipAddress,
+          userAgent: input.userAgent,
+          client: input.client,
+        });
+        return "ok";
+      }
+
+      await this.authSessions.upsertFromAccessToken({
+        accessToken: input.accessToken,
+        userId: input.userId,
+        ipAddress: input.ipAddress,
+        userAgent: input.userAgent,
+        client: input.client,
+      });
+      return "ok";
+    } catch (error) {
+      const message = String(error instanceof Error ? error.message : error).toLowerCase();
+      if (message.includes("no longer active") || message.includes("revoked")) {
+        return "SESSION_REVOKED";
+      }
+      return "UNAUTHENTICATED";
+    }
+  }
+
   private async validateToken(token: string): Promise<{ id: string; authSessionId: string } | null> {
-    const user = await validateGatewayJwt(this.adminSupabase, token, this.authSessions);
+    const user = await validateGatewayJwt(this.adminSupabase, token, undefined, {
+      requireSession: false,
+    });
     return user ? { id: user.id, authSessionId: user.authSessionId } : null;
   }
 

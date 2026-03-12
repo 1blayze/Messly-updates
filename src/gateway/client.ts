@@ -74,6 +74,7 @@ export class GatewayClient {
   private reconnectTimerId: number | null = null;
   private intentionalClose = false;
   private intentionalCloseStatus: GatewayClientStatus = "closed";
+  private closeHandledByForcedReconnect = false;
   private subscriptions = new Map<string, GatewaySubscription>();
   private pendingFrames: GatewayFrame[] = [];
   private stateListeners = new Set<StateListener>();
@@ -204,6 +205,7 @@ export class GatewayClient {
     this.ws.onopen = () => {
       this.connectionFailureStreak = 0;
       this.reconnectSuspendedUntil = 0;
+      this.closeHandledByForcedReconnect = false;
       this.log("info", "websocket conectado", {
         url: resolvedSocketUrl,
       });
@@ -225,6 +227,7 @@ export class GatewayClient {
   disconnect(): void {
     this.intentionalClose = true;
     this.intentionalCloseStatus = "closed";
+    this.closeHandledByForcedReconnect = false;
     this.stopHeartbeat();
     this.clearReconnectTimer();
     this.resumeToken = null;
@@ -416,11 +419,17 @@ export class GatewayClient {
     });
 
     if (this.intentionalClose) {
+      this.closeHandledByForcedReconnect = false;
       this.updateState({
         status: this.intentionalCloseStatus,
       });
       this.connectionFailureStreak = 0;
       this.intentionalCloseStatus = "closed";
+      return;
+    }
+
+    if (this.closeHandledByForcedReconnect) {
+      this.closeHandledByForcedReconnect = false;
       return;
     }
 
@@ -488,6 +497,7 @@ export class GatewayClient {
 
   private forceReconnect(reason: string, delayOverrideMs: number | null = null): void {
     if (this.ws) {
+      this.closeHandledByForcedReconnect = true;
       this.ws.close();
     }
     this.scheduleReconnect(reason, delayOverrideMs);
@@ -647,6 +657,7 @@ export class GatewayClient {
     if (this.ws) {
       this.intentionalClose = true;
       this.intentionalCloseStatus = "unauthenticated";
+      this.closeHandledByForcedReconnect = false;
       this.ws.close(4001, "UNAUTHENTICATED");
     } else {
       this.ws = null;
