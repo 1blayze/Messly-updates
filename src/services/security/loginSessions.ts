@@ -8,13 +8,18 @@ import appPackage from "../../../package.json";
 
 const SESSION_ID_STORAGE_PREFIX = "messly:security:session-id:";
 const LIST_SESSIONS_CACHE_TTL_MS = 8_000;
+const SESSIONS_EDGE_UNAUTHORIZED_COOLDOWN_MS = 2 * 60_000;
+const SESSION_STATUS_GRACE_PERIOD_MS = 90_000;
 
 let sessionsMutationApiTemporarilyDisabled = false;
+let sessionsDirectApiTemporarilyDisabled = false;
+let sessionsEdgeUnauthorizedCooldownUntil = 0;
 const listSessionsCacheByUid = new Map<string, { fetchedAt: number; sessions: LoginSessionView[] }>();
-const listSessionsInFlightByUid = new Map<string, Promise<LoginSessionView[]>>();
+const listSessionsInFlightByUid = new Map<string, Promise<ListActiveLoginSessionsResult>>();
 
 let cachedAuthUid: string | null = null;
 let cachedAuthSessionId: string | null = null;
+let cachedAuthSessionObservedAtMs = 0;
 
 const sessionViewSchema = z.object({
   id: z.string().uuid(),
@@ -83,6 +88,11 @@ const directUserSessionRowSchema = z.object({
 export type LoginSessionView = z.infer<typeof sessionViewSchema>;
 export type CurrentLoginSessionStatus = "active" | "ended" | "unknown";
 
+interface ListActiveLoginSessionsResult {
+  sessions: LoginSessionView[];
+  authoritative: boolean;
+}
+
 function decodeSupabaseSessionId(tokenRaw: string | null | undefined): string | null {
   const token = String(tokenRaw ?? "").trim();
   if (!token) {
@@ -110,6 +120,7 @@ function updateCachedAuthState(): void {
   const session = getInMemorySession();
   cachedAuthUid = String(session?.user?.id ?? "").trim() || null;
   cachedAuthSessionId = decodeSupabaseSessionId(session?.access_token ?? null);
+  cachedAuthSessionObservedAtMs = cachedAuthSessionId ? Date.now() : 0;
 
   if (cachedAuthUid && cachedAuthSessionId) {
     setStoredSessionId(cachedAuthUid, cachedAuthSessionId);
@@ -124,6 +135,13 @@ supabase.auth.onAuthStateChange((_event, session) => {
   const previousUid = cachedAuthUid;
   cachedAuthUid = String(session?.user?.id ?? "").trim() || null;
   cachedAuthSessionId = decodeSupabaseSessionId(session?.access_token ?? null);
+  cachedAuthSessionObservedAtMs = cachedAuthSessionId ? Date.now() : 0;
+  clearSessionsEdgeUnauthorizedCooldown();
+
+  if (cachedAuthUid) {
+    sessionsMutationApiTemporarilyDisabled = false;
+    sessionsDirectApiTemporarilyDisabled = false;
+  }
 
   if (previousUid) {
     invalidateListSessionsCache(previousUid);
@@ -152,6 +170,9 @@ function invalidateListSessionsCache(uidRaw: string | null | undefined): void {
 
 function shouldDisableSessionsMutationApiForError(error: unknown): boolean {
   if (error instanceof EdgeFunctionError) {
+    if (error.status === 401 || error.status === 403) {
+      return true;
+    }
     if (error.status === 404 && error.code === "NOT_FOUND") {
       return true;
     }
@@ -168,6 +189,41 @@ function shouldDisableSessionsMutationApiForError(error: unknown): boolean {
     message.includes("function was not found") ||
     message.includes("requested function was not found")
   );
+}
+
+function isUnauthorizedSessionsEdgeError(error: unknown): boolean {
+  if (!(error instanceof EdgeFunctionError)) {
+    return false;
+  }
+
+  const status = Number(error.status ?? 0);
+  if (status === 401 || status === 403) {
+    return true;
+  }
+
+  const code = String(error.code ?? "").trim().toUpperCase();
+  const message = String(error.message ?? "").trim().toLowerCase();
+  return (
+    code === "INVALID_TOKEN" ||
+    code === "UNAUTHENTICATED" ||
+    code === "UNAUTHORIZED" ||
+    message.includes("invalid jwt") ||
+    message.includes("sessao invalida") ||
+    message.includes("sessão inválida") ||
+    (message.includes("token") && message.includes("expir"))
+  );
+}
+
+function activateSessionsEdgeUnauthorizedCooldown(): void {
+  sessionsEdgeUnauthorizedCooldownUntil = Date.now() + SESSIONS_EDGE_UNAUTHORIZED_COOLDOWN_MS;
+}
+
+function clearSessionsEdgeUnauthorizedCooldown(): void {
+  sessionsEdgeUnauthorizedCooldownUntil = 0;
+}
+
+function isSessionsEdgeUnauthorizedCooldownActive(): boolean {
+  return sessionsEdgeUnauthorizedCooldownUntil > Date.now();
 }
 
 function shouldDisableSessionsApiForDirectError(error: unknown): boolean {
@@ -193,11 +249,23 @@ function shouldFallbackToEdgeSessionsList(error: unknown): boolean {
   const code = String((error as { code?: unknown } | null)?.code ?? "").trim().toUpperCase();
   const message = String((error as { message?: unknown } | null)?.message ?? "").trim().toLowerCase();
 
-  if (status === 404 || code === "42P01" || code === "PGRST205" || code === "PGRST106") {
+  if (
+    status === 400 ||
+    status === 404 ||
+    code === "42P01" ||
+    code === "PGRST205" ||
+    code === "PGRST106" ||
+    code === "PGRST204"
+  ) {
     return true;
   }
 
-  return message.includes("does not exist") || message.includes("schema cache");
+  return (
+    message.includes("does not exist") ||
+    message.includes("schema cache") ||
+    message.includes("column") ||
+    message.includes("ended_at")
+  );
 }
 
 function buildSessionIdStorageKey(uid: string): string {
@@ -207,10 +275,6 @@ function buildSessionIdStorageKey(uid: string): string {
 function getCurrentAuthUid(): string | null {
   const uid = String(cachedAuthUid ?? "").trim();
   return uid || null;
-}
-
-async function hasCurrentAuthAccessToken(): Promise<boolean> {
-  return Boolean(await authService.getCurrentAccessToken());
 }
 
 function toNullableText(valueRaw: string | null | undefined): string | null {
@@ -374,8 +438,12 @@ function getClientVersion(): string {
 }
 
 export async function recordLoginSession(): Promise<LoginSessionView | null> {
+  if (isSessionsEdgeUnauthorizedCooldownActive()) {
+    return null;
+  }
+
   const uid = getCurrentAuthUid();
-  const accessToken = await authService.getCurrentAccessToken();
+  const accessToken = await authService.getValidatedEdgeAccessToken();
   const sessionId = getCurrentAuthSessionId() ?? decodeSupabaseSessionId(accessToken);
   if (!uid || !sessionId || sessionsMutationApiTemporarilyDisabled) {
     return null;
@@ -407,14 +475,23 @@ export async function recordLoginSession(): Promise<LoginSessionView | null> {
       platform: descriptor.platform,
       clientName: descriptor.name,
       appVersion: descriptor.version,
+    }, {
+      requireAuth: true,
+      retries: 0,
+      timeoutMs: 12_000,
     });
 
     const parsed = upsertSessionResponseSchema.parse(response);
+    clearSessionsEdgeUnauthorizedCooldown();
     cachedAuthSessionId = parsed.session.id;
     setStoredSessionId(uid, parsed.session.id);
     invalidateListSessionsCache(uid);
     return parsed.session;
   } catch (error) {
+    if (isUnauthorizedSessionsEdgeError(error)) {
+      activateSessionsEdgeUnauthorizedCooldown();
+      return null;
+    }
     if (shouldDisableSessionsMutationApiForError(error)) {
       sessionsMutationApiTemporarilyDisabled = true;
       return null;
@@ -424,8 +501,12 @@ export async function recordLoginSession(): Promise<LoginSessionView | null> {
 }
 
 export async function endCurrentLoginSession(): Promise<void> {
+  if (isSessionsEdgeUnauthorizedCooldownActive()) {
+    return;
+  }
+
   const uid = getCurrentAuthUid();
-  const accessToken = await authService.getCurrentAccessToken();
+  const accessToken = await authService.getValidatedEdgeAccessToken();
   const sessionId = getCurrentAuthSessionId() ?? decodeSupabaseSessionId(accessToken);
   if (!uid) {
     return;
@@ -452,10 +533,19 @@ export async function endCurrentLoginSession(): Promise<void> {
     >("sessions", {
       action: "end",
       sessionId,
+    }, {
+      requireAuth: true,
+      retries: 0,
+      timeoutMs: 12_000,
     });
 
     endSessionResponseSchema.parse(response);
+    clearSessionsEdgeUnauthorizedCooldown();
   } catch (error) {
+    if (isUnauthorizedSessionsEdgeError(error)) {
+      activateSessionsEdgeUnauthorizedCooldown();
+      return;
+    }
     if (shouldDisableSessionsMutationApiForError(error)) {
       sessionsMutationApiTemporarilyDisabled = true;
       return;
@@ -477,11 +567,15 @@ export function clearCurrentLoginSessionStorage(): void {
 }
 
 export async function endLoginSessionById(sessionId: string): Promise<void> {
+  if (isSessionsEdgeUnauthorizedCooldownActive()) {
+    return;
+  }
+
   if (sessionsMutationApiTemporarilyDisabled) {
     return;
   }
 
-  if (!(await hasCurrentAuthAccessToken())) {
+  if (!(await authService.getValidatedEdgeAccessToken())) {
     return;
   }
 
@@ -497,11 +591,20 @@ export async function endLoginSessionById(sessionId: string): Promise<void> {
     >("sessions", {
       action: "endById",
       sessionId: normalizedSessionId,
+    }, {
+      requireAuth: true,
+      retries: 0,
+      timeoutMs: 12_000,
     });
 
     endSessionResponseSchema.parse(response);
+    clearSessionsEdgeUnauthorizedCooldown();
     invalidateListSessionsCache(uid);
   } catch (error) {
+    if (isUnauthorizedSessionsEdgeError(error)) {
+      activateSessionsEdgeUnauthorizedCooldown();
+      return;
+    }
     if (shouldDisableSessionsMutationApiForError(error)) {
       sessionsMutationApiTemporarilyDisabled = true;
       return;
@@ -510,19 +613,35 @@ export async function endLoginSessionById(sessionId: string): Promise<void> {
   }
 }
 
-export async function listActiveLoginSessions(): Promise<LoginSessionView[]> {
-  const uid = getCurrentAuthUid();
-  if (!uid) {
-    return [];
+async function listActiveLoginSessionsDetailed(): Promise<ListActiveLoginSessionsResult> {
+  if (isSessionsEdgeUnauthorizedCooldownActive()) {
+    return {
+      sessions: [],
+      authoritative: false,
+    };
   }
 
-  if (!(await hasCurrentAuthAccessToken())) {
-    return [];
+  const uid = getCurrentAuthUid();
+  if (!uid) {
+    return {
+      sessions: [],
+      authoritative: false,
+    };
+  }
+
+  if (!(await authService.getValidatedEdgeAccessToken())) {
+    return {
+      sessions: [],
+      authoritative: false,
+    };
   }
 
   const cached = listSessionsCacheByUid.get(uid);
   if (cached && Date.now() - cached.fetchedAt <= LIST_SESSIONS_CACHE_TTL_MS) {
-    return cached.sessions;
+    return {
+      sessions: cached.sessions,
+      authoritative: true,
+    };
   }
 
   const inFlight = listSessionsInFlightByUid.get(uid);
@@ -530,40 +649,65 @@ export async function listActiveLoginSessions(): Promise<LoginSessionView[]> {
     return inFlight;
   }
 
-  const fetchPromise = (async (): Promise<LoginSessionView[]> => {
+  const fetchPromise = (async (): Promise<ListActiveLoginSessionsResult> => {
     try {
-      try {
-        const directSessions = await listActiveLoginSessionsDirect();
-        listSessionsCacheByUid.set(uid, {
-          fetchedAt: Date.now(),
-          sessions: directSessions,
-        });
-        return directSessions;
-      } catch (error) {
-        if (shouldDisableSessionsApiForDirectError(error)) {
-          return [];
-        }
+      if (!sessionsDirectApiTemporarilyDisabled) {
+        try {
+          const directSessions = await listActiveLoginSessionsDirect();
+          clearSessionsEdgeUnauthorizedCooldown();
+          listSessionsCacheByUid.set(uid, {
+            fetchedAt: Date.now(),
+            sessions: directSessions,
+          });
+          return {
+            sessions: directSessions,
+            authoritative: true,
+          };
+        } catch (error) {
+          const shouldFallback = shouldFallbackToEdgeSessionsList(error);
+          if (shouldDisableSessionsApiForDirectError(error)) {
+            sessionsDirectApiTemporarilyDisabled = true;
+          }
+          if (shouldFallback) {
+            sessionsDirectApiTemporarilyDisabled = true;
+          }
 
-        if (!shouldFallbackToEdgeSessionsList(error)) {
-          throw error;
+          if (!shouldFallback) {
+            throw error;
+          }
         }
       }
 
       try {
         const response = await invokeEdgeGet<unknown>("sessions", {
-          retries: 1,
-          timeoutMs: 18_000,
+          requireAuth: true,
+          retries: 0,
+          timeoutMs: 12_000,
         });
 
         const sessions = listSessionsResponseSchema.parse(response).sessions;
+        clearSessionsEdgeUnauthorizedCooldown();
         listSessionsCacheByUid.set(uid, {
           fetchedAt: Date.now(),
           sessions,
         });
-        return sessions;
+        return {
+          sessions,
+          authoritative: true,
+        };
       } catch (error) {
+        if (isUnauthorizedSessionsEdgeError(error)) {
+          activateSessionsEdgeUnauthorizedCooldown();
+          return {
+            sessions: [],
+            authoritative: false,
+          };
+        }
         if (shouldDisableSessionsMutationApiForError(error)) {
-          return [];
+          return {
+            sessions: [],
+            authoritative: false,
+          };
         }
         throw error;
       }
@@ -576,14 +720,36 @@ export async function listActiveLoginSessions(): Promise<LoginSessionView[]> {
   return fetchPromise;
 }
 
+export async function listActiveLoginSessions(): Promise<LoginSessionView[]> {
+  const result = await listActiveLoginSessionsDetailed();
+  return result.sessions;
+}
+
 export async function getCurrentLoginSessionStatus(): Promise<CurrentLoginSessionStatus> {
   const sessionId = getCurrentAuthSessionId();
   if (!sessionId) {
     return "unknown";
   }
 
-  const sessions = await listActiveLoginSessions();
-  return sessions.some((session) => session.id === sessionId) ? "active" : "ended";
+  const result = await listActiveLoginSessionsDetailed();
+  if (!result.authoritative) {
+    return "unknown";
+  }
+
+  const hasCurrentSession = result.sessions.some((session) => session.id === sessionId);
+  if (hasCurrentSession) {
+    return "active";
+  }
+
+  const inGracePeriod =
+    cachedAuthSessionId === sessionId &&
+    cachedAuthSessionObservedAtMs > 0 &&
+    Date.now() - cachedAuthSessionObservedAtMs < SESSION_STATUS_GRACE_PERIOD_MS;
+  if (inGracePeriod) {
+    return "unknown";
+  }
+
+  return "ended";
 }
 
 export function getCurrentLoginSessionId(): string | null {

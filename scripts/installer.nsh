@@ -16,7 +16,8 @@
 !macroend
 
 !macro customInit
-  ; Reserved for future runtime init customization.
+  ; Hide default NSIS progress window to keep startup UX closer to Discord.
+  SetSilent silent
 !macroend
 
 !ifdef BUILD_UNINSTALLER
@@ -66,11 +67,16 @@ update_shim_done:
   WriteRegStr HKCU "${MESSLY_UNINSTALL_REG_KEY}" "DisplayName" "Messly"
   WriteRegStr HKCU "${MESSLY_UNINSTALL_REG_KEY}" "Publisher" "${MESSLY_PUBLISHER}"
   WriteRegStr HKCU "${MESSLY_UNINSTALL_REG_KEY}" "DisplayVersion" "${VERSION}"
+  WriteRegStr HKCU "${MESSLY_UNINSTALL_REG_KEY}" "DisplayIcon" "$INSTDIR\${MESSLY_EXECUTABLE_NAME}"
   WriteRegStr HKCU "${MESSLY_UNINSTALL_REG_KEY}" "InstallLocation" "$INSTDIR"
   WriteRegStr HKCU "${MESSLY_UNINSTALL_REG_KEY}" "UninstallString" '$\"$INSTDIR\Update.exe$\" --uninstall -s'
   WriteRegStr HKCU "${MESSLY_UNINSTALL_REG_KEY}" "QuietUninstallString" '$\"$INSTDIR\Update.exe$\" --uninstall -s'
   WriteRegDWORD HKCU "${MESSLY_UNINSTALL_REG_KEY}" "NoModify" 1
   WriteRegDWORD HKCU "${MESSLY_UNINSTALL_REG_KEY}" "NoRepair" 1
+
+  ; In silent one-click mode there is no finish page, so launch explicitly.
+  IfSilent 0 +2
+  ExecShell "" "$INSTDIR\${MESSLY_EXECUTABLE_NAME}"
 !macroend
 
 !ifdef BUILD_UNINSTALLER

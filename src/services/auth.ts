@@ -531,10 +531,19 @@ class AuthService {
         client: resolveClientDescriptor(),
       });
       session = await applyRemoteSession(response.access_token, response.refresh_token);
+
+      const remoteAccessTokenAccepted = await this.isAccessTokenAcceptedBySupabase(session.access_token);
+      if (!remoteAccessTokenAccepted) {
+        await clearSessionState();
+        session = await signInWithDirectSupabase(email, password);
+      }
     } catch (error) {
-      if (!shouldFallbackToDirectSupabaseLogin(error)) {
+      const canFallbackToDirectSupabase =
+        shouldFallbackToDirectSupabaseLogin(error) || isSupabaseSessionCorruptedError(error);
+      if (!canFallbackToDirectSupabase) {
         throw error;
       }
+      await clearSessionState().catch(() => undefined);
       session = await signInWithDirectSupabase(email, password);
     }
 

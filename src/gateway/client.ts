@@ -60,6 +60,8 @@ function parseGatewayFrame(raw: string): GatewayFrame | null {
 }
 
 export class GatewayClient {
+  private static readonly FAILURE_STREAK_SUSPEND_THRESHOLD = 8;
+  private static readonly FAILURE_STREAK_SUSPEND_MS = 5 * 60_000;
   private readonly options: GatewayClientOptions;
   private ws: WebSocket | null = null;
   private activeSocketUrl: string | null = null;
@@ -79,6 +81,8 @@ export class GatewayClient {
     lastError: null,
   };
   private pendingHeartbeatAtMs: number | null = null;
+  private connectionFailureStreak = 0;
+  private reconnectSuspendedUntil = 0;
 
   constructor(options: GatewayClientOptions) {
     this.options = options;
@@ -116,6 +120,19 @@ export class GatewayClient {
   }
 
   async connect(): Promise<void> {
+    if (this.reconnectSuspendedUntil > Date.now()) {
+      const remainingMs = this.reconnectSuspendedUntil - Date.now();
+      this.updateState({
+        status: "error",
+        lastError: "Gateway temporariamente pausado apos falhas consecutivas.",
+      });
+      this.log("warn", "reconexao do gateway temporariamente suspensa", {
+        remainingMs,
+        reconnectAttempt: this.state.reconnectAttempt,
+      });
+      return;
+    }
+
     const resolvedSocketUrl = this.normalizeSocketUrl(this.options.url);
     if (!resolvedSocketUrl) {
       this.updateState({
@@ -169,6 +186,8 @@ export class GatewayClient {
 
     this.ws = new WebSocket(resolvedSocketUrl);
     this.ws.onopen = () => {
+      this.connectionFailureStreak = 0;
+      this.reconnectSuspendedUntil = 0;
       this.log("info", "websocket conectado", {
         url: resolvedSocketUrl,
       });
@@ -288,6 +307,7 @@ export class GatewayClient {
         break;
       case "HEARTBEAT_ACK":
         this.heartbeat?.ack();
+        this.connectionFailureStreak = 0;
         this.updateState({
           status: "connected",
           reconnectAttempt: 0,
@@ -366,7 +386,14 @@ export class GatewayClient {
       this.updateState({
         status: "closed",
       });
+      this.connectionFailureStreak = 0;
       return;
+    }
+
+    if (this.state.status !== "connected") {
+      this.connectionFailureStreak += 1;
+    } else {
+      this.connectionFailureStreak = 1;
     }
 
     const fallbackCloseReason = closeCode ? `Gateway desconectado (close code ${closeCode}).` : "Gateway desconectado.";
@@ -462,6 +489,20 @@ export class GatewayClient {
   private scheduleReconnect(reason: string): void {
     this.stopHeartbeat();
     this.clearReconnectTimer();
+
+    if (this.connectionFailureStreak >= GatewayClient.FAILURE_STREAK_SUSPEND_THRESHOLD) {
+      this.reconnectSuspendedUntil = Date.now() + GatewayClient.FAILURE_STREAK_SUSPEND_MS;
+      this.updateState({
+        status: "error",
+        lastError: "Gateway indisponivel no momento. Tentaremos novamente em alguns minutos.",
+      });
+      this.log("warn", "gateway em modo de pausa apos falhas consecutivas", {
+        reason,
+        connectionFailureStreak: this.connectionFailureStreak,
+        suspendedForMs: GatewayClient.FAILURE_STREAK_SUSPEND_MS,
+      });
+      return;
+    }
 
     const nextAttempt = this.state.reconnectAttempt + 1;
     const useSlowBackoff = nextAttempt >= 6;

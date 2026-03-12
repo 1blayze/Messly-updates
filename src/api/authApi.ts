@@ -110,8 +110,19 @@ function normalizeApiBaseUrl(valueRaw: string): string | null {
   try {
     const parsed = new URL(normalized);
     const hostname = parsed.hostname.toLowerCase();
-    if ((hostname === "messly.site" || hostname === "www.messly.site") && (!parsed.pathname || parsed.pathname === "/")) {
-      parsed.pathname = "/api";
+    if (hostname === "api.messly.site" || hostname === "messly.site" || hostname === "www.messly.site") {
+      parsed.hostname = "gateway.messly.site";
+      parsed.port = "";
+
+      const normalizedPath = parsed.pathname.replace(/\/+$/, "");
+      if (!normalizedPath || normalizedPath === "/" || normalizedPath === "/api") {
+        parsed.pathname = "";
+      } else if (normalizedPath.startsWith("/api/")) {
+        const withoutApiPrefix = normalizedPath.slice(4);
+        parsed.pathname = withoutApiPrefix || "/";
+      } else {
+        parsed.pathname = normalizedPath;
+      }
     }
     return parsed.toString().replace(/\/+$/, "");
   } catch {

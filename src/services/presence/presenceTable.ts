@@ -5,7 +5,7 @@ type PresenceColumnCapabilities = {
   hasActivitiesColumn: boolean;
 };
 
-const PRESENCE_TABLE_CANDIDATES: ReadonlyArray<PresenceTableName> = ["presence", "user_presence"];
+const PRESENCE_TABLE_CANDIDATES: ReadonlyArray<PresenceTableName> = ["user_presence", "presence"];
 const DEFAULT_PRESENCE_SELECT_WITH_ACTIVITIES = "user_id,status,activities,last_seen,updated_at";
 const DEFAULT_PRESENCE_SELECT_WITHOUT_ACTIVITIES = "user_id,status,last_seen,updated_at";
 

@@ -109,7 +109,13 @@ const isPackagedDevToolsEnabled = PACKAGED_DEVTOOLS_ENV
 const areDevToolsEnabled = !app.isPackaged || isPackagedDevToolsEnabled;
 const TURNSTILE_CSP_SOURCE = "https://challenges.cloudflare.com";
 const CLOUDFLARE_INSIGHTS_SCRIPT_SOURCE = "https://static.cloudflareinsights.com";
-const STATUS_PANEL_ENABLED = false;
+const STATUS_PANEL_ENABLED = (() => {
+  const rawValue = String(process.env.MESSLY_ENABLE_STARTUP_STATUS_PANEL ?? "").trim().toLowerCase();
+  if (rawValue) {
+    return !["0", "false", "off", "no"].includes(rawValue);
+  }
+  return app.isPackaged;
+})();
 const STATUS_PANEL_PROGRESS_BYTES_VISIBILITY_THRESHOLD = 12 * 1024 * 1024;
 const STATUS_PANEL_PHASE = Object.freeze({
   IDLE: "idle",
@@ -127,7 +133,7 @@ const STATUS_PANEL_PHASE = Object.freeze({
 });
 const STATUS_PANEL_COPY_PT_BR = Object.freeze({
   [STATUS_PANEL_PHASE.CHECKING]: Object.freeze({
-    title: "Verificando atualizacoes",
+    title: "Verificando atualizações",
     subtitle: "Preparando aplicativo",
     showProgressBar: true,
     showProgress: false,
@@ -135,15 +141,15 @@ const STATUS_PANEL_COPY_PT_BR = Object.freeze({
     progressPercent: 22,
   }),
   [STATUS_PANEL_PHASE.UPDATE_AVAILABLE]: Object.freeze({
-    title: "Atualizacao disponivel",
+    title: "Atualização disponível",
     subtitle: "Preparando download",
-    showProgressBar: false,
+    showProgressBar: true,
     showProgress: false,
-    indeterminate: false,
-    progressPercent: 100,
+    indeterminate: true,
+    progressPercent: 28,
   }),
   [STATUS_PANEL_PHASE.DOWNLOADING]: Object.freeze({
-    title: "Baixando atualizacao",
+    title: "Baixando atualização",
     subtitle: "Preparando arquivos",
     showProgressBar: true,
     showProgress: true,
@@ -151,7 +157,7 @@ const STATUS_PANEL_COPY_PT_BR = Object.freeze({
     progressPercent: 4,
   }),
   [STATUS_PANEL_PHASE.APPLYING]: Object.freeze({
-    title: "Aplicando atualizacao",
+    title: "Aplicando atualização",
     subtitle: "Quase pronto",
     showProgressBar: true,
     showProgress: false,
@@ -191,17 +197,17 @@ const STATUS_PANEL_COPY_PT_BR = Object.freeze({
     progressPercent: 68,
   }),
   [STATUS_PANEL_PHASE.READY]: Object.freeze({
-    title: "Atualizado",
-    subtitle: "Quase pronto",
-    showProgressBar: false,
+    title: "Abrindo Messly",
+    subtitle: "Inicializando interface",
+    showProgressBar: true,
     showProgress: false,
-    indeterminate: false,
+    indeterminate: true,
     progressPercent: 100,
   }),
   [STATUS_PANEL_PHASE.FAILED]: Object.freeze({
-    title: "Nao foi possivel concluir a atualizacao",
+    title: "Não foi possível concluir a atualização",
     subtitle: "Tente novamente",
-    showProgressBar: false,
+    showProgressBar: true,
     showProgress: false,
     indeterminate: false,
     progressPercent: 0,
@@ -228,6 +234,21 @@ const STATUS_PANEL_MIN_VISIBLE_MS = Object.freeze({
   [STATUS_PANEL_PHASE.FAILED]: 880,
   [STATUS_PANEL_PHASE.RETRYING]: 520,
 });
+const MAIN_WINDOW_FIRST_FRAME_TIMEOUT_MS = 12_000;
+const STARTUP_AUTO_UPDATE_BLOCK_TIMEOUT_MS = 8_000;
+const STARTUP_STATUS_PANEL_HARD_TIMEOUT_MS = 16_000;
+const RENDERER_BOOTSTRAP_MAX_RETRIES = 3;
+const RENDERER_BOOTSTRAP_RETRY_DELAYS_MS = Object.freeze([700, 1400, 2600]);
+const RENDERER_BOOTSTRAP_ABORT_CODE = -3;
+const RENDERER_BOOTSTRAP_RETRIABLE_ERROR_CODES = new Set([
+  -105, // ERR_NAME_NOT_RESOLVED
+  -106, // ERR_INTERNET_DISCONNECTED
+  -102, // ERR_CONNECTION_REFUSED
+  -118, // ERR_CONNECTION_TIMED_OUT
+  -137, // ERR_NAME_RESOLUTION_FAILED
+]);
+const STATUS_PANEL_FALLBACK_TITLE = "Preparando Messly";
+const STATUS_PANEL_FALLBACK_SUBTITLE = "Aguarde um instante";
 const PRODUCTION_SCRIPT_SOURCE = areDevToolsEnabled
   ? `script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval' ${TURNSTILE_CSP_SOURCE} ${CLOUDFLARE_INSIGHTS_SCRIPT_SOURCE}`
   : `script-src 'self' 'wasm-unsafe-eval' ${TURNSTILE_CSP_SOURCE} ${CLOUDFLARE_INSIGHTS_SCRIPT_SOURCE}`;
@@ -249,7 +270,7 @@ const ALLOWED_APP_PERMISSIONS = Object.freeze(["media", "display-capture"]);
 const WINDOWS_FIREWALL_RULE_NAME = String(process.env.MESSLY_FIREWALL_RULE_NAME ?? DEFAULT_FIREWALL_RULE_NAME).trim() || DEFAULT_FIREWALL_RULE_NAME;
 const WINDOWS_FIREWALL_PROFILE = String(process.env.MESSLY_FIREWALL_PROFILE ?? DEFAULT_FIREWALL_PROFILE).trim().toLowerCase() || DEFAULT_FIREWALL_PROFILE;
 const DEFAULT_PUBLIC_WEB_ORIGIN = "https://messly.site";
-const DEFAULT_PUBLIC_API_BASE_URL = "https://messly.site/api";
+const DEFAULT_PUBLIC_API_BASE_URL = "https://gateway.messly.site";
 const DEFAULT_PUBLIC_GATEWAY_URL = "wss://gateway.messly.site/gateway";
 const REQUIRED_PRODUCTION_RENDERER_URL = "https://messly.site/";
 
@@ -258,17 +279,33 @@ function resolveAppIconPath(fileName) {
   return fs.existsSync(iconPath) ? iconPath : undefined;
 }
 
+function resolveWindowsIcoPath() {
+  const candidates = [
+    APP_NOTIFICATION_ICON_ICO_PATH,
+    process.resourcesPath ? path.join(process.resourcesPath, "assets", "icons", "messly.ico") : "",
+    process.resourcesPath ? path.join(process.resourcesPath, "app.asar", "assets", "icons", "messly.ico") : "",
+  ]
+    .map((candidate) => String(candidate ?? "").trim())
+    .filter(Boolean);
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return undefined;
+}
+
 const APP_WINDOW_ICON_PNG_PATH =
   resolveAppIconPath("messly-notification@128.png") ??
   resolveAppIconPath("messly-notification.png");
 const APP_WINDOW_ICON_SVG_PATH = resolveAppIconPath("messly-icon.svg");
 const APP_TRAY_ICON_SVG_PATH = resolveAppIconPath("messly-tray.svg");
-const APP_WINDOW_ICON_ICO_PATH = fs.existsSync(APP_NOTIFICATION_ICON_ICO_PATH)
-  ? APP_NOTIFICATION_ICON_ICO_PATH
-  : undefined;
+const APP_WINDOW_ICON_ICO_PATH = resolveWindowsIcoPath();
 
 const MAIN_WINDOW_ICON_PATH = process.platform === "win32"
-  ? APP_WINDOW_ICON_ICO_PATH ?? APP_WINDOW_ICON_PNG_PATH ?? APP_WINDOW_ICON_SVG_PATH
+  ? APP_WINDOW_ICON_ICO_PATH ?? APP_WINDOW_ICON_PNG_PATH ?? APP_WINDOW_ICON_SVG_PATH ?? process.execPath
   : APP_WINDOW_ICON_PNG_PATH ?? APP_WINDOW_ICON_SVG_PATH;
 const CHILD_WINDOW_ICON_PATH = MAIN_WINDOW_ICON_PATH;
 const TRAY_ICON_PATH = process.platform === "win32"
@@ -304,6 +341,7 @@ let statusPanelDisplayProgressPercent = 0;
 let statusPanelProgressInterpolationMode = "";
 let mainWindowWaitingForFirstFrame = false;
 let mainWindowFirstFrameReady = false;
+let mainWindowFirstFrameFallbackTimer = null;
 let pendingSpotifyOAuthCallback = null;
 const spotifyOAuthCallbackWaiters = new Set();
 let spotifyPresenceService = null;
@@ -316,6 +354,9 @@ let windowsFirewallBootstrapPromise = null;
 let updaterBroadcastThrottleTimer = null;
 let updaterBroadcastQueuedState = null;
 let updaterBroadcastLastAtMs = 0;
+let startupUpdaterBlockTimedOut = false;
+let startupStatusPanelLifecycleActive = false;
+let startupStatusPanelHardStopTimer = null;
 const ephemeralSecureAuthStorage = new Map();
 const hardenedWebContents = new WeakSet();
 const hardenedSessions = new WeakSet();
@@ -408,7 +449,12 @@ function logNotificationDebug(event, details = {}) {
 }
 
 function getWindowsNotificationAppId() {
-  const configured = String(process.env.MESSLY_WINDOWS_AUMID ?? WINDOWS_APP_USER_MODEL_ID ?? APP_NAME).trim();
+  const packagedDefault = String(WINDOWS_APP_USER_MODEL_ID ?? APP_ID ?? APP_NAME).trim();
+  if (app.isPackaged && packagedDefault) {
+    return packagedDefault;
+  }
+
+  const configured = String(process.env.MESSLY_WINDOWS_AUMID ?? packagedDefault).trim();
   if (!configured) {
     return APP_NAME;
   }
@@ -786,6 +832,17 @@ function installSessionSecurityPolicies(targetSession) {
   }
 
   if (app.isPackaged) {
+    targetSession.webRequest.onBeforeRequest((details, callback) => {
+      const currentUrl = String(details?.url ?? "");
+      const redirectURL = rewriteLegacyPublicApiRequestUrl(currentUrl);
+      if (redirectURL && redirectURL !== currentUrl) {
+        callback({ redirectURL });
+        return;
+      }
+
+      callback({});
+    });
+
     // Inject strict CSP header on HTTP(S) responses in production.
     targetSession.webRequest.onHeadersReceived((details, callback) => {
       const responseHeaders = { ...(details.responseHeaders ?? {}) };
@@ -895,14 +952,20 @@ function escapeHtml(value) {
 }
 
 function buildStatusPanelHtmlV2(payload) {
-  const title = escapeHtml(payload?.title ?? "");
-  const subtitle = escapeHtml(payload?.subtitle ?? "");
-  const progressText = escapeHtml(payload?.progressText ?? "");
-  const detail = escapeHtml(payload?.detail ?? "");
+  const rawTitle = String(payload?.title ?? "").trim();
+  const rawSubtitle = String(payload?.subtitle ?? "").trim();
+  const rawProgressText = String(payload?.progressText ?? "").trim();
+  const rawDetail = String(payload?.detail ?? "").trim();
+  const hasRenderableCopy = Boolean(rawTitle || rawSubtitle || rawProgressText || rawDetail);
+  const shouldUseFallbackCopy = !rawTitle && !rawSubtitle && !rawProgressText && !rawDetail;
+  const title = escapeHtml(rawTitle || (shouldUseFallbackCopy ? STATUS_PANEL_FALLBACK_TITLE : ""));
+  const subtitle = escapeHtml(rawSubtitle || (shouldUseFallbackCopy ? STATUS_PANEL_FALLBACK_SUBTITLE : ""));
+  const progressText = escapeHtml(rawProgressText);
+  const detail = escapeHtml(rawDetail);
   const showTitle = Boolean(title);
   const showSubtitle = Boolean(subtitle);
   const showProgress = Boolean(payload?.showProgress || progressText);
-  const showProgressBar = payload?.showProgressBar !== false;
+  const showProgressBar = payload?.showProgressBar !== false || !hasRenderableCopy;
   const showDetail = Boolean(detail);
   const progressValue = Math.max(0, Math.min(100, Number(payload?.progressPercent ?? 0)));
   const indeterminate = Boolean(payload?.indeterminate);
@@ -954,24 +1017,28 @@ function buildStatusPanelHtmlV2(payload) {
       border: 0;
       border-radius: 0;
       box-shadow: none;
-      padding: 34px 22px 24px;
+      padding: 40px 24px 38px;
       -webkit-app-region: drag;
       display: flex;
       flex-direction: column;
       align-items: center;
-      justify-content: space-between;
+      justify-content: center;
+      gap: 28px;
       opacity: 1;
       transform: translateY(0);
-      animation: fade-in 220ms ease-out;
+      animation: fade-in 280ms cubic-bezier(.22,.9,.32,1);
     }
     .brand {
       width: 100%;
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 14px;
+      gap: 18px;
       text-align: center;
-      padding-top: 8px;
+      padding-top: 0;
+      opacity: 0;
+      transform: translateY(4px);
+      animation: fade-up 320ms cubic-bezier(.22,.9,.32,1) 80ms forwards;
     }
     .avatar {
       width: 96px;
@@ -985,9 +1052,9 @@ function buildStatusPanelHtmlV2(payload) {
     }
     .copy {
       display: grid;
-      gap: 5px;
+      gap: 10px;
       justify-items: center;
-      min-height: 58px;
+      min-height: 62px;
       align-content: start;
     }
     .title {
@@ -1010,13 +1077,16 @@ function buildStatusPanelHtmlV2(payload) {
     .footer {
       width: 100%;
       display: grid;
-      gap: 6px;
+      gap: 14px;
       justify-items: center;
-      margin-top: auto;
+      margin-top: 0;
+      opacity: 0;
+      transform: translateY(6px);
+      animation: fade-up 320ms cubic-bezier(.22,.9,.32,1) 150ms forwards;
     }
     .progress-track {
-      width: min(212px, 62vw);
-      height: 5px;
+      width: min(220px, 64vw);
+      height: 6px;
       border-radius: 999px;
       background: var(--track);
       overflow: hidden;
@@ -1027,7 +1097,7 @@ function buildStatusPanelHtmlV2(payload) {
       height: 100%;
       border-radius: 999px;
       background: var(--fill);
-      transition: width 260ms cubic-bezier(.17,.84,.44,1);
+      transition: width 360ms cubic-bezier(.22,.9,.32,1);
       box-shadow: 0 0 10px rgba(255,255,255,.32);
       transform-origin: 0 50%;
       ${indeterminate ? "animation: indeterminate 1300ms ease-in-out infinite;" : ""}
@@ -1056,6 +1126,10 @@ function buildStatusPanelHtmlV2(payload) {
     }
     @keyframes fade-in {
       from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes fade-up {
+      from { opacity: 0; transform: translateY(6px); }
       to { opacity: 1; transform: translateY(0); }
     }
     @keyframes logo-breathe {
@@ -1087,6 +1161,135 @@ function buildStatusPanelHtmlV2(payload) {
 </html>`;
 }
 
+function buildRendererLoadFailureHtml(payload = {}) {
+  const rendererUrl = String(payload.rendererUrl ?? getExpectedProductionRendererUrl()).trim() || getExpectedProductionRendererUrl();
+  const reason = escapeHtml(String(payload.reason ?? "Falha ao carregar a interface."));
+  const details = escapeHtml(String(payload.details ?? "").trim());
+  const errorCode = Number.isFinite(Number(payload.errorCode)) ? Number(payload.errorCode) : null;
+  const errorDescription = escapeHtml(String(payload.errorDescription ?? "").trim());
+  const safeRendererUrl = escapeHtml(rendererUrl);
+  const safeRendererUrlJs = JSON.stringify(rendererUrl);
+  const safeErrorCode = errorCode !== null ? String(errorCode) : "";
+
+  return `<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Messly</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0d1117;
+      --card: #1b2432;
+      --text: #f2f5fa;
+      --muted: #a7b3c7;
+      --accent: #d8e7ff;
+      --accent2: #8bb1ff;
+      --danger: #ff9aa2;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      background: radial-gradient(1200px 700px at 15% -5%, #253247 0%, var(--bg) 55%), var(--bg);
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto;
+      color: var(--text);
+    }
+    main {
+      width: 100%;
+      height: 100%;
+      display: grid;
+      place-items: center;
+      padding: 28px;
+    }
+    .card {
+      width: min(640px, 92vw);
+      border-radius: 16px;
+      background: linear-gradient(180deg, rgba(33,44,61,.92) 0%, rgba(24,31,44,.92) 100%);
+      border: 1px solid rgba(255,255,255,.08);
+      box-shadow: 0 22px 48px rgba(0,0,0,.45);
+      padding: 28px 24px;
+      display: grid;
+      gap: 16px;
+    }
+    h1 {
+      margin: 0;
+      font-size: 28px;
+      line-height: 1.15;
+      letter-spacing: -.02em;
+    }
+    p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.5;
+      font-size: 14px;
+    }
+    .warn { color: var(--danger); font-size: 13px; }
+    .meta {
+      background: rgba(0,0,0,.26);
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 10px;
+      padding: 10px 12px;
+      display: grid;
+      gap: 5px;
+    }
+    .actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 2px;
+    }
+    button, a {
+      appearance: none;
+      border: 1px solid rgba(255,255,255,.18);
+      background: rgba(255,255,255,.06);
+      color: var(--text);
+      border-radius: 9px;
+      padding: 10px 14px;
+      font-size: 13px;
+      font-weight: 600;
+      text-decoration: none;
+      cursor: pointer;
+    }
+    button.primary {
+      background: linear-gradient(180deg, var(--accent2) 0%, var(--accent) 100%);
+      color: #081121;
+      border-color: transparent;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="card">
+      <h1>Não foi possível abrir o Messly</h1>
+      <p>${reason}</p>
+      <div class="meta">
+        <p><strong>URL:</strong> ${safeRendererUrl}</p>
+        ${safeErrorCode ? `<p><strong>Código:</strong> ${safeErrorCode}</p>` : ""}
+        ${errorDescription ? `<p><strong>Detalhe:</strong> ${errorDescription}</p>` : ""}
+        ${details ? `<p><strong>Diagnóstico:</strong> ${details}</p>` : ""}
+      </div>
+      <p class="warn">Verifique conexão/DNS/SSL e tente novamente.</p>
+      <div class="actions">
+        <button id="retry" class="primary">Tentar novamente</button>
+        <a href="${safeRendererUrl}" target="_self" rel="noreferrer">Abrir URL</a>
+      </div>
+    </section>
+  </main>
+  <script>
+    const retryButton = document.getElementById("retry");
+    if (retryButton) {
+      retryButton.addEventListener("click", () => {
+        window.location.href = ${safeRendererUrlJs};
+      });
+    }
+  </script>
+</body>
+</html>`;
+}
+
 function getStatusPanelWindow() {
   if (statusPanelWindowRef && !statusPanelWindowRef.isDestroyed()) {
     return statusPanelWindowRef;
@@ -1114,7 +1317,7 @@ function getStatusPanelWindow() {
     focusable: true,
     autoHideMenuBar: true,
     title: "",
-    icon: CHILD_WINDOW_ICON_PATH || MAIN_WINDOW_ICON_PATH,
+    icon: CHILD_WINDOW_ICON_PATH || MAIN_WINDOW_ICON_PATH || process.execPath,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -1172,7 +1375,7 @@ function scheduleStatusPanelAutoHide(delayMs, mode) {
   const safeDelay = Number.isFinite(parsedDelay) ? Math.max(150, Math.trunc(parsedDelay)) : 900;
   statusPanelAutoHideTimer = setTimeout(() => {
     statusPanelAutoHideTimer = null;
-    hideStatusPanel({ mode });
+    hideStatusPanel({ mode, force: true });
   }, safeDelay);
 }
 
@@ -1196,6 +1399,15 @@ function showStatusPanel(payload, mode = "generic") {
     showProgress: Boolean(sourcePayload.showProgress),
     indeterminate: Boolean(sourcePayload.indeterminate),
   };
+  if (!safePayload.title && !safePayload.subtitle) {
+    safePayload.title = STATUS_PANEL_FALLBACK_TITLE;
+    safePayload.subtitle = STATUS_PANEL_FALLBACK_SUBTITLE;
+    safePayload.showProgressBar = true;
+    safePayload.indeterminate = true;
+    if (!Number.isFinite(safePayload.progressPercent) || safePayload.progressPercent <= 0) {
+      safePayload.progressPercent = 16;
+    }
+  }
   clearStatusPanelAutoHide();
   safePayload.progressPercent = Math.max(0, Math.min(100, Number(safePayload.progressPercent ?? 0)));
 
@@ -1245,6 +1457,7 @@ function hideStatusPanel(options = {}) {
   clearStatusPanelAutoHide();
   clearStatusPanelPhaseTransition();
   const mode = typeof options === "string" ? options : options?.mode;
+  const force = typeof options === "object" && options !== null && Boolean(options.force);
   const panelWindow = statusPanelWindowRef;
   if (!panelWindow || panelWindow.isDestroyed()) {
     statusPanelWindowRef = null;
@@ -1256,7 +1469,7 @@ function hideStatusPanel(options = {}) {
     statusPanelProgressInterpolationMode = "";
     return;
   }
-  if (mode && statusPanelMode && statusPanelMode !== mode) {
+  if (!force && mode && statusPanelMode && statusPanelMode !== mode) {
     return;
   }
   statusPanelMode = null;
@@ -1266,6 +1479,70 @@ function hideStatusPanel(options = {}) {
   statusPanelDisplayProgressPercent = 0;
   statusPanelProgressInterpolationMode = "";
   panelWindow.destroy();
+}
+
+function isStartupStatusPanelLifecycleActive() {
+  return Boolean(STATUS_PANEL_ENABLED && app.isPackaged && startupStatusPanelLifecycleActive);
+}
+
+function clearStartupStatusPanelHardStopTimer() {
+  if (startupStatusPanelHardStopTimer != null) {
+    clearTimeout(startupStatusPanelHardStopTimer);
+    startupStatusPanelHardStopTimer = null;
+  }
+}
+
+function armStartupStatusPanelHardStopTimer() {
+  clearStartupStatusPanelHardStopTimer();
+  if (!isStartupStatusPanelLifecycleActive()) {
+    return;
+  }
+  startupStatusPanelHardStopTimer = setTimeout(() => {
+    startupStatusPanelHardStopTimer = null;
+    if (!isStartupStatusPanelLifecycleActive()) {
+      return;
+    }
+
+    console.warn(`[electron] startup status panel hard timeout reached after ${STARTUP_STATUS_PANEL_HARD_TIMEOUT_MS}ms`);
+    completeStartupStatusPanelLifecycle("hard-timeout");
+    hideStatusPanel({ force: true });
+
+    const mainWindow = getMainWindow();
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      ensureMainWindowBootstrapped();
+      return;
+    }
+    if (mainWindowWaitingForFirstFrame && !mainWindowFirstFrameReady) {
+      revealMainWindowAfterFirstFrame({
+        startMinimized: false,
+        surface: "startup-status-panel-hard-timeout",
+      });
+      return;
+    }
+    if (!mainWindow.isVisible() && !shouldStartMinimizedThisLaunch()) {
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  }, STARTUP_STATUS_PANEL_HARD_TIMEOUT_MS);
+}
+
+function beginStartupStatusPanelLifecycle() {
+  startupStatusPanelLifecycleActive = Boolean(STATUS_PANEL_ENABLED && app.isPackaged);
+  armStartupStatusPanelHardStopTimer();
+}
+
+function completeStartupStatusPanelLifecycle(reason = "") {
+  if (!startupStatusPanelLifecycleActive) {
+    return;
+  }
+  startupStatusPanelLifecycleActive = false;
+  clearStartupStatusPanelHardStopTimer();
+  if (reason) {
+    console.info(`[electron] startup status panel lifecycle closed: ${reason}`);
+  }
+  if (statusPanelWindowRef && !statusPanelWindowRef.isDestroyed()) {
+    scheduleStatusPanelAutoHide(360);
+  }
 }
 
 function normalizeStatusPanelPhaseName(rawPhase) {
@@ -1413,6 +1690,12 @@ function syncStatusPanelWithUpdaterStateV2(nextState) {
   if (!nextState || typeof nextState !== "object") {
     return;
   }
+  if (!isStartupStatusPanelLifecycleActive()) {
+    if (statusPanelWindowRef && !statusPanelWindowRef.isDestroyed()) {
+      hideStatusPanel({ force: true });
+    }
+    return;
+  }
 
   const status = String(nextState.status ?? "").trim().toLowerCase();
   if (status === "checking") {
@@ -1454,11 +1737,20 @@ function syncStatusPanelWithUpdaterStateV2(nextState) {
       .catch((error) => {
         const message = error instanceof Error ? error.message : String(error ?? "Falha desconhecida.");
         updaterAutoInstallInFlight = false;
-        setStatusPanelPhase(STATUS_PANEL_PHASE.FAILED, {
-          detail: "Nao foi possivel concluir a atualizacao.",
-          showProgressBar: false,
-        });
-        scheduleStatusPanelAutoHide(1800, STATUS_PANEL_PHASE.FAILED);
+        if (mainWindowWaitingForFirstFrame && !mainWindowFirstFrameReady) {
+          setStatusPanelPhase(STATUS_PANEL_PHASE.LOADING_SHELL, {
+            title: "Abrindo Messly",
+            subtitle: "Inicializando interface",
+            showProgressBar: true,
+            showProgress: false,
+            indeterminate: true,
+          }, {
+            force: true,
+          });
+          scheduleStatusPanelAutoHide(380);
+        } else {
+          hideStatusPanel({ force: true });
+        }
         if (message) {
           console.warn(`[updater] install failed: ${message}`);
         }
@@ -1483,29 +1775,35 @@ function syncStatusPanelWithUpdaterStateV2(nextState) {
       return;
     }
     setStatusPanelPhase(STATUS_PANEL_PHASE.READY, {
-      title: "Atualizado",
-      subtitle: "Quase pronto",
-      showProgressBar: false,
+      title: "Abrindo Messly",
+      subtitle: "Inicializando interface",
+      showProgressBar: true,
       showProgress: false,
+      indeterminate: true,
     });
     scheduleStatusPanelAutoHide(760, STATUS_PANEL_PHASE.READY);
     restoreWindowsAfterUpdateFlow();
+    ensureMainWindowBootstrapped();
     return;
   }
 
   if (status === "error") {
     updaterAutoInstallInFlight = false;
-    setStatusPanelPhase(STATUS_PANEL_PHASE.FAILED, {
-      detail: "Nao foi possivel concluir a atualizacao.",
-      showProgressBar: false,
-      showProgress: false,
-    });
     if (mainWindowWaitingForFirstFrame && !mainWindowFirstFrameReady) {
-      setStatusPanelPhase(STATUS_PANEL_PHASE.RETRYING);
+      setStatusPanelPhase(STATUS_PANEL_PHASE.LOADING_SHELL, {
+        title: "Abrindo Messly",
+        subtitle: "Inicializando interface",
+        showProgressBar: true,
+        showProgress: false,
+        indeterminate: true,
+      }, {
+        force: true,
+      });
       return;
     }
-    scheduleStatusPanelAutoHide(1800, STATUS_PANEL_PHASE.FAILED);
+    hideStatusPanel({ force: true });
     restoreWindowsAfterUpdateFlow();
+    ensureMainWindowBootstrapped();
     return;
   }
 
@@ -1517,6 +1815,7 @@ function syncStatusPanelWithUpdaterStateV2(nextState) {
     }
     hideStatusPanel();
     restoreWindowsAfterUpdateFlow();
+    ensureMainWindowBootstrapped();
   }
 }
 
@@ -2092,12 +2391,60 @@ function normalizePublicApiBaseUrl(rawValue) {
   try {
     const parsed = new URL(value);
     const hostname = parsed.hostname.trim().toLowerCase();
-    if ((hostname === "messly.site" || hostname === "www.messly.site") && (!parsed.pathname || parsed.pathname === "/")) {
-      parsed.pathname = "/api";
+    if (hostname === "api.messly.site" || hostname === "messly.site" || hostname === "www.messly.site") {
+      parsed.hostname = "gateway.messly.site";
+      parsed.port = "";
+
+      const normalizedPath = parsed.pathname.replace(/\/+$/, "");
+      if (!normalizedPath || normalizedPath === "/" || normalizedPath === "/api") {
+        parsed.pathname = "";
+      } else if (normalizedPath.startsWith("/api/")) {
+        const withoutApiPrefix = normalizedPath.slice(4);
+        parsed.pathname = withoutApiPrefix || "/";
+      } else {
+        parsed.pathname = normalizedPath;
+      }
     }
     return parsed.toString().replace(/\/+$/, "");
   } catch {
     return value.replace(/\/+$/, "") || DEFAULT_PUBLIC_API_BASE_URL;
+  }
+}
+
+function rewriteLegacyPublicApiRequestUrl(rawValue) {
+  const value = typeof rawValue === "string" ? rawValue.trim() : "";
+  if (!value) {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(value);
+    const hostname = parsed.hostname.trim().toLowerCase();
+    const normalizedPath = parsed.pathname.replace(/\/+$/, "");
+    const isLegacyApiHost = hostname === "api.messly.site";
+    const isLegacyApiPathOnWebHost =
+      (hostname === "messly.site" || hostname === "www.messly.site") &&
+      (normalizedPath === "/api" || normalizedPath.startsWith("/api/"));
+
+    if (!isLegacyApiHost && !isLegacyApiPathOnWebHost) {
+      return null;
+    }
+
+    parsed.hostname = "gateway.messly.site";
+    parsed.port = "";
+
+    if (isLegacyApiPathOnWebHost) {
+      if (normalizedPath === "/api") {
+        parsed.pathname = "/";
+      } else {
+        const withoutApiPrefix = normalizedPath.slice(4);
+        parsed.pathname = withoutApiPrefix || "/";
+      }
+    }
+
+    return parsed.toString();
+  } catch {
+    return null;
   }
 }
 
@@ -2141,6 +2488,19 @@ function normalizePublicGatewayUrl(rawValue) {
 }
 
 function getConfiguredWebOrigin() {
+  const configuredWebOrigin = String(process.env.VITE_MESSLY_ASSETS_URL ?? "").trim();
+  if (configuredWebOrigin) {
+    try {
+      const parsedConfigured = new URL(configuredWebOrigin);
+      parsedConfigured.pathname = "";
+      parsedConfigured.search = "";
+      parsedConfigured.hash = "";
+      return parsedConfigured.toString().replace(/\/+$/, "") || DEFAULT_PUBLIC_WEB_ORIGIN;
+    } catch {
+      // Fallback below.
+    }
+  }
+
   const apiBaseUrl = getConfiguredAppApiBaseUrl();
   try {
     const parsed = new URL(apiBaseUrl);
@@ -2219,6 +2579,93 @@ function getMainWindow() {
   return mainWindowRef;
 }
 
+function clearMainWindowFirstFrameFallbackTimer() {
+  if (mainWindowFirstFrameFallbackTimer != null) {
+    clearTimeout(mainWindowFirstFrameFallbackTimer);
+    mainWindowFirstFrameFallbackTimer = null;
+  }
+}
+
+function scheduleMainWindowFirstFrameFallback(mainWindow, startMinimized) {
+  clearMainWindowFirstFrameFallbackTimer();
+  if (!mainWindow || mainWindow.isDestroyed() || startMinimized) {
+    return;
+  }
+
+  mainWindowFirstFrameFallbackTimer = setTimeout(async () => {
+    mainWindowFirstFrameFallbackTimer = null;
+    if (!mainWindowWaitingForFirstFrame || mainWindowFirstFrameReady) {
+      return;
+    }
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      return;
+    }
+    const webContents = mainWindow.webContents;
+    const currentUrl = webContents && !webContents.isDestroyed() ? String(webContents.getURL() ?? "").trim() : "";
+    const isStillLoading = Boolean(webContents && !webContents.isDestroyed() && webContents.isLoadingMainFrame());
+    const isBlankUrl = !currentUrl || currentUrl === "about:blank";
+    const isDataUrl = currentUrl.startsWith("data:text/html");
+
+    if (isBlankUrl || isStillLoading) {
+      showMainWindowRendererLoadFailure(mainWindow, {
+        rendererUrl: resolveRendererStartupUrl(),
+        validatedURL: currentUrl,
+        reason: "Tempo limite ao iniciar a interface.",
+        details: isStillLoading ? "Carregamento principal excedeu o tempo esperado." : "A janela permaneceu em branco.",
+      });
+      return;
+    }
+
+    if (isDataUrl) {
+      if (!mainWindow.isVisible()) {
+        mainWindow.show();
+      }
+      mainWindow.focus();
+      return;
+    }
+
+    let domSnapshot = null;
+    if (webContents && !webContents.isDestroyed()) {
+      try {
+        domSnapshot = await webContents.executeJavaScript(
+          `(() => {
+            const root = document.getElementById("root");
+            const body = document.body;
+            const rootChildCount = root ? root.childElementCount : 0;
+            const bodyChildCount = body ? body.childElementCount : 0;
+            const bodyTextLength = body && typeof body.innerText === "string" ? body.innerText.trim().length : 0;
+            return { rootChildCount, bodyChildCount, bodyTextLength };
+          })();`,
+          true,
+        );
+      } catch {}
+    }
+
+    const rootChildCount = Number(domSnapshot?.rootChildCount ?? 0);
+    const bodyChildCount = Number(domSnapshot?.bodyChildCount ?? 0);
+    const bodyTextLength = Number(domSnapshot?.bodyTextLength ?? 0);
+    const hasRenderableDom = rootChildCount > 0 || bodyChildCount > 1 || bodyTextLength > 0;
+    if (!hasRenderableDom) {
+      showMainWindowRendererLoadFailure(mainWindow, {
+        rendererUrl: resolveRendererStartupUrl(),
+        validatedURL: currentUrl,
+        reason: "A interface não renderizou conteúdo visível.",
+        details: `DOM snapshot: root=${rootChildCount}, bodyChildren=${bodyChildCount}, text=${bodyTextLength}`,
+      });
+      return;
+    }
+
+    console.warn("[electron] renderer first-frame timeout reached, forcing main window reveal", {
+      currentUrl: currentUrl || null,
+      isStillLoading,
+    });
+    revealMainWindowAfterFirstFrame({
+      startMinimized: false,
+      surface: "first-frame-timeout-fallback",
+    });
+  }, MAIN_WINDOW_FIRST_FRAME_TIMEOUT_MS);
+}
+
 function revealMainWindowAfterFirstFrame(options = {}) {
   const mainWindow = getMainWindow();
   if (!mainWindow || mainWindow.isDestroyed()) {
@@ -2228,6 +2675,8 @@ function revealMainWindowAfterFirstFrame(options = {}) {
   const startMinimized =
     typeof options.startMinimized === "boolean" ? options.startMinimized : shouldStartMinimizedThisLaunch();
 
+  clearMainWindowFirstFrameFallbackTimer();
+  startupUpdaterBlockTimedOut = false;
   mainWindowWaitingForFirstFrame = false;
   mainWindowFirstFrameReady = true;
 
@@ -2240,6 +2689,7 @@ function revealMainWindowAfterFirstFrame(options = {}) {
       mainWindow.minimize();
     }
     hideStatusPanel();
+    completeStartupStatusPanelLifecycle("start-minimized");
     return true;
   }
 
@@ -2256,15 +2706,21 @@ function revealMainWindowAfterFirstFrame(options = {}) {
   measureMainStartupPerf("main_when_ready_to_window_reveal", "main:when-ready", "main:window-revealed", {
     startMinimized,
   });
-  setStatusPanelPhase(STATUS_PANEL_PHASE.READY, {
-    title: "Carregando Messly",
-    subtitle: "Quase pronto",
-    showProgressBar: false,
-    showProgress: false,
-  }, {
-    force: true,
-  });
-  scheduleStatusPanelAutoHide(180, STATUS_PANEL_PHASE.READY);
+  if (isStartupStatusPanelLifecycleActive()) {
+    setStatusPanelPhase(STATUS_PANEL_PHASE.READY, {
+      title: "Abrindo Messly",
+      subtitle: "Inicializando interface",
+      showProgressBar: true,
+      showProgress: false,
+      indeterminate: true,
+    }, {
+      force: true,
+    });
+    scheduleStatusPanelAutoHide(180, STATUS_PANEL_PHASE.READY);
+    completeStartupStatusPanelLifecycle("main-window-revealed");
+  } else {
+    hideStatusPanel();
+  }
   return true;
 }
 
@@ -2310,6 +2766,61 @@ function showMainWindow() {
   }
   window.focus();
   return true;
+}
+
+function ensureMainWindowBootstrapped() {
+  if (isAppQuitting) {
+    return;
+  }
+  if (getMainWindow()) {
+    return;
+  }
+  createMainWindow();
+}
+
+function showMainWindowRendererLoadFailure(mainWindow, context = {}) {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+
+  clearMainWindowFirstFrameFallbackTimer();
+  startupUpdaterBlockTimedOut = false;
+  mainWindowWaitingForFirstFrame = false;
+  mainWindowFirstFrameReady = true;
+  hideStatusPanel();
+  completeStartupStatusPanelLifecycle("renderer-load-failure");
+
+  const rendererUrl = String(context.rendererUrl ?? getExpectedProductionRendererUrl()).trim() || getExpectedProductionRendererUrl();
+  const validatedUrl = String(context.validatedURL ?? "").trim();
+  const errorCode = Number.isFinite(Number(context.errorCode)) ? Number(context.errorCode) : null;
+  const errorDescription = String(context.errorDescription ?? "").trim();
+  const reason = String(context.reason ?? "Falha ao carregar a interface.").trim() || "Falha ao carregar a interface.";
+  const details = String(context.details ?? "").trim();
+
+  console.error("[electron] main renderer load failure", {
+    rendererUrl,
+    validatedURL: validatedUrl || null,
+    errorCode,
+    errorDescription: errorDescription || null,
+    reason,
+    details: details || null,
+  });
+
+  const html = buildRendererLoadFailureHtml({
+    rendererUrl,
+    validatedURL: validatedUrl,
+    errorCode,
+    errorDescription,
+    reason,
+    details,
+  });
+  const dataUrl = `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
+
+  void mainWindow.loadURL(dataUrl).catch(() => {});
+  if (!mainWindow.isVisible()) {
+    mainWindow.show();
+  }
+  mainWindow.focus();
 }
 
 function hideWindowsForUpdateFlow() {
@@ -3011,12 +3522,18 @@ async function runStartupAutoUpdateIfEnabled() {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error ?? "unknown");
       console.warn(`[updater] Startup auto-update failed: ${message}`);
-      setStatusPanelPhase(STATUS_PANEL_PHASE.FAILED, {
-        detail: "Ocorreu um problema ao iniciar o Messly.",
-      }, {
-        force: true,
-      });
-      scheduleStatusPanelAutoHide(1800, STATUS_PANEL_PHASE.FAILED);
+      if (isStartupStatusPanelLifecycleActive()) {
+        setStatusPanelPhase(STATUS_PANEL_PHASE.LOADING_SHELL, {
+          title: "Abrindo Messly",
+          subtitle: "Inicializando interface",
+          showProgressBar: true,
+          showProgress: false,
+          indeterminate: true,
+        }, {
+          force: true,
+        });
+        scheduleStatusPanelAutoHide(380);
+      }
       restoreWindowsAfterUpdateFlow();
     }
   })().finally(() => {
@@ -3024,6 +3541,49 @@ async function runStartupAutoUpdateIfEnabled() {
   });
 
   return startupAutoUpdatePromise;
+}
+
+async function runStartupAutoUpdateWithGuardTimeout() {
+  if (!app.isPackaged) {
+    return;
+  }
+
+  startupUpdaterBlockTimedOut = false;
+  let timeoutHandle = null;
+  const timeoutPromise = new Promise((resolve) => {
+    timeoutHandle = setTimeout(() => {
+      resolve("timeout");
+    }, STARTUP_AUTO_UPDATE_BLOCK_TIMEOUT_MS);
+  });
+
+  const updatePromise = runStartupAutoUpdateIfEnabled()
+    .then(() => "done")
+    .catch((error) => {
+      const message = error instanceof Error ? error.message : String(error ?? "unknown");
+      console.warn(`[updater] startup update gate failed: ${message}`);
+      return "failed";
+    });
+
+  const outcome = await Promise.race([updatePromise, timeoutPromise]);
+  if (timeoutHandle != null) {
+    clearTimeout(timeoutHandle);
+    timeoutHandle = null;
+  }
+
+  if (outcome === "timeout") {
+    startupUpdaterBlockTimedOut = true;
+    console.warn(`[updater] startup update check timed out after ${STARTUP_AUTO_UPDATE_BLOCK_TIMEOUT_MS}ms; continuing app launch.`);
+    if (isStartupStatusPanelLifecycleActive()) {
+      setStatusPanelPhase(STATUS_PANEL_PHASE.LOADING_SHELL, {
+        title: "Abrindo Messly",
+        subtitle: "Abrindo aplicativo",
+        showProgressBar: true,
+        indeterminate: true,
+      }, {
+        force: true,
+      });
+    }
+  }
 }
 
 function getR2Client() {
@@ -3831,7 +4391,7 @@ function registerIpcHandlers() {
     } catch (error) {
       updaterAutoInstallInFlight = false;
       setStatusPanelPhase(STATUS_PANEL_PHASE.FAILED, {
-        detail: "Nao foi possivel concluir a atualizacao.",
+        detail: "Não foi possível concluir a atualização.",
       }, {
         force: true,
       });
@@ -3943,6 +4503,7 @@ function createMainWindow() {
 
   loadWindowsBehaviorSettings();
   const startMinimized = shouldStartMinimizedThisLaunch();
+  const shouldUseStartupStatusPanel = isStartupStatusPanelLifecycleActive() && !startMinimized;
   mainWindowWaitingForFirstFrame = !startMinimized;
   mainWindowFirstFrameReady = false;
   markMainStartupPerf("main:create-window:new", {
@@ -3952,7 +4513,7 @@ function createMainWindow() {
     startMinimized,
   });
 
-  if (!startMinimized) {
+  if (shouldUseStartupStatusPanel) {
     setStatusPanelPhase(STATUS_PANEL_PHASE.LAUNCHING, {
       progressPercent: 12,
       indeterminate: true,
@@ -3977,7 +4538,7 @@ function createMainWindow() {
       symbolColor: "#f2f2f2",
       height: 38,
     },
-    icon: mainWindowIconImageCache || MAIN_WINDOW_ICON_PATH,
+    icon: mainWindowIconImageCache || MAIN_WINDOW_ICON_PATH || process.execPath,
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -4014,7 +4575,7 @@ function createMainWindow() {
     if (mainWindow.isDestroyed()) {
       return;
     }
-    if (!mainWindowFirstFrameReady && !startMinimized) {
+    if (!mainWindowFirstFrameReady && shouldUseStartupStatusPanel) {
       setStatusPanelPhase(STATUS_PANEL_PHASE.LOADING_SHELL, {
         progressPercent: 72,
         indeterminate: true,
@@ -4074,6 +4635,11 @@ function createMainWindow() {
     if (mainWindowRef === mainWindow) {
       mainWindowRef = null;
     }
+    if (rendererRetryTimer != null) {
+      clearTimeout(rendererRetryTimer);
+      rendererRetryTimer = null;
+    }
+    clearMainWindowFirstFrameFallbackTimer();
     mainWindowWaitingForFirstFrame = false;
     mainWindowFirstFrameReady = false;
     destroyEmbeddedDevToolsHost(mainWindow);
@@ -4211,7 +4777,247 @@ function createMainWindow() {
     });
   });
 
-  let rendererUrl;
+  let rendererUrl = "";
+  let rendererLoadAttemptId = 0;
+  let rendererFailureHandledForActiveAttempt = false;
+  let rendererLoadFailureDisplayed = false;
+  let rendererRetryCount = 0;
+  let rendererRetryTimer = null;
+
+  const clearRendererRetryTimer = () => {
+    if (rendererRetryTimer != null) {
+      clearTimeout(rendererRetryTimer);
+      rendererRetryTimer = null;
+    }
+  };
+
+  const extractRendererErrorCode = (rawCode, description) => {
+    const numericCode = Number(rawCode);
+    if (Number.isFinite(numericCode)) {
+      return numericCode;
+    }
+    const normalizedDescription = String(description ?? "").trim();
+    if (!normalizedDescription) {
+      return null;
+    }
+    const match = normalizedDescription.match(/\((-?\d+)\)/);
+    if (!match) {
+      return null;
+    }
+    const parsedCode = Number.parseInt(match[1], 10);
+    return Number.isFinite(parsedCode) ? parsedCode : null;
+  };
+
+  const isRendererAbortFailure = (errorCode, errorDescription) => {
+    if (Number(errorCode) === RENDERER_BOOTSTRAP_ABORT_CODE) {
+      return true;
+    }
+    return String(errorDescription ?? "").toUpperCase().includes("ERR_ABORTED");
+  };
+
+  const isRetriableRendererBootstrapFailure = (errorCode, errorDescription) => {
+    if (Number.isFinite(Number(errorCode)) && RENDERER_BOOTSTRAP_RETRIABLE_ERROR_CODES.has(Number(errorCode))) {
+      return true;
+    }
+    const normalizedDescription = String(errorDescription ?? "").toUpperCase();
+    if (!normalizedDescription) {
+      return false;
+    }
+    return (
+      normalizedDescription.includes("ERR_NAME_NOT_RESOLVED")
+      || normalizedDescription.includes("ERR_NAME_RESOLUTION_FAILED")
+      || normalizedDescription.includes("ERR_INTERNET_DISCONNECTED")
+      || normalizedDescription.includes("ERR_CONNECTION_TIMED_OUT")
+      || normalizedDescription.includes("ERR_NETWORK_CHANGED")
+    );
+  };
+
+  const scheduleRendererBootstrapRetry = (context = {}) => {
+    if (mainWindowFirstFrameReady || rendererLoadFailureDisplayed) {
+      return false;
+    }
+    if (rendererRetryCount >= RENDERER_BOOTSTRAP_MAX_RETRIES) {
+      return false;
+    }
+
+    rendererRetryCount += 1;
+    const retryDelayMs =
+      RENDERER_BOOTSTRAP_RETRY_DELAYS_MS[rendererRetryCount - 1]
+      ?? RENDERER_BOOTSTRAP_RETRY_DELAYS_MS[RENDERER_BOOTSTRAP_RETRY_DELAYS_MS.length - 1]
+      ?? 1800;
+    const errorCode = extractRendererErrorCode(context.errorCode, context.errorDescription);
+    const errorDescription = String(context.errorDescription ?? "").trim();
+
+    console.warn(`[electron] renderer bootstrap retry scheduled (${rendererRetryCount}/${RENDERER_BOOTSTRAP_MAX_RETRIES})`, {
+      reason: String(context.reason ?? "").trim() || null,
+      errorCode,
+      errorDescription: errorDescription || null,
+      retryDelayMs,
+      validatedURL: String(context.validatedURL ?? "").trim() || null,
+    });
+
+    if (shouldUseStartupStatusPanel) {
+      setStatusPanelPhase(STATUS_PANEL_PHASE.RETRYING, {
+        title: "Reconectando ao Messly",
+        subtitle: `Tentativa ${Math.min(rendererRetryCount + 1, RENDERER_BOOTSTRAP_MAX_RETRIES + 1)} de ${RENDERER_BOOTSTRAP_MAX_RETRIES + 1}`,
+        showProgressBar: true,
+        showProgress: false,
+        indeterminate: true,
+        progressPercent: 34,
+      }, {
+        force: true,
+      });
+    }
+
+    clearRendererRetryTimer();
+    rendererRetryTimer = setTimeout(() => {
+      rendererRetryTimer = null;
+      if (mainWindow.isDestroyed() || mainWindowFirstFrameReady || rendererLoadFailureDisplayed) {
+        return;
+      }
+      void loadMainRendererUrl("retry");
+    }, retryDelayMs);
+    return true;
+  };
+
+  const showFatalRendererBootstrapFailure = (context = {}) => {
+    if (rendererLoadFailureDisplayed || mainWindow.isDestroyed()) {
+      return;
+    }
+    rendererLoadFailureDisplayed = true;
+    clearRendererRetryTimer();
+    showMainWindowRendererLoadFailure(mainWindow, {
+      rendererUrl: rendererUrl || (app.isPackaged ? getExpectedProductionRendererUrl() : DEV_SERVER_URL),
+      validatedURL: String(context.validatedURL ?? "").trim(),
+      errorCode: extractRendererErrorCode(context.errorCode, context.errorDescription),
+      errorDescription: String(context.errorDescription ?? "").trim(),
+      reason: String(context.reason ?? "Falha ao iniciar o carregamento do renderer.").trim(),
+      details: String(context.details ?? "").trim(),
+    });
+  };
+
+  const handleRendererBootstrapFailure = (context = {}) => {
+    if (mainWindow.isDestroyed() || mainWindowFirstFrameReady || rendererLoadFailureDisplayed) {
+      return;
+    }
+
+    const errorDescription = String(context.errorDescription ?? "").trim();
+    const errorCode = extractRendererErrorCode(context.errorCode, errorDescription);
+    if (isRendererAbortFailure(errorCode, errorDescription)) {
+      return;
+    }
+
+    if (isRetriableRendererBootstrapFailure(errorCode, errorDescription)) {
+      const didScheduleRetry = scheduleRendererBootstrapRetry({
+        ...context,
+        errorCode,
+        errorDescription,
+      });
+      if (didScheduleRetry) {
+        return;
+      }
+    }
+
+    const failureDetails =
+      String(context.details ?? "").trim()
+      || errorDescription
+      || (errorCode !== null ? `error code ${errorCode}` : "");
+    showFatalRendererBootstrapFailure({
+      ...context,
+      errorCode,
+      errorDescription,
+      details: failureDetails,
+    });
+  };
+
+  async function loadMainRendererUrl(source = "initial") {
+    if (mainWindow.isDestroyed() || rendererLoadFailureDisplayed) {
+      return;
+    }
+
+    clearRendererRetryTimer();
+    rendererLoadAttemptId += 1;
+    const currentAttemptId = rendererLoadAttemptId;
+    rendererFailureHandledForActiveAttempt = false;
+    scheduleMainWindowFirstFrameFallback(mainWindow, startMinimized);
+
+    if (shouldUseStartupStatusPanel && source === "retry") {
+      setStatusPanelPhase(STATUS_PANEL_PHASE.LOADING_SHELL, {
+        title: "Carregando Messly",
+        subtitle: "Reconectando interface",
+        showProgressBar: true,
+        showProgress: false,
+        indeterminate: true,
+        progressPercent: 64,
+      }, {
+        force: true,
+      });
+    }
+
+    try {
+      await mainWindow.loadURL(rendererUrl);
+    } catch (error) {
+      if (mainWindow.isDestroyed() || mainWindowFirstFrameReady || rendererLoadFailureDisplayed) {
+        return;
+      }
+      if (currentAttemptId !== rendererLoadAttemptId) {
+        return;
+      }
+      if (rendererFailureHandledForActiveAttempt) {
+        return;
+      }
+      const message = error instanceof Error ? error.message : String(error ?? "unknown");
+      const parsedCode = extractRendererErrorCode(null, message);
+      if (isRendererAbortFailure(parsedCode, message)) {
+        return;
+      }
+      rendererFailureHandledForActiveAttempt = true;
+      handleRendererBootstrapFailure({
+        errorCode: parsedCode,
+        errorDescription: message,
+        reason: "Falha ao iniciar o carregamento do renderer.",
+        details: message,
+      });
+    }
+  }
+
+  const handleRendererDidFailLoad = (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    if (!isMainFrame) {
+      return;
+    }
+    if (rendererLoadFailureDisplayed || mainWindowFirstFrameReady) {
+      return;
+    }
+    const normalizedErrorDescription = String(errorDescription ?? "").trim();
+    const normalizedErrorCode = extractRendererErrorCode(errorCode, normalizedErrorDescription);
+    if (isRendererAbortFailure(normalizedErrorCode, normalizedErrorDescription)) {
+      return;
+    }
+    const validatedUrlValue = String(validatedURL ?? "").trim();
+    if (validatedUrlValue.startsWith("data:text/html")) {
+      return;
+    }
+    rendererFailureHandledForActiveAttempt = true;
+    handleRendererBootstrapFailure({
+      validatedURL: validatedUrlValue,
+      errorCode: normalizedErrorCode,
+      errorDescription: normalizedErrorDescription,
+      reason: "Erro de navegação ao carregar o renderer.",
+    });
+  };
+  const handleRendererGoneBeforeReady = (_event, details) => {
+    if (mainWindowFirstFrameReady || rendererLoadFailureDisplayed) {
+      return;
+    }
+    rendererFailureHandledForActiveAttempt = true;
+    handleRendererBootstrapFailure({
+      reason: "O processo de renderização encerrou antes da interface ficar pronta.",
+      errorDescription: String(details?.reason ?? "").trim() || "render-process-gone",
+    });
+  };
+  mainWindowWebContents.on("did-fail-load", handleRendererDidFailLoad);
+  mainWindowWebContents.on("render-process-gone", handleRendererGoneBeforeReady);
+
   try {
     rendererUrl = resolveRendererStartupUrl();
   } catch (error) {
@@ -4224,11 +5030,19 @@ function createMainWindow() {
     mode: app.isPackaged ? "production-url" : "dev-url",
     rendererUrl,
   });
-  void mainWindow.loadURL(rendererUrl).catch((error) => {
-    const message = error instanceof Error ? error.message : String(error ?? "unknown");
-    console.error(`[electron] renderer load failed without fallback: ${message}`);
-  });
+  void loadMainRendererUrl("initial");
   return mainWindow;
+}
+
+function isUpdaterBlockingMainWindowCreation() {
+  if (!app.isPackaged || !appUpdater?.getState) {
+    return false;
+  }
+  if (startupUpdaterBlockTimedOut) {
+    return false;
+  }
+  const status = String(appUpdater.getState()?.status ?? "").trim().toLowerCase();
+  return status === "checking" || status === "downloading" || status === "installing" || status === "applying";
 }
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
@@ -4241,7 +5055,7 @@ if (!hasSingleInstanceLock) {
     if (callbackUrl) {
       storeSpotifyOAuthCallback(callbackUrl);
     }
-    if (!showMainWindow() && app.isReady()) {
+    if (!showMainWindow() && app.isReady() && !isUpdaterBlockingMainWindowCreation()) {
       createMainWindow();
     }
   });
@@ -4254,7 +5068,7 @@ app.on("open-url", (event, url) => {
     return;
   }
   storeSpotifyOAuthCallback(callbackUrl);
-  if (!showMainWindow() && app.isReady()) {
+  if (!showMainWindow() && app.isReady() && !isUpdaterBlockingMainWindowCreation()) {
     createMainWindow();
   }
 });
@@ -4303,21 +5117,39 @@ app.whenReady().then(async () => {
   appUpdater = createConfiguredAppUpdater();
   appUpdater.setBroadcaster(broadcastUpdaterState);
   registerIpcHandlers();
-  createMainWindow();
+
+  try {
+    await prepareIconImages();
+  } catch {}
+
+  markMainStartupPerf("main:tray-init:start");
+  await createAppTray();
+  refreshAppTrayMenu();
+  markMainStartupPerf("main:tray-init:done");
+  measureMainStartupPerf("main_tray_init_duration", "main:tray-init:start", "main:tray-init:done");
+
+  const shouldStartMinimized = shouldStartMinimizedThisLaunch();
+  startupStatusPanelLifecycleActive = false;
+  clearStartupStatusPanelHardStopTimer();
+  if (STATUS_PANEL_ENABLED && app.isPackaged && !shouldStartMinimized) {
+    beginStartupStatusPanelLifecycle();
+    setStatusPanelPhase(STATUS_PANEL_PHASE.CHECKING, {}, { force: true });
+  }
+
+  try {
+    await runStartupAutoUpdateWithGuardTimeout();
+  } catch {}
+
+  if (!isAppQuitting) {
+    createMainWindow();
+  }
+
   markMainStartupPerf("main:critical-startup-complete");
   measureMainStartupPerf(
     "main_when_ready_to_critical_startup_complete",
     "main:when-ready",
     "main:critical-startup-complete",
   );
-
-  setTimeout(() => {
-    markMainStartupPerf("main:tray-init:start");
-    void createAppTray();
-    refreshAppTrayMenu();
-    markMainStartupPerf("main:tray-init:done");
-    measureMainStartupPerf("main_tray_init_duration", "main:tray-init:start", "main:tray-init:done");
-  }, 700);
 
   setTimeout(() => {
     removeSecureAuthStorageValue(LEGACY_SESSION_STORAGE_KEY);
@@ -4335,28 +5167,20 @@ app.whenReady().then(async () => {
       getWindows: () => BrowserWindow.getAllWindows(),
       waitForOAuthCallback: waitForSpotifyOAuthCallback,
     });
-
-    const autoCheckIntervalMs = Number.parseInt(String(process.env.AUTO_UPDATE_CHECK_INTERVAL_MS ?? ""), 10);
-    void runStartupAutoUpdateIfEnabled()
-      .catch(() => {})
-      .finally(() => {
-        setTimeout(() => {
-          appUpdater.startAutoCheck(Number.isFinite(autoCheckIntervalMs) ? autoCheckIntervalMs : undefined);
-        }, 1500);
-      });
   }, 0);
 
-  void prepareIconImages()
-    .then(() => {
-      const mainWindow = getMainWindow();
-      if (mainWindow && !mainWindow.isDestroyed() && mainWindowIconImageCache && typeof mainWindow.setIcon === "function") {
-        mainWindow.setIcon(mainWindowIconImageCache);
-      }
-      if (appTray && trayIconImageCache && !appTray.isDestroyed?.()) {
-        appTray.setImage(trayIconImageCache);
-      }
-    })
-    .catch(() => {});
+  const mainWindow = getMainWindow();
+  if (mainWindow && !mainWindow.isDestroyed() && mainWindowIconImageCache && typeof mainWindow.setIcon === "function") {
+    mainWindow.setIcon(mainWindowIconImageCache);
+  }
+  if (appTray && trayIconImageCache && !appTray.isDestroyed?.()) {
+    appTray.setImage(trayIconImageCache);
+  }
+
+  const autoCheckIntervalMs = Number.parseInt(String(process.env.AUTO_UPDATE_CHECK_INTERVAL_MS ?? ""), 10);
+  setTimeout(() => {
+    appUpdater.startAutoCheck(Number.isFinite(autoCheckIntervalMs) ? autoCheckIntervalMs : undefined);
+  }, 1500);
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -4367,6 +5191,9 @@ app.whenReady().then(async () => {
 
 app.on("before-quit", () => {
   isAppQuitting = true;
+  startupStatusPanelLifecycleActive = false;
+  clearStartupStatusPanelHardStopTimer();
+  clearMainWindowFirstFrameFallbackTimer();
   if (updaterBroadcastThrottleTimer) {
     clearTimeout(updaterBroadcastThrottleTimer);
     updaterBroadcastThrottleTimer = null;
@@ -4381,7 +5208,7 @@ app.on("before-quit", () => {
   }
   destroyEmbeddedDevToolsHost(getMainWindow());
   destroyAppTray();
-  hideStatusPanel();
+  hideStatusPanel({ force: true });
 });
 
 app.on("window-all-closed", () => {

@@ -48,6 +48,9 @@ interface ErrorResponseBody {
 const DEFAULT_TIMEOUT_MS = 18_000;
 const DEFAULT_RETRIES = 1;
 const DEV_SUPABASE_PROXY_PREFIX = "/__supabase";
+const EDGE_UNAUTHORIZED_COOLDOWN_MS = 45_000;
+
+let edgeUnauthorizedCooldownUntil = 0;
 
 function shouldUseDevSupabaseProxy(): boolean {
   if (!import.meta.env.DEV || typeof window === "undefined") {
@@ -172,6 +175,18 @@ function buildMissingEdgeAuthError(): EdgeFunctionError {
   return new EdgeFunctionError("Sessao invalida ou expirada.", 401, "UNAUTHENTICATED");
 }
 
+function isEdgeUnauthorizedCooldownActive(): boolean {
+  return edgeUnauthorizedCooldownUntil > Date.now();
+}
+
+function activateEdgeUnauthorizedCooldown(): void {
+  edgeUnauthorizedCooldownUntil = Date.now() + EDGE_UNAUTHORIZED_COOLDOWN_MS;
+}
+
+function clearEdgeUnauthorizedCooldown(): void {
+  edgeUnauthorizedCooldownUntil = 0;
+}
+
 export async function invokeEdgeJson<TRequest, TResponse>(
   functionName: string,
   payload: TRequest,
@@ -215,6 +230,10 @@ async function invokeEdgeRequest<TResponse>(
   },
   options: InvokeEdgeOptions = {},
 ): Promise<TResponse> {
+  if (options.requireAuth && isEdgeUnauthorizedCooldownActive()) {
+    throw buildMissingEdgeAuthError();
+  }
+
   const timeoutMs = Number.isFinite(options.timeoutMs) ? Math.max(1_000, Number(options.timeoutMs)) : DEFAULT_TIMEOUT_MS;
   const retries = Number.isFinite(options.retries) ? Math.max(0, Number(options.retries)) : DEFAULT_RETRIES;
   const baseRequestHeaders: Record<string, string> = {
@@ -276,6 +295,8 @@ async function invokeEdgeRequest<TResponse>(
         throw toEdgeFunctionError(response, parsedPayload);
       }
 
+      clearEdgeUnauthorizedCooldown();
+
       return parsedPayload as TResponse;
     } catch (error) {
       if (isUnauthorizedEdgeError(error) && !didRefreshSupabaseSession) {
@@ -284,9 +305,12 @@ async function invokeEdgeRequest<TResponse>(
           const refreshedSession = await authService.refreshSession();
           const refreshedAccessToken = String(refreshedSession?.access_token ?? "").trim() || null;
           if (refreshedAccessToken) {
+            clearEdgeUnauthorizedCooldown();
             continue;
           }
+          activateEdgeUnauthorizedCooldown();
         } catch {
+          activateEdgeUnauthorizedCooldown();
           // Fall through to the standard error handling below.
         }
       }
