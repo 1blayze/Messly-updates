@@ -4,11 +4,7 @@ import {
   AVATAR_MAX_MB,
   BANNER_ALLOWED_TYPES,
   BANNER_MAX_BYTES,
-  BANNER_MAX_H,
   BANNER_MAX_MB,
-  BANNER_MAX_W,
-  BANNER_MIN_H,
-  BANNER_MIN_W,
 } from "./imageLimits";
 import { MediaApiError, uploadProfileMediaProxy } from "../../api/mediaController";
 import { uploadMediaAsset } from "../uploadMedia";
@@ -524,35 +520,14 @@ function getTargetSize(kind: ProfileMediaKind): { width: number; height: number;
   }
 
   return {
-    width: 1024,
-    height: 410,
+    width: 1200,
+    height: 480,
     quality: 0.9,
   };
 }
 
-function assertImageDimensions(kind: ProfileMediaKind, image: HTMLImageElement): void {
-  if (kind === "banner") {
-    if (image.naturalWidth < BANNER_MIN_W || image.naturalHeight < BANNER_MIN_H) {
-      throw new ProfileMediaUploadError(
-        "DIMENSIONS_TOO_SMALL",
-        { minWidth: BANNER_MIN_W, minHeight: BANNER_MIN_H },
-        getUploadErrorMessage("DIMENSIONS_TOO_SMALL", { minWidth: BANNER_MIN_W, minHeight: BANNER_MIN_H }),
-      );
-    }
-
-    if (image.naturalWidth > BANNER_MAX_W || image.naturalHeight > BANNER_MAX_H) {
-      throw new ProfileMediaUploadError(
-        "DIMENSIONS_TOO_LARGE",
-        { maxWidth: BANNER_MAX_W, maxHeight: BANNER_MAX_H },
-        getUploadErrorMessage("DIMENSIONS_TOO_LARGE", { maxWidth: BANNER_MAX_W, maxHeight: BANNER_MAX_H }),
-      );
-    }
-  }
-}
-
 async function normalizeProfileMedia(kind: ProfileMediaKind, file: File, userId: string): Promise<File> {
   const image = await loadImageFromFile(file);
-  assertImageDimensions(kind, image);
 
   const { width, height, quality } = getTargetSize(kind);
   const crop = computeCoverCrop(image.naturalWidth, image.naturalHeight, width, height);

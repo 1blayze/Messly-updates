@@ -3,14 +3,10 @@ const sharp = require("sharp");
 const {
   BANNER_ALLOWED_TYPES,
   BANNER_MAX_BYTES,
-  BANNER_MAX_H,
-  BANNER_MAX_W,
-  BANNER_MIN_H,
-  BANNER_MIN_W,
   BANNER_TARGET_HEIGHT,
   BANNER_TARGET_WIDTH,
 } = require("./imageLimits.cjs");
-const { detectImageTypeByMagic, readGifMetadata } = require("./imageSniff.cjs");
+const { detectImageTypeByMagic } = require("./imageSniff.cjs");
 const { createMediaUploadError } = require("./uploadErrors.cjs");
 
 const IMAGE_MAX_INPUT_PIXELS = 48e6;
@@ -43,37 +39,6 @@ async function processBannerUpload(buffer) {
     });
   }
 
-  if (detectedType.mime === "image/gif") {
-    const gifMeta = readGifMetadata(buffer);
-    if (!gifMeta?.width || !gifMeta?.height) {
-      throw createMediaUploadError("INVALID_IMAGE", {
-        allowedTypes: [...BANNER_ALLOWED_TYPES],
-      });
-    }
-
-    if (gifMeta.width < BANNER_MIN_W || gifMeta.height < BANNER_MIN_H) {
-      throw createMediaUploadError("DIMENSIONS_TOO_SMALL", {
-        minWidth: BANNER_MIN_W,
-        minHeight: BANNER_MIN_H,
-      });
-    }
-
-    if (gifMeta.width > BANNER_MAX_W || gifMeta.height > BANNER_MAX_H) {
-      throw createMediaUploadError("DIMENSIONS_TOO_LARGE", {
-        maxWidth: BANNER_MAX_W,
-        maxHeight: BANNER_MAX_H,
-      });
-    }
-
-    return {
-      buffer,
-      contentType: "image/gif",
-      ext: "gif",
-      hash: getHash(buffer),
-      size: buffer.length,
-    };
-  }
-
   let metadata;
   try {
     metadata = await sharp(buffer, { failOn: "error", limitInputPixels: IMAGE_MAX_INPUT_PIXELS }).metadata();
@@ -86,20 +51,6 @@ async function processBannerUpload(buffer) {
   if (!metadata.width || !metadata.height) {
     throw createMediaUploadError("INVALID_IMAGE", {
       allowedTypes: [...BANNER_ALLOWED_TYPES],
-    });
-  }
-
-  if (metadata.width < BANNER_MIN_W || metadata.height < BANNER_MIN_H) {
-    throw createMediaUploadError("DIMENSIONS_TOO_SMALL", {
-      minWidth: BANNER_MIN_W,
-      minHeight: BANNER_MIN_H,
-    });
-  }
-
-  if (metadata.width > BANNER_MAX_W || metadata.height > BANNER_MAX_H) {
-    throw createMediaUploadError("DIMENSIONS_TOO_LARGE", {
-      maxWidth: BANNER_MAX_W,
-      maxHeight: BANNER_MAX_H,
     });
   }
 

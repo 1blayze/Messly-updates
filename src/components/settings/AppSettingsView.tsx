@@ -4645,8 +4645,8 @@ export default function AppSettingsView({
       return;
     }
 
-    // Send GIFs directly to preserve animation (avatar + banner).
-    if (file.type.toLowerCase() === "image/gif") {
+    // Send avatar GIFs directly to preserve animation.
+    if (kind === "avatar" && file.type.toLowerCase() === "image/gif") {
       void uploadProfileMedia(kind, file);
       return;
     }
@@ -5504,7 +5504,7 @@ export default function AppSettingsView({
                         ref={bannerFileInputRef}
                         className={styles.fileInput}
                         type="file"
-                        accept="image/png,image/jpeg,image/webp,image/gif"
+                        accept="image/png,image/jpeg,image/webp"
                         disabled={isBannerUploading || !canUploadMedia}
                         onChange={(event) => {
                           handleProfileMediaFileChange("banner", event);

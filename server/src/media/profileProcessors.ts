@@ -11,18 +11,14 @@ const AVATAR_TARGET_WIDTH = 512;
 const AVATAR_TARGET_HEIGHT = 512;
 const AVATAR_GIF_MAX_FRAMES = 60;
 
-const BANNER_MIN_W = 600;
-const BANNER_MIN_H = 240;
 const BANNER_TARGET_WIDTH = 600;
 const BANNER_TARGET_HEIGHT = 240;
-const BANNER_MAX_W = 3000;
-const BANNER_MAX_H = 1200;
 
 const AVATAR_ALLOWED_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"] as const;
-const BANNER_ALLOWED_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"] as const;
+const BANNER_ALLOWED_TYPES = ["image/png", "image/jpeg", "image/webp"] as const;
 
 type ProfileMediaKind = "avatar" | "banner";
-type AllowedMimeType = (typeof AVATAR_ALLOWED_TYPES)[number];
+type DetectedMimeType = "image/png" | "image/jpeg" | "image/webp" | "image/gif";
 
 interface ProcessedProfileMediaAssetInternal {
   buffer: Buffer;
@@ -34,7 +30,7 @@ interface ProcessedProfileMediaAssetInternal {
 
 interface DetectedImageType {
   ext: "png" | "jpg" | "webp" | "gif";
-  mime: AllowedMimeType;
+  mime: DetectedMimeType;
 }
 
 interface GifMetadata {
@@ -213,6 +209,10 @@ function invalidImage(allowedTypes: readonly string[]): ProfileMediaProcessorErr
   return createProcessorError("INVALID_IMAGE", { allowedTypes: [...allowedTypes] });
 }
 
+function isAllowedBannerMime(mime: DetectedMimeType): mime is (typeof BANNER_ALLOWED_TYPES)[number] {
+  return (BANNER_ALLOWED_TYPES as readonly string[]).includes(mime);
+}
+
 function assertAvatarByteLimit(buffer: Buffer): void {
   if (!buffer.length || buffer.length > AVATAR_MAX_BYTES) {
     throw createProcessorError("FILE_TOO_LARGE", {
@@ -229,7 +229,7 @@ function assertBannerByteLimit(buffer: Buffer): void {
   }
 }
 
-async function processStaticAvatar(buffer: Buffer, detectedMime: AllowedMimeType): Promise<ProcessedProfileMediaAssetInternal> {
+async function processStaticAvatar(buffer: Buffer, detectedMime: DetectedMimeType): Promise<ProcessedProfileMediaAssetInternal> {
   let metadata;
   try {
     metadata = await sharp(buffer, { failOn: "error", limitInputPixels: IMAGE_MAX_INPUT_PIXELS }).metadata();
@@ -342,39 +342,10 @@ async function processBannerUpload(buffer: Buffer): Promise<ProcessedProfileMedi
     throw invalidImage(BANNER_ALLOWED_TYPES);
   }
 
-  if (!BANNER_ALLOWED_TYPES.includes(detectedType.mime)) {
+  if (!isAllowedBannerMime(detectedType.mime)) {
     throw createProcessorError("UNSUPPORTED_TYPE", {
       allowedTypes: [...BANNER_ALLOWED_TYPES],
     });
-  }
-
-  if (detectedType.mime === "image/gif") {
-    const gifMeta = readGifMetadata(buffer);
-    if (!gifMeta?.width || !gifMeta?.height) {
-      throw invalidImage(BANNER_ALLOWED_TYPES);
-    }
-
-    if (gifMeta.width < BANNER_MIN_W || gifMeta.height < BANNER_MIN_H) {
-      throw createProcessorError("DIMENSIONS_TOO_SMALL", {
-        minWidth: BANNER_MIN_W,
-        minHeight: BANNER_MIN_H,
-      });
-    }
-
-    if (gifMeta.width > BANNER_MAX_W || gifMeta.height > BANNER_MAX_H) {
-      throw createProcessorError("DIMENSIONS_TOO_LARGE", {
-        maxWidth: BANNER_MAX_W,
-        maxHeight: BANNER_MAX_H,
-      });
-    }
-
-    return {
-      buffer,
-      contentType: "image/gif",
-      ext: "gif",
-      hash: getHash(buffer),
-      size: buffer.length,
-    };
   }
 
   let metadata;
@@ -386,20 +357,6 @@ async function processBannerUpload(buffer: Buffer): Promise<ProcessedProfileMedi
 
   if (!metadata.width || !metadata.height) {
     throw invalidImage(BANNER_ALLOWED_TYPES);
-  }
-
-  if (metadata.width < BANNER_MIN_W || metadata.height < BANNER_MIN_H) {
-    throw createProcessorError("DIMENSIONS_TOO_SMALL", {
-      minWidth: BANNER_MIN_W,
-      minHeight: BANNER_MIN_H,
-    });
-  }
-
-  if (metadata.width > BANNER_MAX_W || metadata.height > BANNER_MAX_H) {
-    throw createProcessorError("DIMENSIONS_TOO_LARGE", {
-      maxWidth: BANNER_MAX_W,
-      maxHeight: BANNER_MAX_H,
-    });
   }
 
   let normalized;
