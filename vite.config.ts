@@ -12,6 +12,14 @@ export default defineConfig(({ mode }) => {
           changeOrigin: true,
           secure: true,
           rewrite: (path: string) => path.replace(/^\/__supabase/, ""),
+          configure: (proxy: any) => {
+            proxy.on("proxyReq", (proxyReq: any) => {
+              // Supabase Edge CORS is enforced by function code; in local dev proxy we forward
+              // without browser Origin/Referer to avoid false 403 from strict origin allowlists.
+              proxyReq.removeHeader("origin");
+              proxyReq.removeHeader("referer");
+            });
+          },
         },
       }
     : undefined;
