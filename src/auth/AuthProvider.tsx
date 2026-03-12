@@ -167,6 +167,8 @@ function mapSupabaseUser(rawUser: User | null): AuthUser | null {
 let bootstrapSessionPromise: Promise<Session | null> | null = null;
 const AUTH_BOOTSTRAP_SESSION_TIMEOUT_MS = 10_000;
 const AUTH_SESSION_HINT_TIMEOUT_MS = 4_000;
+const AUTH_APPLY_SESSION_TIMEOUT_MS = 15_000;
+const AUTH_PROFILE_FETCH_TIMEOUT_MS = 10_000;
 
 async function withTimeout<T>(task: Promise<T>, timeoutMs: number, message: string): Promise<T> {
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
@@ -358,17 +360,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       const loadEnsuredProfile = async (targetUser: AuthUser): Promise<ProfileRow | null> => {
-        let ensuredProfile = await ensureProfileForUser(targetUser.raw, {
-          preferredUsername: options.preferredUsername ?? targetUser.raw.user_metadata?.username,
-          displayName: options.displayName ?? targetUser.displayName ?? targetUser.email ?? null,
-        });
+        let ensuredProfile = await withTimeout(
+          ensureProfileForUser(targetUser.raw, {
+            preferredUsername: options.preferredUsername ?? targetUser.raw.user_metadata?.username,
+            displayName: options.displayName ?? targetUser.displayName ?? targetUser.email ?? null,
+          }),
+          AUTH_PROFILE_FETCH_TIMEOUT_MS,
+          "Tempo limite ao carregar perfil do usuario.",
+        );
 
         if (!ensuredProfile) {
-          const exists = await profileExists(targetUser.uid);
+          const exists = await withTimeout(
+            profileExists(targetUser.uid),
+            AUTH_PROFILE_FETCH_TIMEOUT_MS,
+            "Tempo limite ao verificar existencia do perfil.",
+          );
           if (!exists) {
             return null;
           }
-          ensuredProfile = await fetchProfileById(targetUser.uid);
+          ensuredProfile = await withTimeout(
+            fetchProfileById(targetUser.uid),
+            AUTH_PROFILE_FETCH_TIMEOUT_MS,
+            "Tempo limite ao buscar perfil por ID.",
+          );
         }
 
         return ensuredProfile;
@@ -557,7 +571,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (!isMounted) {
           return;
         }
-        await applySessionAndProfile(initialSession);
+        await withTimeout(
+          applySessionAndProfile(initialSession),
+          AUTH_APPLY_SESSION_TIMEOUT_MS,
+          "Tempo limite ao aplicar sessao inicial.",
+        );
       } catch (bootstrapError) {
         if (!isMounted) {
           return;
@@ -582,8 +600,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       void (async () => {
-        await applySessionAndProfile(nextSession);
-      })();
+        await withTimeout(
+          applySessionAndProfile(nextSession),
+          AUTH_APPLY_SESSION_TIMEOUT_MS,
+          "Tempo limite ao atualizar sessao de autenticacao.",
+        );
+      })().catch((authStateError) => {
+        if (!isMounted) {
+          return;
+        }
+        const message = authStateError instanceof Error
+          ? authStateError.message
+          : "Falha ao atualizar sessao de autenticacao.";
+        setError(message);
+        dispatch(authActions.authErrorChanged(message));
+        setIsLoading(false);
+        setAuthReady(true);
+      });
     });
 
     subscriptionRef.current = authState.data.subscription;
@@ -679,7 +712,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       await applySessionAndProfile(nextSession);
       setHasSessionHint(true);
       setSessionHintResolved(true);
-      const ensuredProfile = await fetchProfileById(signedUser.uid);
+      const ensuredProfile = await withTimeout(
+        fetchProfileById(signedUser.uid).catch(() => null),
+        AUTH_PROFILE_FETCH_TIMEOUT_MS,
+        "Tempo limite ao buscar perfil autenticado.",
+      ).catch(() => null);
       syncKnownAccount(signedUser);
       setError(null);
       dispatch(authActions.authErrorChanged(null));
@@ -743,7 +780,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           preferredUsername: username,
           displayName,
         });
-        const ensuredProfile = await fetchProfileById(signedUser.uid);
+        const ensuredProfile = await withTimeout(
+          fetchProfileById(signedUser.uid).catch(() => null),
+          AUTH_PROFILE_FETCH_TIMEOUT_MS,
+          "Tempo limite ao buscar perfil autenticado.",
+        ).catch(() => null);
         syncKnownAccount(signedUser);
         setHasSessionHint(true);
         setSessionHintResolved(true);
@@ -788,7 +829,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       await applySessionAndProfile(nextSession);
-      const ensuredProfile = await fetchProfileById(verifiedUser.uid);
+      const ensuredProfile = await withTimeout(
+        fetchProfileById(verifiedUser.uid).catch(() => null),
+        AUTH_PROFILE_FETCH_TIMEOUT_MS,
+        "Tempo limite ao buscar perfil autenticado.",
+      ).catch(() => null);
       syncKnownAccount(verifiedUser);
       setError(null);
       dispatch(authActions.authErrorChanged(null));
