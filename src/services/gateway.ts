@@ -32,11 +32,13 @@ const GATEWAY_DIAGNOSTICS_ENABLED =
   String(import.meta.env.VITE_MESSLY_VERBOSE_LOGS ?? "").trim().toLowerCase() === "true";
 
 class MesslyGatewayService {
+  private static readonly AUTH_RECOVERY_COOLDOWN_MS = 12_000;
   private client: GatewayClient | null = null;
   private unsubscribeState: (() => void) | null = null;
   private unsubscribeFrames: (() => void) | null = null;
   private currentUserId: string | null = null;
   private authRecoveryInFlight = false;
+  private lastAuthRecoveryAtMs = 0;
   private lastLoggedStateSignature: string | null = null;
   private latestAccessToken: string | null = null;
   private unsubscribeAuthState: (() => void) | null = null;
@@ -234,9 +236,31 @@ class MesslyGatewayService {
     messlyStore.dispatch(gatewayActions.gatewayLatencyUpdated(state.latencyMs));
     this.stateListeners.forEach((listener) => listener(state));
 
-    if (state.status === "unauthenticated" && !this.authRecoveryInFlight) {
+    if (
+      state.status === "unauthenticated" &&
+      !this.authRecoveryInFlight &&
+      Date.now() - this.lastAuthRecoveryAtMs >= MesslyGatewayService.AUTH_RECOVERY_COOLDOWN_MS
+    ) {
       this.authRecoveryInFlight = true;
-      void authService.clearLocalSession().catch(() => undefined);
+      this.lastAuthRecoveryAtMs = Date.now();
+      void (async () => {
+        const refreshedSession = await authService.refreshSession().catch(() => null);
+        const refreshedToken = String(refreshedSession?.access_token ?? "").trim() || null;
+        if (!refreshedToken) {
+          this.authRecoveryInFlight = false;
+          return;
+        }
+
+        this.latestAccessToken = refreshedToken;
+        this.client?.updateToken(refreshedToken);
+        try {
+          await this.client?.connect();
+        } catch {
+          // Keep gateway unauthenticated state and retry on next cooldown window.
+        } finally {
+          this.authRecoveryInFlight = false;
+        }
+      })();
     }
   }
 
@@ -246,7 +270,6 @@ class MesslyGatewayService {
       if (payload?.reason === "UNAUTHENTICATED" || payload?.reason === "SESSION_REVOKED") {
         this.client?.disconnect();
         this.updateUnauthenticatedState(`Sessao do gateway invalidada: ${payload.reason}.`);
-        void authService.clearLocalSession().catch(() => undefined);
       }
       return;
     }

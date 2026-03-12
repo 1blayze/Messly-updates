@@ -1,8 +1,8 @@
-import { Suspense, lazy, type ReactNode, useEffect, useRef } from "react";
+import { Suspense, lazy, type ReactNode, useEffect, useRef, useState } from "react";
 import { BrowserRouter, HashRouter, Navigate, Route, Routes } from "react-router-dom";
 import { useAuthSession } from "../auth/AuthProvider";
 import LoginPage from "../auth/LoginPage";
-import { useAppBootstrapSnapshot } from "../core/appBootstrap";
+import { appBootstrap, useAppBootstrapSnapshot } from "../core/appBootstrap";
 import { markStartupUiReady } from "../app/startupUi";
 import AppStartupScreen from "../app/AppStartupScreen";
 
@@ -23,6 +23,7 @@ const VerifyEmailPage = lazy(() => import("../auth/VerifyEmailPage"));
 const STARTUP_FONTS_TIMEOUT_MS = 900;
 const STARTUP_READY_MAX_RETRIES = 10;
 const STARTUP_LAYOUT_STABILITY_DELTA = 1;
+const APP_BOOTSTRAP_STALL_TIMEOUT_MS = 25_000;
 
 function nextFrame(): Promise<void> {
   return new Promise((resolve) => {
@@ -129,10 +130,40 @@ function shouldRenderLoginImmediately(params: {
 function AppShellRoute() {
   const { user } = useAuthSession();
   const bootstrap = useAppBootstrapSnapshot();
+  const [nowMs, setNowMs] = useState(() => Date.now());
   const currentUserId = String(user?.uid ?? "").trim();
   const isBootstrapReady = bootstrap.phase === "ready" && bootstrap.userId === currentUserId;
   const shouldRenderAppShell =
     isBootstrapReady || (bootstrap.phase === "error" && bootstrap.userId === currentUserId);
+  const isBootstrapStalled =
+    Boolean(currentUserId) &&
+    !shouldRenderAppShell &&
+    (bootstrap.phase === "running" || bootstrap.phase === "idle") &&
+    nowMs - Number(bootstrap.updatedAt || 0) >= APP_BOOTSTRAP_STALL_TIMEOUT_MS;
+
+  useEffect(() => {
+    if (!currentUserId) {
+      return;
+    }
+
+    if (bootstrap.userId !== currentUserId || bootstrap.phase === "idle") {
+      void appBootstrap.start(currentUserId).catch(() => undefined);
+    }
+  }, [bootstrap.phase, bootstrap.userId, currentUserId]);
+
+  useEffect(() => {
+    if (!currentUserId || shouldRenderAppShell) {
+      return;
+    }
+
+    const timerId = window.setInterval(() => {
+      setNowMs(Date.now());
+    }, 1_000);
+
+    return () => {
+      window.clearInterval(timerId);
+    };
+  }, [currentUserId, shouldRenderAppShell]);
 
   if (!currentUserId) {
     return (
@@ -145,6 +176,18 @@ function AppShellRoute() {
   }
 
   if (!shouldRenderAppShell) {
+    if (isBootstrapStalled) {
+      return (
+        <Suspense
+          fallback={(
+            <AppStartupScreen statusText="Abrindo interface" detailText="Inicializacao em modo de recuperacao" progress={0.98} phase="ready" />
+          )}
+        >
+          <AppShell />
+        </Suspense>
+      );
+    }
+
     return (
       <div className="startup-auth-surface" data-messly-startup-surface="shell">
         <AppStartupScreen

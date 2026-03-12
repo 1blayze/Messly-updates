@@ -319,10 +319,11 @@ async function invokeEdgeRequest<TResponse>(
         }
       }
 
-      if (isUnauthorizedEdgeError(error) && options.requireAuth) {
-        await authService.clearLocalSession().catch(() => undefined);
-      } else if (isUnauthorizedEdgeError(error) && options.signOutOnUnauthorized) {
-        void supabase.auth.signOut({ scope: "local" }).catch(() => undefined);
+      if (isUnauthorizedEdgeError(error)) {
+        activateEdgeUnauthorizedCooldown();
+        if (options.signOutOnUnauthorized) {
+          void supabase.auth.signOut({ scope: "local" }).catch(() => undefined);
+        }
       }
 
       if (!shouldRetry(error, attempt, retries)) {
