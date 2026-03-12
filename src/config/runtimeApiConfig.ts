@@ -12,6 +12,9 @@ interface RuntimeApiConfigState {
   gatewayUrl: string | null;
   authApiUrl: string | null;
   appApiUrl: string | null;
+  webOrigin: string | null;
+  shellOrigin: string | null;
+  mediaProxyUrl: string | null;
 }
 
 const runtimeApiConfigState: RuntimeApiConfigState = {
@@ -19,6 +22,9 @@ const runtimeApiConfigState: RuntimeApiConfigState = {
   gatewayUrl: null,
   authApiUrl: null,
   appApiUrl: null,
+  webOrigin: null,
+  shellOrigin: null,
+  mediaProxyUrl: null,
 };
 
 let runtimeApiConfigReady = false;
@@ -30,6 +36,9 @@ function applySnapshot(snapshot: ElectronStartupSnapshot | null | undefined): vo
   runtimeApiConfigState.gatewayUrl = normalizeUrl(apiConfig?.gatewayUrl);
   runtimeApiConfigState.authApiUrl = normalizeUrl(apiConfig?.authApiUrl);
   runtimeApiConfigState.appApiUrl = normalizeUrl(apiConfig?.appApiUrl);
+  runtimeApiConfigState.webOrigin = normalizeUrl(apiConfig?.webOrigin);
+  runtimeApiConfigState.shellOrigin = normalizeUrl(apiConfig?.shellOrigin);
+  runtimeApiConfigState.mediaProxyUrl = normalizeUrl(apiConfig?.mediaProxyUrl);
 }
 
 export async function initializeRuntimeApiConfig(): Promise<void> {
@@ -79,4 +88,16 @@ export function getRuntimeAuthApiUrl(): string | null {
 
 export function getRuntimeAppApiUrl(): string | null {
   return runtimeApiConfigState.appApiUrl;
+}
+
+export function getRuntimeWebOrigin(): string | null {
+  return runtimeApiConfigState.webOrigin;
+}
+
+export function getRuntimeShellOrigin(): string | null {
+  return runtimeApiConfigState.shellOrigin;
+}
+
+export function getRuntimeMediaProxyUrl(): string | null {
+  return runtimeApiConfigState.mediaProxyUrl;
 }

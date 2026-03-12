@@ -52,6 +52,7 @@ import {
   canSelectDesktopScreenShareSource,
   CallService,
   listDesktopScreenShareSources,
+  type CallAudioSettings,
   type CallScreenShareSource,
 } from "../../services/calls/callService";
 import {
@@ -98,6 +99,9 @@ const CHAT_PERF_DEDUPE_WINDOW_MS = 900;
 const CALL_RING_TIMEOUT_MS = 3 * 60 * 1000;
 const CALL_SOLO_TIMEOUT_MS = 3 * 60 * 1000;
 const CALL_REALTIME_CHANNEL_NAME = "dm-call";
+const CALL_KEEPALIVE_INTERVAL_MS = 4_000;
+const CALL_DISCONNECT_FINALIZE_TIMEOUT_MS = 8_000;
+const AUDIO_SETTINGS_STORAGE_KEY_PREFIX = "messly:audio-settings:";
 const CALL_RINGING_SOUND_URL = new URL("../../assets/sounds/call_ringing.mp3", import.meta.url).href;
 const CALL_JOIN_SOUND_URL = new URL("../../assets/sounds/call_join.mp3", import.meta.url).href;
 const CALL_LEAVE_SOUND_URL = new URL("../../assets/sounds/call_leave.mp3", import.meta.url).href;
@@ -1477,6 +1481,75 @@ function pickPreferredScreenShareSource(
     return null;
   }
   return filterScreenShareSourcesByTab(sources, tab)[0]?.id ?? null;
+}
+
+interface PersistedCallAudioSettings {
+  v: 1;
+  inputDeviceId: string;
+  inputVolume: number;
+  noiseSuppression: boolean;
+  echoCancellation: boolean;
+  autoGain: boolean;
+  vadEnabled: boolean;
+  voiceFocus: boolean;
+  autoSensitivity: boolean;
+  sensitivityDb: number;
+  pushToTalkEnabled: boolean;
+  qosHighPriority: boolean;
+}
+
+function toBoolean(value: unknown, fallback: boolean): boolean {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function toRoundedFiniteNumber(value: unknown, fallback: number, min: number, max: number): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, Math.round(numeric)));
+}
+
+function buildCallAudioSettingsStorageKey(userUid: string | null | undefined): string {
+  const normalizedUid = String(userUid ?? "").trim();
+  if (!normalizedUid) {
+    return `${AUDIO_SETTINGS_STORAGE_KEY_PREFIX}guest`;
+  }
+  return `${AUDIO_SETTINGS_STORAGE_KEY_PREFIX}${normalizedUid}`;
+}
+
+function readPersistedCallAudioSettings(userUid: string | null | undefined): CallAudioSettings | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  try {
+    const raw = window.localStorage.getItem(buildCallAudioSettingsStorageKey(userUid));
+    if (!raw) {
+      return null;
+    }
+
+    const parsed = JSON.parse(raw) as Partial<PersistedCallAudioSettings> | null;
+    if (!parsed || typeof parsed !== "object") {
+      return null;
+    }
+
+    return {
+      inputDeviceId: typeof parsed.inputDeviceId === "string" ? parsed.inputDeviceId : "",
+      inputVolume: toRoundedFiniteNumber(parsed.inputVolume, 100, 0, 100),
+      noiseSuppression: toBoolean(parsed.noiseSuppression, true),
+      echoCancellation: toBoolean(parsed.echoCancellation, true),
+      autoGainControl: toBoolean(parsed.autoGain, true),
+      vadEnabled: toBoolean(parsed.vadEnabled, false),
+      voiceFocus: toBoolean(parsed.voiceFocus, false),
+      autoSensitivity: toBoolean(parsed.autoSensitivity, true),
+      sensitivityDb: toRoundedFiniteNumber(parsed.sensitivityDb, -55, -100, 0),
+      qosHighPriority: toBoolean(parsed.qosHighPriority, false),
+      pushToTalkEnabled: toBoolean(parsed.pushToTalkEnabled, false),
+    };
+  } catch {
+    return null;
+  }
 }
 
 interface CallStageVideoProps {
@@ -5296,7 +5369,7 @@ export default function DirectMessageChatView({
     setScreenShareSources([]);
     setScreenShareSelectedSourceId(null);
     setScreenShareTab("window");
-    setScreenShareQuality("2160p60");
+    setScreenShareQuality("1080p60");
   }, [
     clearOutgoingCallTimeout,
     clearOutgoingRingRetryLoop,
@@ -5397,8 +5470,10 @@ export default function DirectMessageChatView({
       await existingService.close();
     }
 
+    const persistedAudioSettings = readPersistedCallAudioSettings(currentFirebaseUid || currentUserId);
     const service = new CallService({
       mode,
+      audioSettings: persistedAudioSettings,
       onSignal: async (signal) => {
         const callId = activeCallIdRef.current;
         const toUid = callSignalTargetUidRef.current;
@@ -5503,7 +5578,7 @@ export default function DirectMessageChatView({
             setIsRemoteScreenSharing(false);
             setCallErrorText(null);
             setCallPhase((current) => (current === "idle" ? current : "active"));
-          }, 1400);
+          }, CALL_DISCONNECT_FINALIZE_TIMEOUT_MS);
           return;
         }
         clearRemotePeerDisconnectFinalizeTimeout();
@@ -5527,6 +5602,7 @@ export default function DirectMessageChatView({
   }, [
     clearRemotePeerDisconnectFinalizeTimeout,
     currentFirebaseUid,
+    currentUserId,
     sendCallRealtimeEvent,
     targetFirebaseUid,
     targetUser.userId,
@@ -5753,16 +5829,46 @@ export default function DirectMessageChatView({
         return Boolean(participant?.joinedAt && !participant?.leftAt);
       }),
     );
+    const inferredRemoteConnected = hasAnyOtherParticipantConnected || Boolean(callRemoteStream);
+    const sessionForHangupPayload = (() => {
+      if (!sessionAfterLocalDisconnect) {
+        return null;
+      }
+
+      if (!inferredRemoteConnected || !toUid) {
+        return sessionAfterLocalDisconnect;
+      }
+
+      const remoteParticipant = sessionAfterLocalDisconnect.participants?.[toUid] ?? {
+        joinedAt: null,
+        leftAt: null,
+      };
+      if (remoteParticipant.joinedAt && !remoteParticipant.leftAt) {
+        return sessionAfterLocalDisconnect;
+      }
+
+      return {
+        ...sessionAfterLocalDisconnect,
+        participants: {
+          ...(sessionAfterLocalDisconnect.participants ?? {}),
+          [toUid]: {
+            ...remoteParticipant,
+            joinedAt: remoteParticipant.joinedAt ?? sessionAfterLocalDisconnect.startedAt ?? nowIso,
+            leftAt: null,
+          },
+        },
+      };
+    })();
 
     isLocalCallDisconnectedRef.current = true;
     await resetCallUi();
-    if (rejoinConversationId && hasAnyOtherParticipantConnected) {
+    if (rejoinConversationId && inferredRemoteConnected) {
       setRejoinAvailableCall({
         conversationId: rejoinConversationId,
         mode: rejoinMode,
         callId,
         targetUid: toUid || null,
-        session: sessionAfterLocalDisconnect,
+        session: sessionForHangupPayload,
       });
     } else {
       setRejoinAvailableCall((current) => (current?.conversationId === rejoinConversationId ? null : current));
@@ -5778,12 +5884,12 @@ export default function DirectMessageChatView({
         callId,
         toUid,
         reason: "hangup",
-        session: sessionAfterLocalDisconnect
+        session: sessionForHangupPayload
           ? {
-              ...sessionAfterLocalDisconnect,
-              status: hasAnyOtherParticipantConnected ? "active" : "ended",
-              endedAt: hasAnyOtherParticipantConnected ? null : nowIso,
-              endedReason: hasAnyOtherParticipantConnected ? null : "hangup",
+              ...sessionForHangupPayload,
+              status: inferredRemoteConnected ? "active" : "ended",
+              endedAt: inferredRemoteConnected ? null : nowIso,
+              endedReason: inferredRemoteConnected ? null : "hangup",
             }
           : null,
       });
@@ -5802,6 +5908,7 @@ export default function DirectMessageChatView({
     incomingCallSession,
     outgoingCallSession?.mode,
     outgoingCallSession,
+    callRemoteStream,
     resetCallUi,
     sendCallRealtimeEvent,
   ]);
@@ -6226,6 +6333,54 @@ export default function DirectMessageChatView({
         callId,
       });
     });
+  }, [callPhase, isCallScreenSharing, sendCallRealtimeEvent]);
+
+  useEffect(() => {
+    if (callPhase === "idle" || callPhase === "incoming") {
+      return;
+    }
+
+    const callId = activeCallIdRef.current;
+    const toUid = callSignalTargetUidRef.current;
+    if (!callId || !toUid) {
+      return;
+    }
+
+    let disposed = false;
+    const publishKeepalive = (): void => {
+      if (disposed) {
+        return;
+      }
+
+      const sessionSnapshot =
+        latestCallStateSnapshotRef.current.activeCallSession ??
+        latestCallStateSnapshotRef.current.outgoingCallSession ??
+        latestCallStateSnapshotRef.current.incomingCallSession ??
+        null;
+
+      void sendCallRealtimeEvent({
+        kind: "keepalive",
+        callId,
+        toUid,
+        signalPayload: {
+          screenSharing: isCallScreenSharing,
+        },
+        session: sessionSnapshot,
+      }).catch((error) => {
+        reportClientError(error, {
+          scope: "call.periodicKeepalive",
+          callId,
+        });
+      });
+    };
+
+    publishKeepalive();
+    const intervalId = window.setInterval(publishKeepalive, CALL_KEEPALIVE_INTERVAL_MS);
+
+    return () => {
+      disposed = true;
+      window.clearInterval(intervalId);
+    };
   }, [callPhase, isCallScreenSharing, sendCallRealtimeEvent]);
 
   useEffect(() => {

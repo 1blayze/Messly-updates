@@ -130,12 +130,18 @@ create table if not exists public.user_sessions (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.profiles(id) on delete cascade,
   session_token text not null unique,
+  auth_session_id uuid null,
+  device_id text not null default gen_random_uuid()::text,
+  client_type text not null default 'unknown',
+  platform text not null default 'unknown',
   ip_address text not null,
   city text null,
   region text null,
   country text null,
+  location_label text null,
   device text not null,
   os text not null,
+  app_version text null,
   client_version text null,
   user_agent text null,
   suspicious boolean not null default false,
@@ -143,18 +149,32 @@ create table if not exists public.user_sessions (
   created_at timestamptz not null default now(),
   last_seen_at timestamptz not null default now(),
   ended_at timestamptz null,
+  revoked_at timestamptz null,
   constraint user_sessions_session_token_not_blank_chk check (btrim(session_token) <> ''),
+  constraint user_sessions_device_id_length_chk check (char_length(device_id) between 1 and 128),
+  constraint user_sessions_client_type_chk check (client_type in ('desktop', 'web', 'mobile', 'unknown')),
+  constraint user_sessions_platform_length_chk check (char_length(platform) between 2 and 32),
   constraint user_sessions_ip_address_not_blank_chk check (btrim(ip_address) <> ''),
   constraint user_sessions_device_length_chk check (char_length(device) between 1 and 80),
   constraint user_sessions_os_length_chk check (char_length(os) between 1 and 80),
+  constraint user_sessions_app_version_length_chk check (app_version is null or char_length(app_version) <= 32),
   constraint user_sessions_client_version_length_chk check (client_version is null or char_length(client_version) <= 32),
+  constraint user_sessions_location_label_length_chk check (location_label is null or char_length(location_label) <= 240),
   constraint user_sessions_user_agent_length_chk check (user_agent is null or char_length(user_agent) <= 512),
   constraint user_sessions_suspicious_reason_length_chk check (suspicious_reason is null or char_length(suspicious_reason) <= 240),
   constraint user_sessions_time_order_chk check (ended_at is null or ended_at >= created_at)
 );
 
--- sem índice extra aqui por enquanto: o advisor costuma marcar como unused
--- adicione depois se o workload real pedir
+create unique index if not exists user_sessions_auth_session_id_uidx
+  on public.user_sessions (auth_session_id)
+  where auth_session_id is not null;
+
+create index if not exists user_sessions_user_revoked_last_seen_idx
+  on public.user_sessions (user_id, revoked_at, last_seen_at desc);
+
+create index if not exists user_sessions_active_lookup_idx
+  on public.user_sessions (auth_session_id, user_id)
+  where revoked_at is null and ended_at is null;
 
 -- ---------------------------------------------------------
 -- Conversas 1:1

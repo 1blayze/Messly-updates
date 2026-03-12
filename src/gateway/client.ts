@@ -428,6 +428,12 @@ export class GatewayClient {
       } else {
         parsed.pathname = trimmedPath.startsWith("/") ? trimmedPath : `/${trimmedPath}`;
       }
+
+      const hostname = parsed.hostname.toLowerCase();
+      if (import.meta.env.PROD && (hostname === "messly.site" || hostname === "www.messly.site")) {
+        parsed.hostname = "gateway.messly.site";
+        parsed.port = "";
+      }
       parsed.hash = "";
       parsed.search = "";
 

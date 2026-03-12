@@ -1,5 +1,4 @@
 ﻿const fs = require("node:fs");
-const http = require("node:http");
 const path = require("node:path");
 const { performance } = require("node:perf_hooks");
 const dotenv = require("dotenv");
@@ -50,6 +49,7 @@ const DEV_SERVER_URL = "http://127.0.0.1:5173";
 const CALL_POPOUT_FRAME_NAME = "messly_call_popout";
 const CALL_POPOUT_URL_MARKER = "#messly_call_popout";
 const PROFILE_MEDIA_CACHE_CONTROL = "public, max-age=31536000, immutable";
+const PROFILE_MEDIA_PROXY_PATH = "/media/upload/profile";
 const PROFILE_MEDIA_PREFIX_BY_KIND = Object.freeze({
   avatar: "avatars",
   banner: "banners",
@@ -108,6 +108,7 @@ const isPackagedDevToolsEnabled = PACKAGED_DEVTOOLS_ENV
   : true;
 const areDevToolsEnabled = !app.isPackaged || isPackagedDevToolsEnabled;
 const TURNSTILE_CSP_SOURCE = "https://challenges.cloudflare.com";
+const CLOUDFLARE_INSIGHTS_SCRIPT_SOURCE = "https://static.cloudflareinsights.com";
 const STATUS_PANEL_ENABLED = false;
 const STATUS_PANEL_PROGRESS_BYTES_VISIBILITY_THRESHOLD = 12 * 1024 * 1024;
 const STATUS_PANEL_PHASE = Object.freeze({
@@ -228,13 +229,13 @@ const STATUS_PANEL_MIN_VISIBLE_MS = Object.freeze({
   [STATUS_PANEL_PHASE.RETRYING]: 520,
 });
 const PRODUCTION_SCRIPT_SOURCE = areDevToolsEnabled
-  ? `script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval' ${TURNSTILE_CSP_SOURCE}`
-  : `script-src 'self' 'wasm-unsafe-eval' ${TURNSTILE_CSP_SOURCE}`;
+  ? `script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval' ${TURNSTILE_CSP_SOURCE} ${CLOUDFLARE_INSIGHTS_SCRIPT_SOURCE}`
+  : `script-src 'self' 'wasm-unsafe-eval' ${TURNSTILE_CSP_SOURCE} ${CLOUDFLARE_INSIGHTS_SCRIPT_SOURCE}`;
 // Applied to packaged builds to lock down renderer document capabilities.
 const PRODUCTION_CONTENT_SECURITY_POLICY = [
   "default-src 'self'",
   PRODUCTION_SCRIPT_SOURCE,
-  `script-src-elem 'self' ${TURNSTILE_CSP_SOURCE}`,
+  `script-src-elem 'self' ${TURNSTILE_CSP_SOURCE} ${CLOUDFLARE_INSIGHTS_SCRIPT_SOURCE}`,
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
   "img-src 'self' data: blob: https:",
   "media-src 'self' data: blob: https:",
@@ -244,32 +245,13 @@ const PRODUCTION_CONTENT_SECURITY_POLICY = [
   "object-src 'none'",
   "base-uri 'self'",
 ].join("; ");
-const PACKAGED_RENDERER_DIST_DIR = path.resolve(__dirname, "..", "dist");
-const PACKAGED_RENDERER_ENTRY_FILE = path.join(PACKAGED_RENDERER_DIST_DIR, "index.html");
-const PACKAGED_RENDERER_HOST = "127.0.0.1";
-const PACKAGED_RENDERER_MIME_BY_EXTENSION = Object.freeze({
-  ".css": "text/css; charset=utf-8",
-  ".gif": "image/gif",
-  ".html": "text/html; charset=utf-8",
-  ".ico": "image/x-icon",
-  ".jpeg": "image/jpeg",
-  ".jpg": "image/jpeg",
-  ".js": "text/javascript; charset=utf-8",
-  ".json": "application/json; charset=utf-8",
-  ".map": "application/json; charset=utf-8",
-  ".mjs": "text/javascript; charset=utf-8",
-  ".png": "image/png",
-  ".svg": "image/svg+xml",
-  ".txt": "text/plain; charset=utf-8",
-  ".webp": "image/webp",
-  ".woff": "font/woff",
-  ".woff2": "font/woff2",
-});
 const ALLOWED_APP_PERMISSIONS = Object.freeze(["media", "display-capture"]);
 const WINDOWS_FIREWALL_RULE_NAME = String(process.env.MESSLY_FIREWALL_RULE_NAME ?? DEFAULT_FIREWALL_RULE_NAME).trim() || DEFAULT_FIREWALL_RULE_NAME;
 const WINDOWS_FIREWALL_PROFILE = String(process.env.MESSLY_FIREWALL_PROFILE ?? DEFAULT_FIREWALL_PROFILE).trim().toLowerCase() || DEFAULT_FIREWALL_PROFILE;
-const DEFAULT_PUBLIC_API_BASE_URL = "https://messly.site";
+const DEFAULT_PUBLIC_WEB_ORIGIN = "https://messly.site";
+const DEFAULT_PUBLIC_API_BASE_URL = "https://messly.site/api";
 const DEFAULT_PUBLIC_GATEWAY_URL = "wss://gateway.messly.site/gateway";
+const REQUIRED_PRODUCTION_RENDERER_URL = "https://messly.site/";
 
 function resolveAppIconPath(fileName) {
   const iconPath = path.join(APP_ICONS_DIR, fileName);
@@ -334,9 +316,6 @@ let windowsFirewallBootstrapPromise = null;
 let updaterBroadcastThrottleTimer = null;
 let updaterBroadcastQueuedState = null;
 let updaterBroadcastLastAtMs = 0;
-let packagedRendererServer = null;
-let packagedRendererServerOrigin = null;
-let packagedRendererServerStartPromise = null;
 const ephemeralSecureAuthStorage = new Map();
 const hardenedWebContents = new WeakSet();
 const hardenedSessions = new WeakSet();
@@ -519,167 +498,102 @@ function normalizeOriginValue(rawValue) {
   }
 }
 
-function getPackagedRendererOrigin() {
-  return packagedRendererServerOrigin;
+function getProductionRendererOrigin() {
+  return normalizeOriginValue(REQUIRED_PRODUCTION_RENDERER_URL);
 }
 
-function getPackagedRendererContentType(filePath) {
-  const extension = path.extname(filePath).toLowerCase();
-  return PACKAGED_RENDERER_MIME_BY_EXTENSION[extension] || "application/octet-stream";
+function getExpectedProductionRendererUrl() {
+  return REQUIRED_PRODUCTION_RENDERER_URL;
 }
 
-function resolvePackagedRendererAssetPath(requestPathname) {
-  const rawPath = String(requestPathname ?? "/");
-  let decodedPath;
+function isLocalRendererHostname(hostname) {
+  const normalizedHostname = String(hostname ?? "").trim().toLowerCase();
+  return normalizedHostname === "localhost" || normalizedHostname === "127.0.0.1" || normalizedHostname === "::1";
+}
+
+function logInvalidProductionRendererUrl(received, expected, reason, blockedOrigin = "") {
+  console.error("[electron] invalid production renderer url");
+  console.error(`[electron] received: ${received}`);
+  console.error(`[electron] expected: ${expected}`);
+  if (reason) {
+    console.error(`[electron] reason: ${reason}`);
+  }
+  if (blockedOrigin) {
+    console.error(`[electron] blocked production renderer origin: ${blockedOrigin}`);
+  }
+}
+
+function validateProductionRendererUrlOrThrow(candidateUrl) {
+  const expectedUrl = getExpectedProductionRendererUrl();
+  let parsedCandidate;
   try {
-    decodedPath = decodeURIComponent(rawPath);
+    parsedCandidate = new URL(candidateUrl);
   } catch {
-    return null;
-  }
-  if (decodedPath.includes("\0")) {
-    return null;
-  }
-
-  const relativePath = decodedPath === "/" ? "" : decodedPath.replace(/^\/+/, "");
-  const resolvedPath = relativePath
-    ? path.resolve(PACKAGED_RENDERER_DIST_DIR, relativePath)
-    : PACKAGED_RENDERER_ENTRY_FILE;
-  const distRootPrefix = `${PACKAGED_RENDERER_DIST_DIR}${path.sep}`;
-  if (resolvedPath !== PACKAGED_RENDERER_DIST_DIR && !resolvedPath.startsWith(distRootPrefix)) {
-    return null;
+    logInvalidProductionRendererUrl(
+      String(candidateUrl ?? "").trim() || "(empty)",
+      expectedUrl,
+      "malformed production renderer URL",
+    );
+    throw new Error("Invalid production renderer URL configuration.");
   }
 
-  try {
-    if (fs.existsSync(resolvedPath)) {
-      const stat = fs.statSync(resolvedPath);
-      if (stat.isFile()) {
-        return resolvedPath;
-      }
-      if (stat.isDirectory()) {
-        const nestedIndex = path.join(resolvedPath, "index.html");
-        if (fs.existsSync(nestedIndex) && fs.statSync(nestedIndex).isFile()) {
-          return nestedIndex;
-        }
-      }
-    }
-  } catch {
-    return null;
+  const candidateProtocol = parsedCandidate.protocol.toLowerCase();
+  const candidateHostname = parsedCandidate.hostname.toLowerCase();
+  const candidatePathname = parsedCandidate.pathname || "/";
+  const normalizedCandidateUrl = parsedCandidate.toString();
+  const blockedByProtocol = candidateProtocol === "file:" || candidateProtocol === "app:" || candidateProtocol === "data:";
+  const blockedByLoopbackHost = isLocalRendererHostname(candidateHostname);
+  const isExpectedProductionUrl =
+    candidateProtocol === "https:"
+    && candidateHostname === "messly.site"
+    && (candidatePathname === "/" || candidatePathname === "")
+    && !parsedCandidate.search
+    && !parsedCandidate.hash
+    && !parsedCandidate.port;
+
+  if (!isExpectedProductionUrl) {
+    const blockedOrigin = blockedByProtocol
+      ? candidateProtocol
+      : blockedByLoopbackHost
+        ? parsedCandidate.origin
+        : "";
+    const reason = blockedByProtocol
+      ? `unsupported production renderer protocol: ${candidateProtocol}`
+      : blockedByLoopbackHost
+        ? `loopback production renderer host is forbidden: ${candidateHostname}`
+        : "production renderer URL must be exactly https://messly.site";
+    logInvalidProductionRendererUrl(normalizedCandidateUrl, expectedUrl, reason, blockedOrigin);
+    throw new Error("Invalid production renderer URL configuration.");
   }
 
-  if (!relativePath || !path.extname(relativePath)) {
-    return PACKAGED_RENDERER_ENTRY_FILE;
-  }
-  return null;
+  return expectedUrl;
 }
 
-function handlePackagedRendererRequest(request, response) {
-  const method = String(request?.method ?? "GET").toUpperCase();
-  if (method !== "GET" && method !== "HEAD") {
-    response.writeHead(405, {
-      "Allow": "GET, HEAD",
-      "Content-Type": "text/plain; charset=utf-8",
-    });
-    response.end("Method Not Allowed");
-    return;
-  }
+function resolveRendererStartupUrl() {
+  const mode = app.isPackaged ? "production" : "development";
+  console.info(`[electron] desktop renderer mode: ${mode}`);
 
-  let requestUrl;
-  try {
-    requestUrl = new URL(request?.url ?? "/", `http://${PACKAGED_RENDERER_HOST}`);
-  } catch {
-    response.writeHead(400, {
-      "Content-Type": "text/plain; charset=utf-8",
-    });
-    response.end("Bad Request");
-    return;
-  }
-
-  const assetPath = resolvePackagedRendererAssetPath(requestUrl.pathname);
-  if (!assetPath) {
-    response.writeHead(404, {
-      "Content-Type": "text/plain; charset=utf-8",
-    });
-    response.end("Not Found");
-    return;
-  }
-
-  fs.promises.readFile(assetPath)
-    .then((content) => {
-      const isEntryFile = assetPath === PACKAGED_RENDERER_ENTRY_FILE;
-      response.writeHead(200, {
-        "Cache-Control": isEntryFile ? "no-cache" : "public, max-age=31536000, immutable",
-        "Content-Type": getPackagedRendererContentType(assetPath),
-      });
-      if (method === "HEAD") {
-        response.end();
-        return;
-      }
-      response.end(content);
-    })
-    .catch((error) => {
-      const statusCode = error && error.code === "ENOENT" ? 404 : 500;
-      response.writeHead(statusCode, {
-        "Content-Type": "text/plain; charset=utf-8",
-      });
-      response.end(statusCode === 404 ? "Not Found" : "Internal Server Error");
-    });
-}
-
-function startPackagedRendererServer() {
   if (!app.isPackaged) {
-    return Promise.resolve(null);
+    const devRendererUrl = String(
+      process.env.ELECTRON_RENDERER_URL
+      ?? process.env.VITE_DEV_SERVER_URL
+      ?? DEV_SERVER_URL,
+    ).trim() || DEV_SERVER_URL;
+    console.info(`[electron] desktop renderer url selected: ${devRendererUrl}`);
+    return devRendererUrl;
   }
-  if (packagedRendererServerOrigin) {
-    return Promise.resolve(packagedRendererServerOrigin);
-  }
-  if (packagedRendererServerStartPromise) {
-    return packagedRendererServerStartPromise;
-  }
-  packagedRendererServerStartPromise = new Promise((resolve, reject) => {
-    if (!fs.existsSync(PACKAGED_RENDERER_ENTRY_FILE)) {
-      packagedRendererServerStartPromise = null;
-      reject(new Error(`Packaged renderer entry not found: ${PACKAGED_RENDERER_ENTRY_FILE}`));
-      return;
-    }
 
-    const server = http.createServer(handlePackagedRendererRequest);
-    server.once("error", (error) => {
-      if (packagedRendererServer === server) {
-        packagedRendererServer = null;
-      }
-      packagedRendererServerOrigin = null;
-      packagedRendererServerStartPromise = null;
-      reject(error);
-    });
-    server.listen(0, PACKAGED_RENDERER_HOST, () => {
-      const addressInfo = server.address();
-      if (!addressInfo || typeof addressInfo === "string") {
-        server.close();
-        packagedRendererServerStartPromise = null;
-        reject(new Error("Could not resolve packaged renderer local server address."));
-        return;
-      }
-
-      packagedRendererServer = server;
-      packagedRendererServerOrigin = `http://${PACKAGED_RENDERER_HOST}:${addressInfo.port}`;
-      packagedRendererServerStartPromise = null;
-      resolve(packagedRendererServerOrigin);
-    });
-  });
-  return packagedRendererServerStartPromise;
-}
-
-function stopPackagedRendererServer() {
-  const server = packagedRendererServer;
-  packagedRendererServer = null;
-  packagedRendererServerOrigin = null;
-  packagedRendererServerStartPromise = null;
-  if (!server) {
-    return Promise.resolve();
-  }
-  return new Promise((resolve) => {
-    server.close(() => resolve());
-  });
+  const explicitProductionCandidate = String(
+    process.env.ELECTRON_RENDERER_URL
+    ?? process.env.MESSLY_SITE_URL
+    ?? process.env.WEB_URL
+    ?? process.env.APP_URL
+    ?? "",
+  ).trim();
+  const productionCandidate = explicitProductionCandidate || getExpectedProductionRendererUrl();
+  const rendererUrl = validateProductionRendererUrlOrThrow(productionCandidate);
+  console.info(`[electron] desktop renderer url selected: ${rendererUrl}`);
+  return rendererUrl;
 }
 
 function getSecureAllowedNavigationOrigins() {
@@ -690,12 +604,12 @@ function getSecureAllowedNavigationOrigins() {
       origins.add(origin);
     }
   }
-  const packagedOrigin = getPackagedRendererOrigin();
-  if (packagedOrigin) {
-    origins.add(packagedOrigin);
+  const productionOrigin = getProductionRendererOrigin();
+  if (productionOrigin) {
+    origins.add(productionOrigin);
   }
   if (!app.isPackaged) {
-    const rendererUrl = process.env.ELECTRON_RENDERER_URL || DEV_SERVER_URL;
+    const rendererUrl = process.env.ELECTRON_RENDERER_URL || process.env.VITE_DEV_SERVER_URL || DEV_SERVER_URL;
     try {
       origins.add(new URL(rendererUrl).origin);
     } catch {}
@@ -795,8 +709,8 @@ function shouldApplyRendererCspHeader(details) {
     return true;
   }
 
-  const packagedOrigin = getPackagedRendererOrigin();
-  if (packagedOrigin && parsedUrl.origin === packagedOrigin) {
+  const productionOrigin = getProductionRendererOrigin();
+  if (productionOrigin && parsedUrl.origin === productionOrigin) {
     return true;
   }
 
@@ -2166,7 +2080,77 @@ function setHiddenDirectMessageConversationIds(scopes, conversationIds) {
 function getConfiguredAppApiBaseUrl() {
   const configuredAppApiUrl = String(process.env.VITE_MESSLY_API_URL ?? "").trim();
   const configuredAuthApiUrl = String(process.env.VITE_MESSLY_AUTH_API_URL ?? "").trim();
-  return configuredAppApiUrl || configuredAuthApiUrl || DEFAULT_PUBLIC_API_BASE_URL;
+  return normalizePublicApiBaseUrl(configuredAppApiUrl || configuredAuthApiUrl || DEFAULT_PUBLIC_API_BASE_URL);
+}
+
+function normalizePublicApiBaseUrl(rawValue) {
+  const value = typeof rawValue === "string" ? rawValue.trim() : "";
+  if (!value) {
+    return DEFAULT_PUBLIC_API_BASE_URL;
+  }
+
+  try {
+    const parsed = new URL(value);
+    const hostname = parsed.hostname.trim().toLowerCase();
+    if ((hostname === "messly.site" || hostname === "www.messly.site") && (!parsed.pathname || parsed.pathname === "/")) {
+      parsed.pathname = "/api";
+    }
+    return parsed.toString().replace(/\/+$/, "");
+  } catch {
+    return value.replace(/\/+$/, "") || DEFAULT_PUBLIC_API_BASE_URL;
+  }
+}
+
+function normalizePublicGatewayUrl(rawValue) {
+  const value = String(rawValue ?? "").trim();
+  if (!value) {
+    return "";
+  }
+
+  const candidate = /^[a-z][a-z0-9+\-.]*:\/\//i.test(value) ? value : `wss://${value}`;
+  try {
+    const parsed = new URL(candidate);
+    if (parsed.protocol === "http:") {
+      parsed.protocol = "ws:";
+    } else if (parsed.protocol === "https:") {
+      parsed.protocol = "wss:";
+    }
+    if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
+      return "";
+    }
+
+    const hostname = parsed.hostname.trim().toLowerCase();
+    if (hostname === "www.messly.site" || (app.isPackaged && hostname === "messly.site")) {
+      parsed.hostname = "gateway.messly.site";
+      parsed.port = "";
+    }
+
+    parsed.search = "";
+    parsed.hash = "";
+    const trimmedPath = parsed.pathname.replace(/\/+$/, "");
+    if (!trimmedPath || trimmedPath === "/") {
+      parsed.pathname = "/gateway";
+    } else {
+      parsed.pathname = trimmedPath.startsWith("/") ? trimmedPath : `/${trimmedPath}`;
+    }
+
+    return parsed.toString().replace(/\/+$/, "");
+  } catch {
+    return "";
+  }
+}
+
+function getConfiguredWebOrigin() {
+  const apiBaseUrl = getConfiguredAppApiBaseUrl();
+  try {
+    const parsed = new URL(apiBaseUrl);
+    parsed.pathname = "";
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString().replace(/\/+$/, "") || DEFAULT_PUBLIC_WEB_ORIGIN;
+  } catch {
+    return DEFAULT_PUBLIC_WEB_ORIGIN;
+  }
 }
 
 function buildStartupSnapshot() {
@@ -2182,9 +2166,27 @@ function buildStartupSnapshot() {
     hiddenConversationCount += normalizeHiddenDirectMessageConversationIds(conversationIds).length;
   }
 
-  const configuredGatewayUrl = String(process.env.VITE_MESSLY_GATEWAY_URL ?? "").trim();
-  const configuredAuthApiUrl = String(process.env.VITE_MESSLY_AUTH_API_URL ?? "").trim();
-  const configuredAppApiUrl = String(process.env.VITE_MESSLY_API_URL ?? "").trim();
+  const rawConfiguredGatewayUrl = String(process.env.VITE_MESSLY_GATEWAY_URL ?? "").trim();
+  const configuredGatewayUrl = normalizePublicGatewayUrl(rawConfiguredGatewayUrl);
+  const fallbackGatewayUrl = normalizePublicGatewayUrl(DEFAULT_PUBLIC_GATEWAY_URL) || DEFAULT_PUBLIC_GATEWAY_URL;
+  const selectedGatewayUrl = configuredGatewayUrl || fallbackGatewayUrl;
+  if (rawConfiguredGatewayUrl && !configuredGatewayUrl) {
+    console.warn("[electron] invalid gateway url in startup snapshot config, using fallback", {
+      received: rawConfiguredGatewayUrl,
+      fallback: fallbackGatewayUrl,
+    });
+  }
+  const configuredAuthApiUrl = normalizePublicApiBaseUrl(String(process.env.VITE_MESSLY_AUTH_API_URL ?? "").trim());
+  const configuredAppApiUrl = getConfiguredAppApiBaseUrl();
+  const shellOrigin = app.isPackaged
+    ? getProductionRendererOrigin()
+    : (() => {
+        try {
+          return new URL(process.env.ELECTRON_RENDERER_URL || process.env.VITE_DEV_SERVER_URL || DEV_SERVER_URL).origin;
+        } catch {
+          return null;
+        }
+      })();
 
   return {
     generatedAt: new Date().toISOString(),
@@ -2194,9 +2196,12 @@ function buildStartupSnapshot() {
     windowsSettings: { ...loadWindowsBehaviorSettings() },
     apiConfig: {
       supabaseUrl: String(process.env.VITE_SUPABASE_URL ?? process.env.SUPABASE_URL ?? "").trim() || null,
-      gatewayUrl: configuredGatewayUrl || DEFAULT_PUBLIC_GATEWAY_URL,
+      gatewayUrl: selectedGatewayUrl,
       authApiUrl: configuredAuthApiUrl || configuredAppApiUrl || DEFAULT_PUBLIC_API_BASE_URL,
       appApiUrl: configuredAppApiUrl || DEFAULT_PUBLIC_API_BASE_URL,
+      webOrigin: getConfiguredWebOrigin(),
+      shellOrigin,
+      mediaProxyUrl: `${configuredAppApiUrl || DEFAULT_PUBLIC_API_BASE_URL}/media/upload/profile`,
     },
     cacheHints: {
       hiddenScopeCount: Object.keys(scopeMap).length,
@@ -2642,15 +2647,61 @@ async function createAppTray() {
     refreshAppTrayMenu();
     return appTray;
   }
-  const trayIconPath = TRAY_ICON_PATH;
-  if (!trayIconPath) {
-    return null;
+
+  const trayIconPathCandidates = Array.from(
+    new Set(
+      [
+        TRAY_ICON_PATH,
+        MAIN_WINDOW_ICON_PATH,
+        CHILD_WINDOW_ICON_PATH,
+        APP_NOTIFICATION_ICON_ICO_PATH,
+        APP_NOTIFICATION_ICON_PNG_PATH,
+        process.resourcesPath ? path.join(process.resourcesPath, "assets", "icons", "messly.ico") : null,
+        process.execPath,
+      ]
+        .map((candidate) => (typeof candidate === "string" ? candidate.trim() : ""))
+        .filter(Boolean),
+    ),
+  );
+
+  let trayIconImage = trayIconImageCache;
+  if (!trayIconImage || trayIconImage.isEmpty()) {
+    for (const candidate of trayIconPathCandidates) {
+      try {
+        if (candidate !== process.execPath && !fs.existsSync(candidate)) {
+          continue;
+        }
+        const nextImage = await buildTrayIconImage(candidate);
+        if (nextImage && !nextImage.isEmpty()) {
+          trayIconImage = nextImage;
+          trayIconImageCache = nextImage;
+          console.info(`[electron] tray icon selected: ${candidate}`);
+          break;
+        }
+      } catch {}
+    }
   }
 
-  const trayIconImage = trayIconImageCache ?? (await buildTrayIconImage(trayIconPath));
-  trayIconImageCache = trayIconImage ?? trayIconImageCache;
-  const trayIcon = trayIconImage ?? nativeImage.createFromPath(trayIconPath);
+  if ((!trayIconImage || trayIconImage.isEmpty()) && process.platform === "win32" && typeof app.getFileIcon === "function") {
+    try {
+      const executableIcon = await app.getFileIcon(process.execPath, { size: "normal" });
+      if (executableIcon && !executableIcon.isEmpty()) {
+        trayIconImage = trimTransparentEdges(executableIcon).resize({
+          width: 24,
+          height: 24,
+          quality: "best",
+        });
+        trayIconImageCache = trayIconImage;
+        console.info("[electron] tray icon selected from executable metadata");
+      }
+    } catch {}
+  }
+
+  const trayIcon = trayIconImage;
   if (!trayIcon || trayIcon.isEmpty()) {
+    console.error("[electron] tray icon creation aborted: no valid icon source", {
+      candidates: trayIconPathCandidates,
+    });
     return null;
   }
 
@@ -3115,28 +3166,351 @@ function normalizeAccessToken(value) {
   return typeof value === "string" ? value.trim() : "";
 }
 
-async function uploadProfileMediaViaApiProxy({ key, contentType, bytes, accessToken }) {
-  const apiBaseUrl = getConfiguredAppApiBaseUrl();
-  const response = await fetch(`${apiBaseUrl}/media/upload-proxy?fileKey=${encodeURIComponent(key)}`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${accessToken}`,
-      "content-type": contentType || "application/octet-stream",
-    },
-    body: bytes,
-  });
-
-  if (response.ok) {
-    return;
+function getRendererShellOrigin() {
+  if (app.isPackaged) {
+    return getProductionRendererOrigin();
   }
 
-  const responseText = await response.text().catch(() => "");
-  const detail = responseText.replace(/\s+/g, " ").trim().slice(0, 260);
-  throw new Error(
-    detail
-      ? `Managed media upload failed (${response.status}): ${detail}`
-      : `Managed media upload failed (${response.status}).`,
-  );
+  try {
+    return new URL(process.env.ELECTRON_RENDERER_URL || process.env.VITE_DEV_SERVER_URL || DEV_SERVER_URL).origin;
+  } catch {
+    return null;
+  }
+}
+
+function getProfileMediaProxyUrl() {
+  return `${getConfiguredAppApiBaseUrl()}${PROFILE_MEDIA_PROXY_PATH}`;
+}
+
+function classifyProfileMediaUploadFailure(statusCode, code, message) {
+  const normalizedCode = typeof code === "string" ? code.trim().toUpperCase() : "";
+  const normalizedMessage = typeof message === "string" ? message.trim().toLowerCase() : "";
+
+  if (!statusCode) {
+    return "network";
+  }
+
+  if (
+    normalizedCode === "UNAUTHORIZED"
+    || normalizedCode === "INVALID_TOKEN"
+    || normalizedCode === "AUTH_REQUIRED"
+    || statusCode === 401
+    || statusCode === 403
+  ) {
+    return "auth";
+  }
+
+  if (
+    normalizedCode === "FILE_TOO_LARGE"
+    || normalizedCode === "UNSUPPORTED_TYPE"
+    || normalizedCode === "DIMENSIONS_TOO_SMALL"
+    || normalizedCode === "DIMENSIONS_TOO_LARGE"
+    || normalizedCode === "INVALID_IMAGE"
+    || normalizedCode === "GIF_TOO_MANY_FRAMES"
+    || normalizedCode === "INVALID_MEDIA_KIND"
+    || statusCode === 400
+    || statusCode === 413
+    || normalizedMessage.includes("invalid")
+  ) {
+    return "validation";
+  }
+
+  if (normalizedCode === "PROFILE_PERSISTENCE_FAILED" || normalizedCode === "PROFILE_NOT_FOUND") {
+    return "persistence";
+  }
+
+  if (normalizedCode.includes("STORAGE") || normalizedMessage.includes("storage") || normalizedMessage.includes("bucket")) {
+    return "storage";
+  }
+
+  if (statusCode >= 500) {
+    return "server";
+  }
+
+  return "http";
+}
+
+function logProfileMediaUploadEvent(
+  event,
+  details = {},
+  level = "info",
+) {
+  const payload = {
+    environment: "main-process",
+    origin: getRendererShellOrigin(),
+    webOrigin: getConfiguredWebOrigin(),
+    apiBaseUrl: getConfiguredAppApiBaseUrl(),
+    mediaProxyUrl: getProfileMediaProxyUrl(),
+    ...details,
+  };
+
+  try {
+    const line = `[profile-media:main] ${event}`;
+    if (level === "error") {
+      console.error(line, payload);
+    } else if (level === "warn") {
+      console.warn(line, payload);
+    } else {
+      console.info(line, payload);
+    }
+  } catch {}
+}
+
+function isInvalidManagedMediaApiBaseUrl(value) {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  if (!normalized) {
+    return true;
+  }
+
+  try {
+    const parsed = new URL(normalized);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return true;
+    }
+
+    const hostname = parsed.hostname.trim().toLowerCase();
+    const pathname = parsed.pathname.replace(/\/+$/, "");
+    return (hostname === "messly.site" || hostname === "www.messly.site") && (!pathname || !pathname.startsWith("/api"));
+  } catch {
+    return true;
+  }
+}
+
+function shouldRetryManagedMediaUploadProxy(statusCode, attempt, maxAttempts) {
+  if (attempt >= maxAttempts) {
+    return false;
+  }
+
+  return !statusCode || statusCode >= 500 || statusCode === 429 || statusCode === 408;
+}
+
+async function waitForManagedMediaRetry(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, Math.max(0, ms));
+  });
+}
+
+function parseJsonSafe(value) {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function toStructuredProfileMediaProxyError(statusCode, payload, responseText) {
+  const record = payload && typeof payload === "object" ? payload : null;
+  const nestedError = record && record.error && typeof record.error === "object" ? record.error : null;
+  const code = String((nestedError && nestedError.code) || (record && record.code) || "").trim().toUpperCase();
+  const message = String((nestedError && nestedError.message) || (record && record.message) || "").trim();
+  const details =
+    nestedError && nestedError.details && typeof nestedError.details === "object" && !Array.isArray(nestedError.details)
+      ? nestedError.details
+      : {};
+
+  if (
+    code === "FILE_TOO_LARGE"
+    || code === "UNSUPPORTED_TYPE"
+    || code === "DIMENSIONS_TOO_SMALL"
+    || code === "DIMENSIONS_TOO_LARGE"
+    || code === "INVALID_IMAGE"
+    || code === "GIF_TOO_MANY_FRAMES"
+  ) {
+    return createMediaUploadError(code, details);
+  }
+
+  const fallbackMessage = responseText ? responseText.replace(/\s+/g, " ").trim().slice(0, 260) : "";
+  const finalMessage =
+    message
+      ? `Profile media proxy upload failed (${statusCode}): ${message}`
+      : fallbackMessage
+        ? `Profile media proxy upload failed (${statusCode}): ${fallbackMessage}`
+        : `Profile media proxy upload failed (${statusCode}).`;
+
+  const error = new Error(finalMessage);
+  error.statusCode = statusCode;
+  error.code = code || `HTTP_${statusCode}`;
+  error.details = details;
+  error.failureType = classifyProfileMediaUploadFailure(statusCode, code, finalMessage);
+  return error;
+}
+
+function toProfileMediaProxySuccess(payload) {
+  const record = payload && typeof payload === "object" ? payload : null;
+  if (!record) {
+    throw new Error("Profile media proxy returned an invalid JSON payload.");
+  }
+
+  const key = String(record.key ?? "").trim();
+  const hash = String(record.hash ?? "").trim().toLowerCase();
+  const size = Number(record.size ?? NaN);
+  const strategy = String(record.strategy ?? "server-proxy").trim() || "server-proxy";
+  const versionedUrl = String(record.versionedUrl ?? record.cdnUrl ?? "").trim() || null;
+  const persistedProfile =
+    record.persistedProfile && typeof record.persistedProfile === "object" && !Array.isArray(record.persistedProfile)
+      ? record.persistedProfile
+      : null;
+
+  if (!key || !hash || !Number.isFinite(size)) {
+    throw new Error("Profile media proxy returned an incomplete upload payload.");
+  }
+
+  return {
+    key,
+    hash,
+    size,
+    strategy,
+    versionedUrl,
+    persistedProfile,
+  };
+}
+
+async function uploadProfileMediaViaOfficialProxy({ kind, userId, contentType, bytes, accessToken, fileName }) {
+  const apiBaseUrl = getConfiguredAppApiBaseUrl();
+  if (isInvalidManagedMediaApiBaseUrl(apiBaseUrl)) {
+    throw new Error("Invalid app API base URL for profile media proxy.");
+  }
+
+  if (!accessToken) {
+    const authError = new Error("Sessao invalida ou expirada para envio de imagem.");
+    authError.statusCode = 401;
+    authError.code = "UNAUTHORIZED";
+    authError.failureType = "auth";
+    throw authError;
+  }
+
+  const endpointUrl = new URL(`${apiBaseUrl}${PROFILE_MEDIA_PROXY_PATH}`);
+  endpointUrl.searchParams.set("kind", kind);
+  if (typeof fileName === "string" && fileName.trim()) {
+    endpointUrl.searchParams.set("fileName", fileName.trim());
+  }
+  const endpoint = endpointUrl.toString();
+  const maxAttempts = 2;
+
+  logProfileMediaUploadEvent("upload endpoint", {
+    transport: "official-profile-proxy",
+    kind,
+    userId,
+    endpoint,
+    method: "POST",
+  });
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      logProfileMediaUploadEvent("upload start", {
+        transport: "official-profile-proxy",
+        kind,
+        userId,
+        attempt,
+        endpoint,
+        contentType: contentType || "application/octet-stream",
+        size: Buffer.byteLength(bytes),
+      });
+
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${accessToken}`,
+          "content-type": contentType || "application/octet-stream",
+        },
+        body: bytes,
+      });
+
+      const responseText = await response.text().catch(() => "");
+      const responsePayload = parseJsonSafe(responseText);
+
+      if (response.ok) {
+        const uploaded = toProfileMediaProxySuccess(responsePayload);
+        logProfileMediaUploadEvent("upload response", {
+          transport: "official-profile-proxy",
+          kind,
+          userId,
+          attempt,
+          endpoint,
+          status: response.status,
+          key: uploaded.key,
+          size: uploaded.size,
+          strategy: uploaded.strategy,
+        });
+        if (uploaded.persistedProfile) {
+          logProfileMediaUploadEvent("upload persisted profile", {
+            transport: "official-profile-proxy",
+            kind,
+            userId,
+            persistedProfile: uploaded.persistedProfile,
+          });
+        }
+        logProfileMediaUploadEvent("upload final strategy", {
+          transport: "official-profile-proxy",
+          kind,
+          userId,
+          strategy: uploaded.strategy,
+        });
+        return uploaded;
+      }
+
+      const responseDetail = responseText.replace(/\s+/g, " ").trim().slice(0, 260);
+      const errorCode =
+        responsePayload && typeof responsePayload === "object" && responsePayload.error && typeof responsePayload.error === "object"
+          ? String(responsePayload.error.code ?? "").trim().toUpperCase()
+          : "";
+      const failureType = classifyProfileMediaUploadFailure(response.status, errorCode, responseDetail);
+      logProfileMediaUploadEvent("upload error", {
+        transport: "official-profile-proxy",
+        kind,
+        userId,
+        attempt,
+        endpoint,
+        status: response.status,
+        code: errorCode || null,
+        failureType,
+        response: responseDetail || null,
+      }, "error");
+
+      if (shouldRetryManagedMediaUploadProxy(response.status, attempt, maxAttempts)) {
+        await waitForManagedMediaRetry(450 * attempt);
+        continue;
+      }
+
+      throw toStructuredProfileMediaProxyError(response.status, responsePayload, responseText);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error ?? "unknown_error");
+      const statusCode =
+        error && typeof error === "object" && "statusCode" in error
+          ? Number(error.statusCode ?? NaN)
+          : null;
+      const code =
+        error && typeof error === "object" && "code" in error
+          ? String(error.code ?? "").trim().toUpperCase()
+          : null;
+      const failureType =
+        error && typeof error === "object" && "failureType" in error
+          ? String(error.failureType ?? "").trim() || null
+          : classifyProfileMediaUploadFailure(Number.isFinite(statusCode ?? NaN) ? statusCode : null, code, message);
+      logProfileMediaUploadEvent("upload error", {
+        transport: "official-profile-proxy",
+        kind,
+        userId,
+        attempt,
+        endpoint,
+        message,
+        statusCode: Number.isFinite(statusCode ?? NaN) ? statusCode : null,
+        code,
+        failureType,
+      }, "error");
+
+      if (shouldRetryManagedMediaUploadProxy(Number.isFinite(statusCode ?? NaN) ? statusCode : null, attempt, maxAttempts)) {
+        await waitForManagedMediaRetry(450 * attempt);
+        continue;
+      }
+
+      throw error;
+    }
+  }
 }
 
 async function uploadProfileMediaHandler(_event, payload) {
@@ -3153,41 +3527,34 @@ async function uploadProfileMediaHandler(_event, payload) {
   const accessToken = normalizeAccessToken(payload?.accessToken);
 
   try {
+    logProfileMediaUploadEvent("upload start", {
+      transport: "electron-ipc",
+      kind,
+      userId,
+      hasAccessToken: Boolean(accessToken),
+      fileName: typeof payload?.fileName === "string" ? payload.fileName.trim() || null : null,
+      mimeType: typeof payload?.mimeType === "string" ? payload.mimeType.trim() || null : null,
+    });
     const binaryPayload = normalizeBinaryPayload(payload?.bytes);
-    const { processAvatarUpload, processBannerUpload } = getProfileMediaProcessors();
-    const processedAsset = kind === "avatar" ? await processAvatarUpload(binaryPayload) : await processBannerUpload(binaryPayload);
-
-    const prefix = PROFILE_MEDIA_PREFIX_BY_KIND[kind];
-    const key = `${prefix}/${userId}.${processedAsset.ext}`;
-
-    try {
-      const { PutObjectCommand } = getS3SdkModule();
-      const command = new PutObjectCommand({
-        Bucket: getR2Bucket(),
-        Key: key,
-        Body: processedAsset.buffer,
-        ContentType: processedAsset.contentType,
-        ContentLength: processedAsset.size,
-        CacheControl: PROFILE_MEDIA_CACHE_CONTROL,
-      });
-
-      await getR2Client().send(command);
-    } catch (uploadError) {
-      if (!accessToken) {
-        throw uploadError;
-      }
-      await uploadProfileMediaViaApiProxy({
-        key,
-        contentType: processedAsset.contentType,
-        bytes: processedAsset.buffer,
-        accessToken,
-      });
-    }
+    const uploaded = await uploadProfileMediaViaOfficialProxy({
+      kind,
+      userId,
+      contentType:
+        typeof payload?.mimeType === "string" && payload.mimeType.trim()
+          ? payload.mimeType.trim()
+          : "application/octet-stream",
+      bytes: binaryPayload,
+      accessToken,
+      fileName: typeof payload?.fileName === "string" ? payload.fileName.trim() : "",
+    });
 
     return {
-      key,
-      hash: processedAsset.hash,
-      size: processedAsset.size,
+      key: uploaded.key,
+      hash: uploaded.hash,
+      size: uploaded.size,
+      versionedUrl: uploaded.versionedUrl,
+      strategy: uploaded.strategy,
+      persistedProfile: uploaded.persistedProfile,
     };
   } catch (error) {
     if (isMediaUploadError(error)) {
@@ -3198,6 +3565,24 @@ async function uploadProfileMediaHandler(_event, payload) {
       throw createMediaUploadError("INVALID_IMAGE", {});
     }
 
+    logProfileMediaUploadEvent("upload error", {
+      transport: "electron-ipc",
+      kind,
+      userId,
+      message: error instanceof Error ? error.message : String(error ?? "unknown_error"),
+      statusCode:
+        error && typeof error === "object" && "statusCode" in error
+          ? Number(error.statusCode ?? NaN)
+          : null,
+      code:
+        error && typeof error === "object" && "code" in error
+          ? String(error.code ?? "").trim().toUpperCase() || null
+          : null,
+      failureType:
+        error && typeof error === "object" && "failureType" in error
+          ? String(error.failureType ?? "").trim() || null
+          : null,
+    }, "error");
     throw error;
   }
 }
@@ -3582,6 +3967,7 @@ function createMainWindow() {
     minWidth: 980,
     minHeight: 640,
     show: false,
+    skipTaskbar: false,
     autoHideMenuBar: true,
     transparent: false,
     backgroundColor: APP_STARTUP_BACKGROUND_COLOR,
@@ -3825,36 +4211,23 @@ function createMainWindow() {
     });
   });
 
-  if (!app.isPackaged) {
-    markMainStartupPerf("main:window-load-started", {
-      mode: "dev-url",
-    });
-    mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL || DEV_SERVER_URL);
-    return mainWindow;
+  let rendererUrl;
+  try {
+    rendererUrl = resolveRendererStartupUrl();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error ?? "unknown");
+    console.error(`[electron] renderer bootstrap aborted: ${message}`);
+    throw error;
   }
 
-  void startPackagedRendererServer()
-    .then((rendererOrigin) => {
-      if (mainWindow.isDestroyed() || !rendererOrigin) {
-        return;
-      }
-      markMainStartupPerf("main:window-load-started", {
-        mode: "packaged-url",
-        rendererOrigin,
-      });
-      return mainWindow.loadURL(`${rendererOrigin}/`);
-    })
-    .catch((error) => {
-      const message = error instanceof Error ? error.message : String(error ?? "unknown");
-      console.error(`[electron] packaged renderer local server failed: ${message}`);
-      if (mainWindow.isDestroyed()) {
-        return;
-      }
-      markMainStartupPerf("main:window-load-started", {
-        mode: "packaged-file-fallback",
-      });
-      return mainWindow.loadFile(PACKAGED_RENDERER_ENTRY_FILE);
-    });
+  markMainStartupPerf("main:window-load-started", {
+    mode: app.isPackaged ? "production-url" : "dev-url",
+    rendererUrl,
+  });
+  void mainWindow.loadURL(rendererUrl).catch((error) => {
+    const message = error instanceof Error ? error.message : String(error ?? "unknown");
+    console.error(`[electron] renderer load failed without fallback: ${message}`);
+  });
   return mainWindow;
 }
 
@@ -3999,7 +4372,6 @@ app.on("before-quit", () => {
     updaterBroadcastThrottleTimer = null;
   }
   updaterBroadcastQueuedState = null;
-  void stopPackagedRendererServer();
   notificationManager?.dispose?.();
   notificationManager = null;
   notificationNavigationCoordinator.dispose();

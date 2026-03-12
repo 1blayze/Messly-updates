@@ -21,12 +21,21 @@ function buildNotFoundBody() {
   };
 }
 
+function normalizeAuthPath(pathnameRaw: string): string {
+  const pathname = String(pathnameRaw ?? "").trim() || "/";
+  if (pathname === "/api/auth" || pathname.startsWith("/api/auth/")) {
+    return pathname.slice(4) || "/auth";
+  }
+  return pathname;
+}
+
 export class AuthRouter {
   constructor(private readonly deps: AuthDependencies) {}
 
   async handle(request: IncomingMessage, response: ServerResponse): Promise<boolean> {
     const url = new URL(request.url ?? "/", "http://messly.local");
-    if (!url.pathname.startsWith("/auth")) {
+    const requestPath = normalizeAuthPath(url.pathname);
+    if (!requestPath.startsWith("/auth")) {
       return false;
     }
 
@@ -39,35 +48,35 @@ export class AuthRouter {
         return true;
       }
 
-      if (request.method === "POST" && url.pathname === "/auth/signup") {
+      if (request.method === "POST" && requestPath === "/auth/signup") {
         const body = await readJsonBody<SignupRequestBody>(request);
         const payload = await handleSignup(this.deps, context, body);
         writeJson(response, 202, payload, corsHeaders);
         return true;
       }
 
-      if (request.method === "POST" && url.pathname === "/auth/resend-verification") {
+      if (request.method === "POST" && requestPath === "/auth/resend-verification") {
         const body = await readJsonBody<ResendVerificationRequestBody>(request);
         const payload = await handleResendVerification(this.deps, context, body);
         writeJson(response, 202, payload, corsHeaders);
         return true;
       }
 
-      if (request.method === "POST" && url.pathname === "/auth/verify-email") {
+      if (request.method === "POST" && requestPath === "/auth/verify-email") {
         const body = await readJsonBody<VerifyEmailRequestBody>(request);
         const payload = await handleVerifyEmail(this.deps, context, body);
         writeJson(response, 200, payload, corsHeaders);
         return true;
       }
 
-      if (request.method === "POST" && url.pathname === "/auth/login") {
+      if (request.method === "POST" && requestPath === "/auth/login") {
         const body = await readJsonBody<LoginRequestBody>(request);
         const payload = await handleLogin(this.deps, context, body);
         writeJson(response, 200, payload, corsHeaders);
         return true;
       }
 
-      if (request.method === "POST" && url.pathname === "/auth/logout") {
+      if (request.method === "POST" && requestPath === "/auth/logout") {
         const payload = await handleLogout(this.deps, context);
         writeJson(response, 200, payload, corsHeaders);
         return true;

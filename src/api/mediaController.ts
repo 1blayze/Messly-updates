@@ -1,4 +1,4 @@
-import { getApiBaseUrl, toCdnUrl } from "../config/domains";
+import { getApiBaseUrl, getProfileMediaUploadUrl, toCdnUrl } from "../config/domains";
 import { getRuntimeAppApiUrl } from "../config/runtimeApiConfig";
 import { getSupabaseAccessToken } from "./client";
 
@@ -50,6 +50,33 @@ export interface ProxyMediaUploadOptions {
   signal?: AbortSignal;
 }
 
+export interface UploadProfileMediaProxyOptions {
+  kind: "avatar" | "banner";
+  file: Blob;
+  fileName?: string | null;
+  signal?: AbortSignal;
+}
+
+export interface UploadProfileMediaProxyResponse {
+  uploaded: true;
+  kind: "avatar" | "banner";
+  key: string;
+  hash: string;
+  size: number;
+  contentType: string;
+  cdnUrl: string;
+  versionedUrl: string;
+  strategy: "server-proxy";
+  persistedProfile: {
+    avatar_key?: string | null;
+    avatar_hash?: string | null;
+    avatar_url?: string | null;
+    banner_key?: string | null;
+    banner_hash?: string | null;
+    banner_url?: string | null;
+  };
+}
+
 export class MediaApiError extends Error {
   readonly status: number;
   readonly code: string;
@@ -91,7 +118,7 @@ function toMediaApiError(response: Response, payload: unknown): MediaApiError {
 }
 
 function shouldForceLocalCdnUrl(): boolean {
-  if (typeof window === "undefined") {
+  if (typeof window === "undefined" || !import.meta.env.DEV) {
     return false;
   }
 
@@ -182,9 +209,23 @@ async function requestJson<TResponse>(method: "POST" | "DELETE", path: string, p
 
 export async function createMediaUpload(payload: CreateMediaUploadRequest): Promise<CreateMediaUploadResponse> {
   const response = await requestJson<CreateMediaUploadResponse>("POST", "/media/create-upload", payload);
+  const localDevForced = shouldForceLocalCdnUrl();
+  const selectedCdnUrl = localDevForced ? toCdnUrl(response.fileKey) : (response.cdnUrl || toCdnUrl(response.fileKey));
+  if (!response.cdnUrl || localDevForced) {
+    console.warn("cdn fallback detected", {
+      reason: localDevForced ? "local-dev-forced-cdn" : "missing-cdn-url-in-api-response",
+      fileKey: response.fileKey,
+      selectedCdnUrl,
+    });
+  }
+  console.info("media public url generated", {
+    strategy: "upload-create",
+    fileKey: response.fileKey,
+    url: selectedCdnUrl,
+  });
   return {
     ...response,
-    cdnUrl: shouldForceLocalCdnUrl() ? toCdnUrl(response.fileKey) : (response.cdnUrl || toCdnUrl(response.fileKey)),
+    cdnUrl: selectedCdnUrl,
     uploadHeaders: response.uploadHeaders ?? {},
   };
 }
@@ -290,4 +331,51 @@ export async function proxyMediaUpload(options: ProxyMediaUploadOptions): Promis
 
     xhr.send(options.file);
   });
+}
+
+export async function uploadProfileMediaProxy(
+  options: UploadProfileMediaProxyOptions,
+): Promise<UploadProfileMediaProxyResponse> {
+  const accessToken = await getSupabaseAccessToken();
+  if (!accessToken) {
+    throw new MediaApiError("Sessao expirada para upload de midia.", 401, "UNAUTHORIZED");
+  }
+
+  const query = new URLSearchParams();
+  query.set("kind", options.kind);
+  const normalizedFileName = String(options.fileName ?? "").trim();
+  if (normalizedFileName) {
+    query.set("fileName", normalizedFileName);
+  }
+
+  const requestUrl = `${getProfileMediaUploadUrl()}?${query.toString()}`;
+
+  try {
+    const response = await fetch(requestUrl, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        "content-type": options.file.type || "application/octet-stream",
+      },
+      body: options.file,
+      signal: options.signal,
+    });
+
+    const parsed = await parseJsonSafe(response);
+    if (!response.ok) {
+      throw toMediaApiError(response, parsed);
+    }
+
+    return parsed as UploadProfileMediaProxyResponse;
+  } catch (error) {
+    if (error instanceof MediaApiError) {
+      throw error;
+    }
+
+    throw new MediaApiError(
+      error instanceof Error ? error.message : "Falha de rede ao enviar a midia de perfil.",
+      0,
+      "MEDIA_NETWORK_ERROR",
+    );
+  }
 }

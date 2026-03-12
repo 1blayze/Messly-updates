@@ -68,7 +68,7 @@ interface IceCandidatePayload {
   candidate: RTCIceCandidateInit;
 }
 
-const DEFAULT_SCREEN_SHARE_QUALITY = "2160p60";
+const DEFAULT_SCREEN_SHARE_QUALITY = "1080p60";
 const DEFAULT_CALL_AUDIO_SETTINGS: Readonly<{
   inputDeviceId: string;
   inputVolume: number;
@@ -1001,15 +1001,31 @@ export class CallService {
     };
 
     pc.ontrack = (event) => {
+      const incomingTrack = event.track;
+      if (!incomingTrack) {
+        return;
+      }
+
       if (!this.remoteStream) {
         this.remoteStream = new MediaStream();
       }
-      const [track] = event.streams[0]?.getTracks() ?? [];
-      if (track) {
-        this.remoteStream.addTrack(track);
-      } else if (event.track) {
-        this.remoteStream.addTrack(event.track);
+
+      const alreadyAttached = this.remoteStream
+        .getTracks()
+        .some((track) => track.id === incomingTrack.id);
+      if (!alreadyAttached) {
+        this.remoteStream.addTrack(incomingTrack);
       }
+
+      incomingTrack.onended = () => {
+        if (!this.remoteStream) {
+          return;
+        }
+
+        this.remoteStream.removeTrack(incomingTrack);
+        this.options.onRemoteStream?.(this.remoteStream);
+      };
+
       this.options.onRemoteStream?.(this.remoteStream);
     };
 
@@ -1303,9 +1319,12 @@ export class CallService {
 
       const outputDestination = audioContext.createMediaStreamDestination();
       processingNode.connect(outputDestination);
-      void audioContext.resume().catch(() => {
+      await audioContext.resume().catch(() => {
         // ignore
       });
+      if (audioContext.state !== "running") {
+        throw new Error("AudioContext not running.");
+      }
 
       const processedAudioTrack = outputDestination.stream.getAudioTracks()[0] ?? null;
       if (!processedAudioTrack) {

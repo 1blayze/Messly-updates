@@ -22,6 +22,13 @@
   min-height: 40px;
 }
 
+.voiceNetworkWrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
 .voiceNetworkButton {
   position: relative;
   width: 32px;
@@ -90,6 +97,15 @@
 .voiceNetworkButton:hover,
 .voiceNetworkButton:focus-visible {
   background: color-mix(in srgb, var(--profile-positive-soft) 62%, var(--profile-hover-surface));
+}
+
+.voiceNetworkPingLabel {
+  color: var(--profile-text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
 }
 
 .voiceHeaderMeta {

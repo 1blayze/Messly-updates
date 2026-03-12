@@ -5,7 +5,7 @@
   z-index: 70;
   pointer-events: none;
   background: #000;
-  border-top: 1px solid var(--border-subtle);
+  border-top: 0;
 }
 
 .video-call-wrapper.is-screen-share-mode {
@@ -25,7 +25,7 @@
   border-top: 1px solid var(--border-subtle);
   border-left: 0;
   border-right: 0;
-  border-bottom: 0;
+  border-bottom: 1px solid var(--border-subtle);
   background: #000;
   box-shadow: none;
 }
@@ -1103,7 +1103,7 @@
   height: 70px;
   border-radius: 999px;
   overflow: hidden;
-  border: 1px solid var(--call-card-border, rgba(255, 255, 255, 0.24));
+  border: 0;
   background-image:
     radial-gradient(circle at 52% 36%, rgba(9, 12, 19, 0.18) 0%, rgba(8, 12, 20, 0.62) 58%, rgba(7, 10, 17, 0.88) 100%),
     var(--call-card-avatar-image, radial-gradient(circle at 52% 36%, var(--call-card-glow-soft, rgba(106, 128, 176, 0.26)) 0%, var(--call-card-surface-strong, #101826) 58%, var(--call-card-deep, #0d1422) 100%));
@@ -1112,11 +1112,11 @@
   background-repeat: no-repeat;
   background-blend-mode: normal, normal;
   box-shadow: 0 8px 18px rgba(0, 0, 0, 0.35);
-  transition: border-color 120ms ease, box-shadow 120ms ease;
+  transition: box-shadow 120ms ease;
 }
 
 .video-call-participant.is-speaking {
-  border-color: rgba(72, 235, 142, 0.95);
+  border: 1px solid rgba(72, 235, 142, 0.95);
   box-shadow: 0 0 0 2px rgba(72, 235, 142, 0.38), 0 10px 24px rgba(40, 186, 110, 0.3);
 }
 
@@ -1689,10 +1689,7 @@
   border-radius: 12px;
   overflow: hidden;
   background: rgba(6, 9, 14, 0.92);
-  border-top: 1px solid rgba(255, 255, 255, 0.14);
-  border-left: 0;
-  border-right: 0;
-  border-bottom: 0;
+  border: 1px solid var(--border-subtle);
   box-shadow: 0 10px 22px rgba(0, 0, 0, 0.2);
 }
 
@@ -2091,7 +2088,7 @@
   height: 124px;
   border-radius: 14px;
   overflow: hidden;
-  border: 1px solid rgba(155, 164, 180, 0.42);
+  border: 1px solid var(--border-subtle);
   background: var(--call-card-deep, rgba(8, 11, 16, 0.9));
   box-shadow: 0 10px 24px rgba(0, 0, 0, 0.22);
   color: #f4f8ff;
@@ -2100,45 +2097,71 @@
   transition: transform 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
 }
 
+.video-call-screen-tile::before {
+  content: "";
+  position: absolute;
+  inset: -14px;
+  z-index: 0;
+  background-image: var(--call-card-avatar-image, radial-gradient(circle at 50% 45%, rgba(106, 128, 176, 0.46) 0%, rgba(16, 24, 38, 0.92) 70%, rgba(8, 11, 16, 0.98) 100%));
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  filter: blur(18px) saturate(1.22) brightness(0.88);
+  transform: scale(1.14);
+  opacity: 0.9;
+  transition: filter 160ms ease, transform 160ms ease, opacity 160ms ease;
+}
+
+.video-call-screen-tile::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background:
+    radial-gradient(circle at 68% 22%, rgba(255, 255, 255, 0.08) 0%, rgba(255, 255, 255, 0) 52%),
+    linear-gradient(165deg, rgba(7, 11, 18, 0.28) 0%, rgba(6, 9, 14, 0.72) 62%, rgba(5, 8, 12, 0.88) 100%);
+}
+
+.video-call-screen-tile > * {
+  position: relative;
+  z-index: 2;
+}
+
+.video-call-screen-tile.has-video::before,
+.video-call-screen-tile.has-video::after {
+  display: none;
+}
+
 .video-call-screen-tile--grid {
   width: auto;
   height: auto;
   aspect-ratio: 16 / 9;
   border-radius: 12px;
-  border-top: 1px solid rgba(255, 255, 255, 0.14);
-  border-left: 0;
-  border-right: 0;
-  border-bottom: 0;
+  border: 1px solid var(--border-subtle);
   box-shadow: 0 10px 22px rgba(0, 0, 0, 0.2);
 }
 
 .video-call-screen-tile--grid:hover,
 .video-call-screen-tile--grid:focus-visible {
-  border-top-color: rgba(255, 255, 255, 0.18);
-  border-left-color: transparent;
-  border-right-color: transparent;
-  border-bottom-color: transparent;
+  border-color: color-mix(in srgb, var(--border-subtle) 45%, rgba(214, 225, 255, 0.7));
   box-shadow: 0 14px 26px rgba(0, 0, 0, 0.26);
 }
 
 .video-call-screen-tile--grid.is-presenter,
 .video-call-screen-tile--grid.is-stage-focused {
-  border-top-color: rgba(255, 255, 255, 0.2);
-  border-left-color: transparent;
-  border-right-color: transparent;
-  border-bottom-color: transparent;
+  border-color: color-mix(in srgb, var(--border-subtle) 40%, rgba(224, 232, 250, 0.76));
 }
 
 .video-call-screen-tile:hover,
 .video-call-screen-tile:focus-visible {
   transform: translateY(-1px);
-  border-color: rgba(186, 194, 209, 0.72);
+  border-color: color-mix(in srgb, var(--border-subtle) 35%, rgba(224, 232, 250, 0.76));
   box-shadow: 0 14px 28px rgba(0, 0, 0, 0.34);
   outline: none;
 }
 
 .video-call-screen-tile.is-stage-focused {
-  border-color: rgba(206, 214, 228, 0.78);
+  border-color: color-mix(in srgb, var(--border-subtle) 32%, rgba(230, 238, 255, 0.82));
   box-shadow: 0 12px 24px rgba(0, 0, 0, 0.44);
 }
 

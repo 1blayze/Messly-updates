@@ -2,33 +2,37 @@ import { z } from "zod";
 import { supabase } from "../supabase";
 import { EdgeFunctionError, invokeEdgeGet, invokeEdgeJson } from "../edge/edgeClient";
 import { authService } from "../auth";
+import { getInMemorySession } from "../auth/authStore";
+import { getSessionClientDescriptor } from "./sessionClientInfo";
 import appPackage from "../../../package.json";
 
-const SESSION_TOKEN_STORAGE_PREFIX = "messly:security:session-token:";
 const SESSION_ID_STORAGE_PREFIX = "messly:security:session-id:";
 const LIST_SESSIONS_CACHE_TTL_MS = 8_000;
-let sessionsApiTemporarilyDisabled = false;
+
+let sessionsMutationApiTemporarilyDisabled = false;
 const listSessionsCacheByUid = new Map<string, { fetchedAt: number; sessions: LoginSessionView[] }>();
 const listSessionsInFlightByUid = new Map<string, Promise<LoginSessionView[]>>();
+
 let cachedAuthUid: string | null = null;
-
-void authService.getCurrentUserId().then((uid) => {
-  cachedAuthUid = uid;
-});
-
-supabase.auth.onAuthStateChange((_event, session) => {
-  cachedAuthUid = String(session?.user?.id ?? "").trim() || null;
-});
+let cachedAuthSessionId: string | null = null;
 
 const sessionViewSchema = z.object({
   id: z.string().uuid(),
+  recordId: z.string().uuid(),
+  deviceId: z.string().min(1),
+  clientType: z.string().min(1),
+  platform: z.string().min(1),
   device: z.string().min(1),
   os: z.string().min(1),
+  appVersion: z.string().min(1).max(32).nullable(),
   clientVersion: z.string().min(1).max(32).nullable(),
   location: z.string().min(1).nullable(),
   ipAddressMasked: z.string().min(1),
   createdAt: z.string().min(1),
+  lastSeenAt: z.string().min(1),
   loggedInLabel: z.string().min(1),
+  revokedAt: z.string().min(1).nullable(),
+  userAgent: z.string().min(1).nullable(),
   suspicious: z.boolean(),
 });
 
@@ -56,19 +60,87 @@ const listSessionsResponseSchema = z.object({
 
 const directUserSessionRowSchema = z.object({
   id: z.string().uuid(),
+  auth_session_id: z.string().uuid().nullable().optional(),
+  device_id: z.string().min(1).nullable().optional(),
+  client_type: z.string().min(1).nullable().optional(),
+  platform: z.string().min(1).nullable().optional(),
   device: z.string().min(1),
   os: z.string().min(1),
+  app_version: z.string().min(1).max(32).nullable().optional(),
   client_version: z.string().min(1).max(32).nullable(),
   city: z.string().min(1).nullable(),
   region: z.string().min(1).nullable(),
   country: z.string().min(1).nullable(),
+  location_label: z.string().min(1).nullable().optional(),
   ip_address: z.string().min(1),
   created_at: z.string().min(1),
+  last_seen_at: z.string().min(1),
+  user_agent: z.string().min(1).nullable().optional(),
   suspicious: z.boolean().nullable().optional(),
+  revoked_at: z.string().min(1).nullable().optional(),
 });
 
 export type LoginSessionView = z.infer<typeof sessionViewSchema>;
 export type CurrentLoginSessionStatus = "active" | "ended" | "unknown";
+
+function decodeSupabaseSessionId(tokenRaw: string | null | undefined): string | null {
+  const token = String(tokenRaw ?? "").trim();
+  if (!token) {
+    return null;
+  }
+
+  const [, payloadSegment = ""] = token.split(".");
+  if (!payloadSegment) {
+    return null;
+  }
+
+  try {
+    const normalizedPayload = payloadSegment.replace(/-/g, "+").replace(/_/g, "/");
+    const paddedPayload = normalizedPayload.padEnd(Math.ceil(normalizedPayload.length / 4) * 4, "=");
+    const payloadText = window.atob(paddedPayload);
+    const payload = JSON.parse(payloadText) as { session_id?: unknown };
+    const sessionId = String(payload.session_id ?? "").trim();
+    return sessionId || null;
+  } catch {
+    return null;
+  }
+}
+
+function updateCachedAuthState(): void {
+  const session = getInMemorySession();
+  cachedAuthUid = String(session?.user?.id ?? "").trim() || null;
+  cachedAuthSessionId = decodeSupabaseSessionId(session?.access_token ?? null);
+
+  if (cachedAuthUid && cachedAuthSessionId) {
+    setStoredSessionId(cachedAuthUid, cachedAuthSessionId);
+  }
+}
+
+void authService.getCurrentSession().then(() => {
+  updateCachedAuthState();
+}).catch(() => undefined);
+
+supabase.auth.onAuthStateChange((_event, session) => {
+  const previousUid = cachedAuthUid;
+  cachedAuthUid = String(session?.user?.id ?? "").trim() || null;
+  cachedAuthSessionId = decodeSupabaseSessionId(session?.access_token ?? null);
+
+  if (previousUid) {
+    invalidateListSessionsCache(previousUid);
+  }
+  if (cachedAuthUid) {
+    invalidateListSessionsCache(cachedAuthUid);
+  }
+
+  if (cachedAuthUid && cachedAuthSessionId) {
+    setStoredSessionId(cachedAuthUid, cachedAuthSessionId);
+    return;
+  }
+
+  if (previousUid) {
+    clearStoredSessionId(previousUid);
+  }
+});
 
 function invalidateListSessionsCache(uidRaw: string | null | undefined): void {
   const uid = String(uidRaw ?? "").trim();
@@ -78,24 +150,10 @@ function invalidateListSessionsCache(uidRaw: string | null | undefined): void {
   listSessionsCacheByUid.delete(uid);
 }
 
-function shouldDisableSessionsApiForError(error: unknown): boolean {
+function shouldDisableSessionsMutationApiForError(error: unknown): boolean {
   if (error instanceof EdgeFunctionError) {
     if (error.status === 404 && error.code === "NOT_FOUND") {
       return true;
-    }
-    if (error.status === 401) {
-      const code = String(error.code ?? "").trim().toUpperCase();
-      const message = String(error.message ?? "").trim().toLowerCase();
-      if (
-        code === "INVALID_TOKEN" ||
-        code === "UNAUTHENTICATED" ||
-        code === "UNAUTHORIZED" ||
-        message.includes("invalid jwt") ||
-        message.includes("sessao invalida") ||
-        message.includes("sessão inválida")
-      ) {
-        return true;
-      }
     }
     if (error.code === "EDGE_NETWORK_ERROR" || error.status === 0) {
       return true;
@@ -140,23 +198,6 @@ function shouldFallbackToEdgeSessionsList(error: unknown): boolean {
   }
 
   return message.includes("does not exist") || message.includes("schema cache");
-}
-
-function shouldRotateSessionToken(error: unknown): boolean {
-  if (!(error instanceof EdgeFunctionError)) {
-    return false;
-  }
-
-  if (error.status === 409 && String(error.code ?? "").trim().toUpperCase() === "SESSION_ALREADY_ENDED") {
-    return true;
-  }
-
-  const message = String(error.message ?? "").trim().toLowerCase();
-  return error.status === 409 && message.includes("sessao atual ja foi encerrada");
-}
-
-function buildStorageKey(uid: string): string {
-  return `${SESSION_TOKEN_STORAGE_PREFIX}${uid}`;
 }
 
 function buildSessionIdStorageKey(uid: string): string {
@@ -236,9 +277,12 @@ function formatLoggedInLabel(createdAtRaw: string): string {
 async function listActiveLoginSessionsDirect(): Promise<LoginSessionView[]> {
   const { data, error } = await supabase
     .from("user_sessions")
-    .select("id,device,os,client_version,city,region,country,ip_address,created_at,suspicious")
+    .select(
+      "id,auth_session_id,device_id,client_type,platform,device,os,app_version,client_version,city,region,country,location_label,ip_address,created_at,last_seen_at,user_agent,suspicious,revoked_at",
+    )
     .is("ended_at", null)
-    .order("created_at", { ascending: false });
+    .is("revoked_at", null)
+    .order("last_seen_at", { ascending: false });
 
   if (error) {
     throw error;
@@ -247,63 +291,28 @@ async function listActiveLoginSessionsDirect(): Promise<LoginSessionView[]> {
   return z
     .array(directUserSessionRowSchema)
     .parse(data ?? [])
-    .map((row) => ({
-      id: row.id,
-      device: row.device,
-      os: row.os,
-      clientVersion: row.client_version ?? null,
-      location: buildLocationLabel(row.city, row.region, row.country),
-      ipAddressMasked: maskIpAddress(row.ip_address),
-      createdAt: row.created_at,
-      loggedInLabel: formatLoggedInLabel(row.created_at),
-      suspicious: Boolean(row.suspicious),
-    }));
-}
-
-function generateSessionToken(): string {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return crypto.randomUUID();
-  }
-
-  const randomHex = () => Math.floor(Math.random() * 0xffff).toString(16).padStart(4, "0");
-  return `${randomHex()}${randomHex()}-${randomHex()}-4${randomHex().slice(1)}-8${randomHex().slice(1)}-${randomHex()}${randomHex()}${randomHex()}`;
-}
-
-function getStoredSessionToken(uid: string): string | null {
-  if (typeof window === "undefined") {
-    return null;
-  }
-
-  try {
-    const token = window.localStorage.getItem(buildStorageKey(uid));
-    return token && z.string().uuid().safeParse(token).success ? token : null;
-  } catch {
-    return null;
-  }
-}
-
-function setStoredSessionToken(uid: string, sessionToken: string): void {
-  if (typeof window === "undefined") {
-    return;
-  }
-
-  try {
-    window.localStorage.setItem(buildStorageKey(uid), sessionToken);
-  } catch {
-    // Ignore storage failures.
-  }
-}
-
-function clearStoredSessionToken(uid: string): void {
-  if (typeof window === "undefined") {
-    return;
-  }
-
-  try {
-    window.localStorage.removeItem(buildStorageKey(uid));
-  } catch {
-    // Ignore storage failures.
-  }
+    .map((row) => {
+      const sessionId = row.auth_session_id ?? row.id;
+      return {
+        id: sessionId,
+        recordId: row.id,
+        deviceId: row.device_id ?? `legacy:${row.id}`,
+        clientType: row.client_type ?? "unknown",
+        platform: row.platform ?? "unknown",
+        device: row.device,
+        os: row.os,
+        appVersion: row.app_version ?? row.client_version ?? null,
+        clientVersion: row.client_version ?? null,
+        location: row.location_label ?? buildLocationLabel(row.city, row.region, row.country),
+        ipAddressMasked: maskIpAddress(row.ip_address),
+        createdAt: row.created_at,
+        lastSeenAt: row.last_seen_at,
+        loggedInLabel: formatLoggedInLabel(row.created_at),
+        revokedAt: row.revoked_at ?? null,
+        userAgent: row.user_agent ?? null,
+        suspicious: Boolean(row.suspicious),
+      } satisfies LoginSessionView;
+    });
 }
 
 function getStoredSessionId(uid: string): string | null {
@@ -343,26 +352,21 @@ function clearStoredSessionId(uid: string): void {
   }
 }
 
-function ensureCurrentSessionToken(): { uid: string; sessionToken: string } {
+function getCurrentAuthSessionId(): string | null {
+  const directCached = String(cachedAuthSessionId ?? "").trim();
+  if (directCached) {
+    return directCached;
+  }
+
+  const session = getInMemorySession();
+  const decoded = decodeSupabaseSessionId(session?.access_token ?? null);
+  if (decoded) {
+    cachedAuthSessionId = decoded;
+    return decoded;
+  }
+
   const uid = getCurrentAuthUid();
-  if (!uid) {
-    throw new Error("AUTH_REQUIRED");
-  }
-
-  const existingToken = getStoredSessionToken(uid);
-  if (existingToken) {
-    return {
-      uid,
-      sessionToken: existingToken,
-    };
-  }
-
-  const createdToken = generateSessionToken();
-  setStoredSessionToken(uid, createdToken);
-  return {
-    uid,
-    sessionToken: createdToken,
-  };
+  return uid ? getStoredSessionId(uid) : null;
 }
 
 function getClientVersion(): string {
@@ -370,54 +374,49 @@ function getClientVersion(): string {
 }
 
 export async function recordLoginSession(): Promise<LoginSessionView | null> {
-  if (sessionsApiTemporarilyDisabled) {
+  const uid = getCurrentAuthUid();
+  const accessToken = await authService.getCurrentAccessToken();
+  const sessionId = getCurrentAuthSessionId() ?? decodeSupabaseSessionId(accessToken);
+  if (!uid || !sessionId || sessionsMutationApiTemporarilyDisabled) {
     return null;
   }
 
-  if (!(await hasCurrentAuthAccessToken())) {
+  if (!accessToken) {
     return null;
   }
 
-  const { uid, sessionToken } = ensureCurrentSessionToken();
-  const upsertSession = async (token: string): Promise<LoginSessionView> => {
+  const descriptor = getSessionClientDescriptor(getClientVersion());
+
+  try {
     const response = await invokeEdgeJson<
       {
         action: "upsert";
-        sessionToken: string;
-        clientVersion: string;
+        sessionId: string;
+        deviceId: string;
+        clientType: string;
+        platform: string;
+        clientName: string;
+        appVersion: string;
       },
       unknown
     >("sessions", {
       action: "upsert",
-      sessionToken: token,
-      clientVersion: getClientVersion(),
+      sessionId,
+      deviceId: descriptor.deviceId,
+      clientType: descriptor.clientType,
+      platform: descriptor.platform,
+      clientName: descriptor.name,
+      appVersion: descriptor.version,
     });
 
     const parsed = upsertSessionResponseSchema.parse(response);
+    cachedAuthSessionId = parsed.session.id;
     setStoredSessionId(uid, parsed.session.id);
     invalidateListSessionsCache(uid);
     return parsed.session;
-  };
-
-  try {
-    return await upsertSession(sessionToken);
   } catch (error) {
-    if (shouldRotateSessionToken(error)) {
-      const replacementToken = generateSessionToken();
-      setStoredSessionToken(uid, replacementToken);
-      try {
-        return await upsertSession(replacementToken);
-      } catch (retryError) {
-        if (shouldDisableSessionsApiForError(retryError)) {
-          sessionsApiTemporarilyDisabled = true;
-          return null;
-        }
-        throw retryError;
-      }
-    }
-
-    if (shouldDisableSessionsApiForError(error)) {
-      sessionsApiTemporarilyDisabled = true;
+    if (shouldDisableSessionsMutationApiForError(error)) {
+      sessionsMutationApiTemporarilyDisabled = true;
       return null;
     }
     throw error;
@@ -426,55 +425,44 @@ export async function recordLoginSession(): Promise<LoginSessionView | null> {
 
 export async function endCurrentLoginSession(): Promise<void> {
   const uid = getCurrentAuthUid();
+  const accessToken = await authService.getCurrentAccessToken();
+  const sessionId = getCurrentAuthSessionId() ?? decodeSupabaseSessionId(accessToken);
   if (!uid) {
     return;
   }
 
-  if (sessionsApiTemporarilyDisabled) {
-    clearStoredSessionToken(uid);
+  if (sessionsMutationApiTemporarilyDisabled || !sessionId) {
     clearStoredSessionId(uid);
     return;
   }
 
-  const sessionToken = getStoredSessionToken(uid);
-  if (!sessionToken) {
-    clearStoredSessionId(uid);
-    return;
-  }
-
-  if (!(await hasCurrentAuthAccessToken())) {
+  if (!accessToken) {
     invalidateListSessionsCache(uid);
-    clearStoredSessionToken(uid);
     clearStoredSessionId(uid);
     return;
   }
 
   try {
-    try {
-      const response = await invokeEdgeJson<
-        {
-          action: "end";
-          sessionToken: string;
-          clientVersion: string;
-        },
-        unknown
-      >("sessions", {
-        action: "end",
-        sessionToken,
-        clientVersion: getClientVersion(),
-      });
+    const response = await invokeEdgeJson<
+      {
+        action: "end";
+        sessionId: string;
+      },
+      unknown
+    >("sessions", {
+      action: "end",
+      sessionId,
+    });
 
-      endSessionResponseSchema.parse(response);
-    } catch (error) {
-      if (shouldDisableSessionsApiForError(error)) {
-        sessionsApiTemporarilyDisabled = true;
-        return;
-      }
-      throw error;
+    endSessionResponseSchema.parse(response);
+  } catch (error) {
+    if (shouldDisableSessionsMutationApiForError(error)) {
+      sessionsMutationApiTemporarilyDisabled = true;
+      return;
     }
+    throw error;
   } finally {
     invalidateListSessionsCache(uid);
-    clearStoredSessionToken(uid);
     clearStoredSessionId(uid);
   }
 }
@@ -485,12 +473,11 @@ export function clearCurrentLoginSessionStorage(): void {
     return;
   }
 
-  clearStoredSessionToken(uid);
   clearStoredSessionId(uid);
 }
 
 export async function endLoginSessionById(sessionId: string): Promise<void> {
-  if (sessionsApiTemporarilyDisabled) {
+  if (sessionsMutationApiTemporarilyDisabled) {
     return;
   }
 
@@ -505,20 +492,18 @@ export async function endLoginSessionById(sessionId: string): Promise<void> {
       {
         action: "endById";
         sessionId: string;
-        clientVersion: string;
       },
       unknown
     >("sessions", {
       action: "endById",
       sessionId: normalizedSessionId,
-      clientVersion: getClientVersion(),
     });
 
     endSessionResponseSchema.parse(response);
     invalidateListSessionsCache(uid);
   } catch (error) {
-    if (shouldDisableSessionsApiForError(error)) {
-      sessionsApiTemporarilyDisabled = true;
+    if (shouldDisableSessionsMutationApiForError(error)) {
+      sessionsMutationApiTemporarilyDisabled = true;
       return;
     }
     throw error;
@@ -526,10 +511,6 @@ export async function endLoginSessionById(sessionId: string): Promise<void> {
 }
 
 export async function listActiveLoginSessions(): Promise<LoginSessionView[]> {
-  if (sessionsApiTemporarilyDisabled) {
-    return [];
-  }
-
   const uid = getCurrentAuthUid();
   if (!uid) {
     return [];
@@ -551,79 +532,60 @@ export async function listActiveLoginSessions(): Promise<LoginSessionView[]> {
 
   const fetchPromise = (async (): Promise<LoginSessionView[]> => {
     try {
-      const directSessions = await listActiveLoginSessionsDirect();
-      listSessionsCacheByUid.set(uid, {
-        fetchedAt: Date.now(),
-        sessions: directSessions,
-      });
-      return directSessions;
-    } catch (error) {
-      if (shouldDisableSessionsApiForDirectError(error)) {
-        sessionsApiTemporarilyDisabled = true;
-        return [];
+      try {
+        const directSessions = await listActiveLoginSessionsDirect();
+        listSessionsCacheByUid.set(uid, {
+          fetchedAt: Date.now(),
+          sessions: directSessions,
+        });
+        return directSessions;
+      } catch (error) {
+        if (shouldDisableSessionsApiForDirectError(error)) {
+          return [];
+        }
+
+        if (!shouldFallbackToEdgeSessionsList(error)) {
+          throw error;
+        }
       }
 
-      if (!shouldFallbackToEdgeSessionsList(error)) {
+      try {
+        const response = await invokeEdgeGet<unknown>("sessions", {
+          retries: 1,
+          timeoutMs: 18_000,
+        });
+
+        const sessions = listSessionsResponseSchema.parse(response).sessions;
+        listSessionsCacheByUid.set(uid, {
+          fetchedAt: Date.now(),
+          sessions,
+        });
+        return sessions;
+      } catch (error) {
+        if (shouldDisableSessionsMutationApiForError(error)) {
+          return [];
+        }
         throw error;
       }
-    }
-
-    try {
-      const response = await invokeEdgeGet<unknown>("sessions", {
-        retries: 1,
-        timeoutMs: 18_000,
-      });
-
-      const sessions = listSessionsResponseSchema.parse(response).sessions;
-      listSessionsCacheByUid.set(uid, {
-        fetchedAt: Date.now(),
-        sessions,
-      });
-      return sessions;
-    } catch (error) {
-      if (shouldDisableSessionsApiForError(error)) {
-        sessionsApiTemporarilyDisabled = true;
-        return [];
-      }
-      throw error;
     } finally {
       listSessionsInFlightByUid.delete(uid);
     }
   })();
 
   listSessionsInFlightByUid.set(uid, fetchPromise);
-
   return fetchPromise;
 }
 
 export async function getCurrentLoginSessionStatus(): Promise<CurrentLoginSessionStatus> {
-  if (sessionsApiTemporarilyDisabled) {
-    return "unknown";
-  }
-
-  const uid = getCurrentAuthUid();
-  if (!uid) {
-    return "unknown";
-  }
-
-  const sessionId = getStoredSessionId(uid);
+  const sessionId = getCurrentAuthSessionId();
   if (!sessionId) {
     return "unknown";
   }
 
   const sessions = await listActiveLoginSessions();
-  if (sessionsApiTemporarilyDisabled) {
-    return "unknown";
-  }
-
   return sessions.some((session) => session.id === sessionId) ? "active" : "ended";
 }
 
 export function getCurrentLoginSessionId(): string | null {
-  const uid = getCurrentAuthUid();
-  if (!uid) {
-    return null;
-  }
-
-  return getStoredSessionId(uid);
+  return getCurrentAuthSessionId();
 }

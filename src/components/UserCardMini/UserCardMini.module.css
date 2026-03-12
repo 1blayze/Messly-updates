@@ -178,16 +178,16 @@
 .card:focus-within .metaSecondaryDefault,
 .mainButton:hover .metaSecondaryDefault,
 .mainButton:focus-visible .metaSecondaryDefault {
-  opacity: 0;
-  transform: translateY(-3px);
+  opacity: 1;
+  transform: translateY(0);
 }
 
 .card:hover .metaSecondaryUsername,
 .card:focus-within .metaSecondaryUsername,
 .mainButton:hover .metaSecondaryUsername,
 .mainButton:focus-visible .metaSecondaryUsername {
-  opacity: 1;
-  transform: translateY(0);
+  opacity: 0;
+  transform: translateY(3px);
 }
 
 .actions {

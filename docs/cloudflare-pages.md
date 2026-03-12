@@ -21,11 +21,12 @@ Cadastre no projeto do Cloudflare Pages:
 
 - `VITE_SUPABASE_URL`
 - `VITE_SUPABASE_PUBLISHABLE_KEY` (ou `VITE_SUPABASE_ANON_KEY`, legado)
-- `VITE_MESSLY_API_URL` = `https://messly.site`
-- `VITE_MESSLY_AUTH_API_URL` = `https://messly.site`
+- `VITE_MESSLY_API_URL` = `https://messly.site/api`
+- `VITE_MESSLY_AUTH_API_URL` = `https://messly.site/api`
 - `VITE_MESSLY_GATEWAY_URL` = `wss://gateway.messly.site/gateway`
 - `VITE_MESSLY_CDN_URL` = `https://cdn.messly.site`
 - `VITE_MESSLY_ASSETS_URL` = `https://messly.site`
+- `MESSLY_CDN_URL` (backend/gateway) = `https://cdn.messly.site`
 - `VITE_TURNSTILE_SITE_KEY`
 - `VITE_SPOTIFY_CLIENT_ID` (se usar conexao Spotify)
 - `VITE_SPOTIFY_REDIRECT_URI` = `https://messly.site/`
@@ -46,12 +47,31 @@ Padrao recomendado:
 
 Garanta no Cloudflare DNS/proxy que `gateway.messly.site` aponta para o servico que aceita upgrade WebSocket.
 
+Configuracao DNS recomendada no Cloudflare:
+
+- Type: `CNAME`
+- Name: `gateway`
+- Target: `<seu-servico-gateway>.onrender.com` (ou dominio equivalente do backend WS real)
+- Proxy status: `Proxied`
+
+Importante:
+
+- Nao aponte `gateway` para `messly.site` (isso volta para Pages e quebra handshake WebSocket).
+- O dominio "real" do backend e o host entregue pelo seu provedor (ex: Render `*.onrender.com`), usado como target do CNAME.
+
 ## 4) SPA fallback e headers
 
 Ja incluido no projeto:
 
+- `public/_redirects`: proxy canonico `/api/*`, `/auth/*` e `/media/*` para `gateway.messly.site`
 - `public/_redirects`: fallback para `index.html`
 - `public/_headers`: headers de seguranca e cache
+
+## 4.1) CDN publica do R2 (producao)
+
+- Use o custom domain do bucket R2 como base publica canonica (ex.: `https://cdn.messly.site`).
+- Nao use `*.r2.dev` nem `*.r2.cloudflarestorage.com` como URL final de leitura em producao.
+- Upload continua autenticado pelo backend/proxy; leitura publica fica na CDN customizada.
 
 ## 5) Publicacao
 
@@ -64,7 +84,7 @@ Ja incluido no projeto:
    - cadastro
    - captcha
    - realtime (via `wss://gateway.messly.site/gateway`)
-   - upload de midia
+   - upload de midia via `https://messly.site/api/media/upload/profile`
 
 ## 6) Observacoes
 

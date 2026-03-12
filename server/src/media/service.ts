@@ -5,6 +5,7 @@ import type { GatewayEnv } from "../infra/env";
 import type { Logger } from "../infra/logger";
 import type { AuthSessionManager } from "../sessions/sessionManager";
 import { buildCdnUrl, MediaR2Client } from "./r2";
+import { processProfileMediaUpload, ProfileMediaProcessorError } from "./profileProcessors";
 
 const SHA256_REGEX = /^[a-f0-9]{64}$/i;
 const SAFE_FILE_NAME_REGEX = /[^a-zA-Z0-9._-]/g;
@@ -53,6 +54,33 @@ export interface ProxyUploadInput {
   fileKey: string;
   contentType: string;
   body: Buffer;
+}
+
+export interface UploadProfileMediaInput {
+  kind: "avatar" | "banner";
+  fileName?: string | null;
+  contentType: string;
+  body: Buffer;
+}
+
+export interface UploadProfileMediaOutput {
+  uploaded: true;
+  kind: "avatar" | "banner";
+  key: string;
+  hash: string;
+  size: number;
+  contentType: string;
+  cdnUrl: string;
+  versionedUrl: string;
+  strategy: "server-proxy";
+  persistedProfile: {
+    avatar_key?: string | null;
+    avatar_hash?: string | null;
+    avatar_url?: string | null;
+    banner_key?: string | null;
+    banner_hash?: string | null;
+    banner_url?: string | null;
+  };
 }
 
 export interface CleanupOrphanFilesOutput {
@@ -225,11 +253,43 @@ function requiresConversation(kind: MediaUploadKind): boolean {
   return kind.startsWith("message_");
 }
 
+function appendVersionToUrl(url: string, hash: string): string {
+  const normalizedHash = String(hash ?? "").trim().toLowerCase();
+  if (!normalizedHash) {
+    return url;
+  }
+
+  try {
+    const parsed = new URL(url);
+    parsed.searchParams.set("v", normalizedHash);
+    return parsed.toString();
+  } catch {
+    const separator = url.includes("?") ? "&" : "?";
+    return `${url}${separator}v=${encodeURIComponent(normalizedHash)}`;
+  }
+}
+
+function toMediaServiceErrorFromProcessor(error: ProfileMediaProcessorError): MediaServiceError {
+  const code = String(error.code ?? "").trim().toUpperCase();
+  const status = code === "FILE_TOO_LARGE" ? 413 : 400;
+  return new MediaServiceError(status, code || "INVALID_IMAGE", error.message, error.details);
+}
+
 export class MediaService {
   private readonly r2: MediaR2Client;
 
   constructor(private readonly options: MediaServiceOptions) {
     this.r2 = new MediaR2Client(options.env);
+  }
+
+  private buildPublicMediaUrl(fileKey: string): string {
+    const url = buildCdnUrl(this.options.env.mediaCdnBaseUrl, fileKey);
+    this.options.logger?.info("media public url generated", {
+      mode: String(process.env.NODE_ENV ?? "").trim().toLowerCase() === "production" ? "production" : "development",
+      fileKey,
+      url,
+    });
+    return url;
   }
 
   async createUpload(accessToken: string, input: CreateUploadInput, ipAddress: string): Promise<CreateUploadOutput> {
@@ -269,11 +329,12 @@ export class MediaService {
     }
 
     if (alreadyExists) {
+      const cdnUrl = this.buildPublicMediaUrl(fileKey);
       return {
         uploadUrl: null,
         uploadHeaders: {},
         fileKey,
-        cdnUrl: buildCdnUrl(this.options.env.mediaCdnBaseUrl, fileKey),
+        cdnUrl,
         alreadyExists: true,
         expiresInSeconds: DEFAULT_SIGNED_UPLOAD_TTL_SECONDS,
       };
@@ -285,11 +346,12 @@ export class MediaService {
       DEFAULT_SIGNED_UPLOAD_TTL_SECONDS,
     );
 
+    const cdnUrl = this.buildPublicMediaUrl(fileKey);
     return {
       uploadUrl: signed.url,
       uploadHeaders: signed.headers,
       fileKey,
-      cdnUrl: buildCdnUrl(this.options.env.mediaCdnBaseUrl, fileKey),
+      cdnUrl,
       alreadyExists: false,
       expiresInSeconds: signed.expiresInSeconds,
     };
@@ -359,6 +421,162 @@ export class MediaService {
     return {
       uploaded: true,
       fileKey,
+    };
+  }
+
+  async uploadProfileMedia(
+    accessToken: string,
+    input: UploadProfileMediaInput,
+    ipAddress: string,
+  ): Promise<UploadProfileMediaOutput> {
+    const user = await this.authenticate(accessToken);
+    const kind = input.kind;
+    const body = Buffer.isBuffer(input.body) ? input.body : Buffer.from(input.body);
+
+    await this.enforceRateLimit(`media:profile-upload:${user.id}`, 20, 60_000);
+    await this.enforceRateLimit(`media:profile-upload-ip:${ipAddress}`, 40, 60_000);
+
+    this.options.logger?.info("Profile media upload started", {
+      event: "upload start",
+      environment: "server-proxy",
+      userId: user.id,
+      kind,
+      ipAddress,
+      reportedContentType: normalizeContentType(input.contentType),
+      fileName: sanitizeFileName(input.fileName),
+      sizeBytes: body.length,
+      strategy: "server-proxy",
+    });
+
+    let processed;
+    try {
+      processed = await processProfileMediaUpload(kind, body);
+    } catch (error) {
+      if (error instanceof ProfileMediaProcessorError) {
+        throw toMediaServiceErrorFromProcessor(error);
+      }
+      throw error;
+    }
+
+    const key = `${kind === "avatar" ? "avatars" : "banners"}/${user.id}.${processed.ext}`;
+    const normalizedUploadInput: CreateUploadInput = {
+      kind,
+      sha256: processed.hash,
+      contentType: processed.contentType,
+      sizeBytes: processed.size,
+      fileName: sanitizeFileName(input.fileName),
+      conversationId: null,
+    };
+
+    this.options.logger?.info("Profile media upload endpoint", {
+      event: "upload endpoint",
+      environment: "server-proxy",
+      userId: user.id,
+      kind,
+      key,
+      bucket: this.options.env.r2Bucket,
+      contentType: processed.contentType,
+      sizeBytes: processed.size,
+      strategy: "server-proxy",
+      method: "PUT",
+    });
+
+    try {
+      await this.r2.uploadObject(key, processed.buffer, processed.contentType);
+    } catch (error) {
+      this.options.logger?.error("Profile media upload failed", {
+        event: "upload error",
+        environment: "server-proxy",
+        userId: user.id,
+        kind,
+        key,
+        bucket: this.options.env.r2Bucket,
+        strategy: "server-proxy",
+        failureType: "storage",
+        message: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
+
+    this.options.logger?.info("Profile media upload response", {
+      event: "upload response",
+      environment: "server-proxy",
+      userId: user.id,
+      kind,
+      key,
+      bucket: this.options.env.r2Bucket,
+      contentType: processed.contentType,
+      sizeBytes: processed.size,
+      strategy: "server-proxy",
+    });
+
+    try {
+      await this.upsertAuthorizationRow(user.id, key, normalizedUploadInput, "uploaded");
+    } catch (error) {
+      if (!this.isMediaRegistryMissingError(error)) {
+        throw error;
+      }
+    }
+
+    const cdnUrl = this.buildPublicMediaUrl(key);
+    const versionedUrl = appendVersionToUrl(cdnUrl, processed.hash);
+
+    const persistedProfile =
+      kind === "avatar"
+        ? {
+            avatar_key: key,
+            avatar_hash: processed.hash,
+            avatar_url: versionedUrl,
+          }
+        : {
+            banner_key: key,
+            banner_hash: processed.hash,
+            banner_url: versionedUrl,
+          };
+
+    const { data, error } = await this.options.adminSupabase
+      .from("profiles")
+      .update(persistedProfile)
+      .eq("id", user.id)
+      .select("id")
+      .maybeSingle();
+
+    if (error) {
+      throw new MediaServiceError(500, "PROFILE_PERSISTENCE_FAILED", "Falha ao persistir a midia de perfil.", {
+        kind,
+        fileKey: key,
+        code: error.code,
+        details: error.details,
+      });
+    }
+
+    if (!data?.id) {
+      throw new MediaServiceError(404, "PROFILE_NOT_FOUND", "Perfil nao encontrado para persistir a midia.");
+    }
+
+    this.options.logger?.info("Profile media upload persisted", {
+      event: "upload persisted profile",
+      environment: "server-proxy",
+      userId: user.id,
+      kind,
+      key,
+      hash: processed.hash,
+      size: processed.size,
+      contentType: processed.contentType,
+      strategy: "server-proxy",
+    });
+
+    return {
+      uploaded: true,
+      kind,
+      key,
+      hash: processed.hash,
+      size: processed.size,
+      contentType: processed.contentType,
+      cdnUrl,
+      versionedUrl,
+      strategy: "server-proxy",
+      persistedProfile,
     };
   }
 

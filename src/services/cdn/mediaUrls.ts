@@ -5,8 +5,10 @@ import defaultAvatarSvgRaw from "../../assets/img/default-avatar.svg?raw";
 const PROFILE_AVATAR_PREFIX = "avatars/";
 const PROFILE_BANNER_PREFIX = "banners/";
 const ATTACHMENT_PREFIXES = ["attachments/", "messages/"] as const;
+const MANAGED_MEDIA_PREFIXES = [PROFILE_AVATAR_PREFIX, PROFILE_BANNER_PREFIX, ...ATTACHMENT_PREFIXES] as const;
 const SAFE_MEDIA_KEY_REGEX = /^[a-z0-9/_\-.]+$/i;
 const SAFE_HASH_REGEX = /^[a-f0-9]{32,128}$/i;
+const LEGACY_CDN_HOSTS = new Set(["cdn.messly.site"]);
 const DEFAULT_AVATAR_BACKGROUND_COLORS = [
   "#000000",
   "#FF4DA6",
@@ -39,6 +41,26 @@ const signedMediaInFlight = new Map<string, Promise<{ url: string; expiresAt: nu
 const signedMediaCacheKeyByUrl = new Map<string, string>();
 const signedMediaKeyByCacheKey = new Map<string, string>();
 const warmedImageUrls = new Map<string, number>();
+
+function logMediaUrl(level: "info" | "warn" | "error", message: string, details: Record<string, unknown>): void {
+  const writer = level === "warn" ? console.warn : level === "error" ? console.error : console.info;
+  writer(message, details);
+}
+
+function isLocalHostname(hostnameRaw: string | null | undefined): boolean {
+  const hostname = String(hostnameRaw ?? "").trim().toLowerCase();
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+}
+
+function isRawR2StorageHostname(hostnameRaw: string | null | undefined): boolean {
+  const hostname = String(hostnameRaw ?? "").trim().toLowerCase();
+  return hostname.endsWith(".r2.dev") || hostname.endsWith(".r2.cloudflarestorage.com");
+}
+
+function shouldRewriteAbsoluteMediaHost(hostnameRaw: string | null | undefined): boolean {
+  const hostname = String(hostnameRaw ?? "").trim().toLowerCase();
+  return LEGACY_CDN_HOSTS.has(hostname) || isRawR2StorageHostname(hostname);
+}
 
 function normalizeAvatarSeed(seedRaw: string | null | undefined): string {
   const normalized = String(seedRaw ?? "").trim().toLowerCase();
@@ -112,6 +134,41 @@ function sanitizeMediaHash(rawHash: string | null | undefined): string | null {
   return trimmed.toLowerCase();
 }
 
+function extractManagedMediaKeyFromPath(pathnameRaw: string | null | undefined): string | null {
+  const pathname = String(pathnameRaw ?? "").trim().replace(/^\/+/, "");
+  if (!pathname) {
+    return null;
+  }
+
+  const lowerPath = pathname.toLowerCase();
+  for (const prefix of MANAGED_MEDIA_PREFIXES) {
+    const index = lowerPath.indexOf(prefix);
+    if (index >= 0) {
+      return sanitizeMediaKey(pathname.slice(index));
+    }
+  }
+
+  return sanitizeMediaKey(pathname);
+}
+
+function isBlockedLegacyAbsoluteMediaUrl(rawUrl: string | null | undefined): boolean {
+  const normalized = String(rawUrl ?? "").trim();
+  if (!normalized) {
+    return false;
+  }
+
+  try {
+    const parsed = new URL(normalized);
+    const hostname = parsed.hostname.toLowerCase();
+    if (shouldRewriteAbsoluteMediaHost(hostname)) {
+      return true;
+    }
+    return import.meta.env.PROD && isLocalHostname(hostname);
+  } catch {
+    return false;
+  }
+}
+
 function sanitizeAbsoluteMediaUrl(rawUrl: string | null | undefined): string | null {
   if (!rawUrl) {
     return null;
@@ -128,16 +185,34 @@ function sanitizeAbsoluteMediaUrl(rawUrl: string | null | undefined): string | n
       return null;
     }
 
-    // Rewrite legacy hardcoded CDN host to the current configured media base.
-    if (parsed.hostname.toLowerCase() === "cdn.messly.site") {
-      const normalizedKey = sanitizeMediaKey(parsed.pathname.replace(/^\/+/, ""));
+    const hostname = parsed.hostname.toLowerCase();
+    if (import.meta.env.PROD && isLocalHostname(hostname)) {
+      logMediaUrl("error", "invalid production media public url", {
+        received: trimmed,
+      });
+      return null;
+    }
+
+    if (shouldRewriteAbsoluteMediaHost(hostname)) {
+      const normalizedKey = extractManagedMediaKeyFromPath(parsed.pathname);
       if (normalizedKey) {
         const rewritten = new URL(toCdnUrl(normalizedKey));
         parsed.searchParams.forEach((value, key) => {
           rewritten.searchParams.set(key, value);
         });
-        return rewritten.toString();
+        const rewrittenUrl = rewritten.toString();
+        logMediaUrl("warn", "cdn fallback detected", {
+          reason: "legacy-absolute-host",
+          received: trimmed,
+          rewritten: rewrittenUrl,
+        });
+        return rewrittenUrl;
       }
+      logMediaUrl(import.meta.env.PROD ? "error" : "warn", "cdn fallback detected", {
+        reason: "legacy-absolute-host-without-valid-key",
+        received: trimmed,
+      });
+      return import.meta.env.PROD ? null : parsed.toString();
     }
 
     return parsed.toString();
@@ -157,7 +232,11 @@ function hasExplicitPublicMediaBaseUrl(): boolean {
   );
 }
 
-function shouldUsePublicCdn(): boolean {
+function shouldUsePublicCdn(mediaKeyRaw?: string | null | undefined): boolean {
+  if (import.meta.env.PROD) {
+    return true;
+  }
+
   if (hasExplicitPublicMediaBaseUrl()) {
     return true;
   }
@@ -167,9 +246,15 @@ function shouldUsePublicCdn(): boolean {
   }
 
   const hostname = String(window.location.hostname ?? "").trim().toLowerCase();
-  if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1") {
+  if (isLocalHostname(hostname)) {
+    const normalizedKey = sanitizeMediaKey(mediaKeyRaw);
+    const isProfileMediaKey = Boolean(
+      normalizedKey
+      && (normalizedKey.startsWith(PROFILE_AVATAR_PREFIX) || normalizedKey.startsWith(PROFILE_BANNER_PREFIX)),
+    );
+
     // In local dev, prefer signed URLs to avoid depending on public CDN DNS/routes.
-    return false;
+    return isProfileMediaKey;
   }
 
   if (typeof window.electronAPI !== "undefined") {
@@ -333,7 +418,13 @@ async function fetchSignedMediaUrl(
 async function resolveMediaUrl(mediaKeyRaw: string | null | undefined, mediaHashRaw?: string | null): Promise<string> {
   const absoluteMediaUrl = sanitizeAbsoluteMediaUrl(mediaKeyRaw);
   if (absoluteMediaUrl) {
-    return appendHashToUrl(absoluteMediaUrl, sanitizeMediaHash(mediaHashRaw));
+    const resolvedAbsoluteUrl = appendHashToUrl(absoluteMediaUrl, sanitizeMediaHash(mediaHashRaw));
+    logMediaUrl("info", "media public url generated", {
+      strategy: "absolute",
+      mediaKey: mediaKeyRaw ?? null,
+      url: resolvedAbsoluteUrl,
+    });
+    return resolvedAbsoluteUrl;
   }
 
   const safeKey = sanitizeMediaKey(mediaKeyRaw);
@@ -342,8 +433,14 @@ async function resolveMediaUrl(mediaKeyRaw: string | null | undefined, mediaHash
   }
 
   const safeHash = sanitizeMediaHash(mediaHashRaw);
-  if (shouldUsePublicCdn()) {
-    return appendHashToUrl(toCdnUrl(safeKey), safeHash);
+  if (shouldUsePublicCdn(safeKey)) {
+    const resolvedPublicUrl = appendHashToUrl(toCdnUrl(safeKey), safeHash);
+    logMediaUrl("info", "media public url generated", {
+      strategy: "public-cdn",
+      mediaKey: safeKey,
+      url: resolvedPublicUrl,
+    });
+    return resolvedPublicUrl;
   }
 
   const cacheKey = safeHash ? `${safeKey}:${safeHash}` : safeKey;
@@ -355,7 +452,18 @@ async function resolveMediaUrl(mediaKeyRaw: string | null | undefined, mediaHash
 
   const signed = await fetchSignedMediaUrl(safeKey);
   if (!signed) {
-    return appendHashToUrl(`${getCdnBaseUrl()}/${safeKey}`, safeHash);
+    const fallbackUrl = appendHashToUrl(`${getCdnBaseUrl()}/${safeKey}`, safeHash);
+    logMediaUrl("warn", "cdn fallback detected", {
+      reason: "signed-read-unavailable",
+      mediaKey: safeKey,
+      fallbackUrl,
+    });
+    logMediaUrl("info", "media public url generated", {
+      strategy: "public-cdn-fallback",
+      mediaKey: safeKey,
+      url: fallbackUrl,
+    });
+    return fallbackUrl;
   }
 
   trackSignedMediaCacheEntry(cacheKey, safeKey, signed);
@@ -447,6 +555,12 @@ export async function getAttachmentUrl(mediaKeyOrUrl: string | null | undefined)
 
   const safeKey = sanitizeMediaKey(mediaKeyOrUrl);
   if (!safeKey || !ATTACHMENT_PREFIXES.some((prefix) => safeKey.startsWith(prefix))) {
+    if (isBlockedLegacyAbsoluteMediaUrl(mediaKeyOrUrl)) {
+      logMediaUrl("error", "invalid production media public url", {
+        received: String(mediaKeyOrUrl ?? "").trim(),
+      });
+      return "";
+    }
     return String(mediaKeyOrUrl ?? "");
   }
 

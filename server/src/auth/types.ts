@@ -4,6 +4,7 @@ import type { RateLimiter } from "../edge/rateLimiter";
 import type { SessionClientInfo, AuthSessionManager } from "../sessions/sessionManager";
 import type { GatewayEnv } from "../infra/env";
 import type { Logger } from "../infra/logger";
+import { extractClientIpFromHeaders } from "../sessions/loginLocation";
 
 export interface AuthDependencies {
   adminSupabase: SupabaseClient;
@@ -79,9 +80,7 @@ export function serializeAuthUser(user: User): SerializedAuthUser {
 }
 
 export function readAuthRequestContext(request: IncomingMessage): AuthRequestContext {
-  const forwardedFor = String(request.headers["x-forwarded-for"] ?? "").trim();
-  const firstForwardedIp = forwardedFor.split(",")[0]?.trim() ?? "";
-  const ipAddress = firstForwardedIp || String(request.socket.remoteAddress ?? "").trim() || "unknown";
+  const ipAddress = extractClientIpFromHeaders(request.headers, String(request.socket.remoteAddress ?? "").trim());
   const authorization = String(request.headers.authorization ?? "").trim();
   const authorizationToken = authorization.toLowerCase().startsWith("bearer ")
     ? authorization.slice(7).trim() || null

@@ -1,6 +1,7 @@
 import { getGatewayUrl } from "./client";
 import { getApiBaseUrl } from "../config/domains";
 import { getRuntimeAuthApiUrl } from "../config/runtimeApiConfig";
+import { getSessionClientDescriptor, type SessionClientDescriptor } from "../services/security/sessionClientInfo";
 
 const DEFAULT_TIMEOUT_MS = 18_000;
 
@@ -24,6 +25,8 @@ export interface AuthClientDescriptor {
   name: string;
   version: string;
   platform: string;
+  clientType: SessionClientDescriptor["clientType"];
+  deviceId: string;
 }
 
 export interface SignupApiRequest {
@@ -98,6 +101,24 @@ function normalizeBaseUrl(valueRaw: string): string | null {
   }
 }
 
+function normalizeApiBaseUrl(valueRaw: string): string | null {
+  const normalized = normalizeBaseUrl(valueRaw);
+  if (!normalized) {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(normalized);
+    const hostname = parsed.hostname.toLowerCase();
+    if ((hostname === "messly.site" || hostname === "www.messly.site") && (!parsed.pathname || parsed.pathname === "/")) {
+      parsed.pathname = "/api";
+    }
+    return parsed.toString().replace(/\/+$/, "");
+  } catch {
+    return normalized;
+  }
+}
+
 function isLocalHostname(hostnameRaw: string): boolean {
   const hostname = String(hostnameRaw ?? "").trim().toLowerCase();
   return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
@@ -126,12 +147,12 @@ function toHttpBaseFromGatewayUrl(gatewayUrlRaw: string): string | null {
 }
 
 function deriveAuthApiBaseUrl(): string {
-  const explicitUrl = normalizeBaseUrl(String(import.meta.env.VITE_MESSLY_AUTH_API_URL ?? ""));
+  const explicitUrl = normalizeApiBaseUrl(String(import.meta.env.VITE_MESSLY_AUTH_API_URL ?? ""));
   if (explicitUrl) {
     return explicitUrl;
   }
 
-  const runtimeConfiguredUrl = getRuntimeAuthApiUrl();
+  const runtimeConfiguredUrl = normalizeApiBaseUrl(getRuntimeAuthApiUrl() ?? "");
   if (runtimeConfiguredUrl) {
     return runtimeConfiguredUrl;
   }
@@ -148,7 +169,7 @@ function deriveAuthApiBaseUrl(): string {
     }
   }
 
-  const apiBaseUrl = normalizeBaseUrl(getApiBaseUrl());
+  const apiBaseUrl = normalizeApiBaseUrl(getApiBaseUrl());
   if (apiBaseUrl) {
     return apiBaseUrl;
   }
@@ -223,11 +244,7 @@ async function postJson<TResponse>(
 }
 
 export function buildAuthClientDescriptor(): AuthClientDescriptor {
-  return {
-    name: "messly-desktop",
-    version: String(import.meta.env.VITE_MESSLY_GATEWAY_CLIENT_VERSION ?? "0.0.5"),
-    platform: typeof window !== "undefined" ? String(window.electronAPI?.platform ?? "web") : "web",
-  };
+  return getSessionClientDescriptor(String(import.meta.env.VITE_MESSLY_GATEWAY_CLIENT_VERSION ?? "0.0.5"));
 }
 
 export async function signup(payload: SignupApiRequest): Promise<SignupApiResponse> {

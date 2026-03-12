@@ -25,6 +25,7 @@ import { ConnectionManager } from "./connectionManager";
 import { GatewayMetrics } from "../infra/metrics";
 import type { Logger } from "../infra/logger";
 import type { AuthSessionManager, SessionClientInfo } from "../sessions/sessionManager";
+import { extractClientIpFromHeaders } from "../sessions/loginLocation";
 
 interface GatewayServerOptions {
   supabase: SupabaseClient;
@@ -127,7 +128,7 @@ export class GatewayServer {
 
   start(): void {
     this.wss.on("connection", (socket, request) => {
-      const ipAddress = String(request?.socket?.remoteAddress ?? "unknown");
+      const ipAddress = extractClientIpFromHeaders(request.headers, String(request?.socket?.remoteAddress ?? ""));
       const userAgent = String(request?.headers["user-agent"] ?? "").trim() || null;
       const connectionId = randomUUID();
       const helloPayload: GatewayHelloPayload = {
@@ -258,12 +259,22 @@ export class GatewayServer {
         return;
       }
       this.sessions.updateHeartbeat(context.sessionId);
-      await this.options.authSessions?.touchAuthSessionId(context.authSessionId, {
+      const sessionStillActive = (await this.options.authSessions?.touchAuthSessionId(context.authSessionId, {
         userId: context.userId,
         ipAddress: context.ipAddress,
         userAgent: context.userAgent,
         client: context.client,
-      });
+      })) ?? true;
+      if (!sessionStillActive) {
+        this.send(socket, {
+          op: "INVALID_SESSION",
+          s: frame.s,
+          t: null,
+          d: { reason: "SESSION_REVOKED" },
+        });
+        socket.close(4001, "SESSION_REVOKED");
+        return;
+      }
       const heartbeatStart = typeof (frame.d as { startTs?: number })?.startTs === "number"
         ? (frame.d as { startTs?: number }).startTs
         : null;

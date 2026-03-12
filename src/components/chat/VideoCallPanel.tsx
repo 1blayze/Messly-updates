@@ -104,8 +104,24 @@ function StreamVideo({ className, stream, muted = false, videoRef }: StreamVideo
   return <video ref={ref} className={className} autoPlay playsInline muted={muted} />;
 }
 
+function isRenderableVideoTrack(track: MediaStreamTrack): boolean {
+  if (track.readyState !== "live") {
+    return false;
+  }
+
+  if (!track.muted) {
+    return true;
+  }
+
+  const settings = track.getSettings?.();
+  const width = Number(settings?.width ?? 0);
+  const height = Number(settings?.height ?? 0);
+  const displaySurface = String(settings?.displaySurface ?? "").trim().toLowerCase();
+  return (width > 0 && height > 0) || Boolean(displaySurface);
+}
+
 function hasVideoTrack(stream: MediaStream | null): boolean {
-  return Boolean(stream && stream.getVideoTracks().some((track) => track.readyState === "live"));
+  return Boolean(stream && stream.getVideoTracks().some((track) => isRenderableVideoTrack(track)));
 }
 
 function hasAudioTrack(stream: MediaStream | null): boolean {
@@ -1454,7 +1470,7 @@ export default function VideoCallPanel({
                         <button
                           key={`grid-${participant.id}`}
                           type="button"
-                          className={`video-call-screen-tile video-call-screen-tile--grid${isPresenterTile ? " is-presenter" : ""}${isParticipantSpeaking(participant.id) ? " is-speaking" : ""}`}
+                          className={`video-call-screen-tile video-call-screen-tile--grid${hasPreview ? " has-video" : ""}${isPresenterTile ? " is-presenter" : ""}${isParticipantSpeaking(participant.id) ? " is-speaking" : ""}`}
                           style={getParticipantCardStyle(participant)}
                           onClick={() => {
                             focusParticipantStage(participantId);
@@ -1628,7 +1644,7 @@ export default function VideoCallPanel({
                   >
                     {isParticipantStageFocused ? (
                       <div
-                        className="video-call-screen-tile video-call-screen-tile--share-preview"
+                        className="video-call-screen-tile video-call-screen-tile--share-preview has-video"
                         role="button"
                         tabIndex={0}
                         onClick={focusScreenShareStage}
@@ -1681,7 +1697,7 @@ export default function VideoCallPanel({
                         <button
                           key={participant.id}
                           type="button"
-                          className={`video-call-screen-tile${isPresenterTile ? " is-presenter" : ""}${isParticipantSpeaking(participant.id) ? " is-speaking" : ""}${focusedParticipant && participantId === focusedParticipant.id && isParticipantStageFocused ? " is-stage-focused" : ""}`}
+                          className={`video-call-screen-tile${hasPreview ? " has-video" : ""}${isPresenterTile ? " is-presenter" : ""}${isParticipantSpeaking(participant.id) ? " is-speaking" : ""}${focusedParticipant && participantId === focusedParticipant.id && isParticipantStageFocused ? " is-stage-focused" : ""}`}
                           style={getParticipantCardStyle(participant)}
                           onClick={() => {
                             focusParticipantStage(participantId);

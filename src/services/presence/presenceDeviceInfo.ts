@@ -27,7 +27,7 @@ function generateDeviceId(): string {
   return `device-${Date.now()}-${random}`;
 }
 
-function getOrCreatePresenceDeviceId(): string {
+export function getOrCreatePresenceDeviceId(): string {
   if (typeof window === "undefined") {
     return "server-device";
   }

@@ -187,10 +187,10 @@ async function lookupWithIpapi(ip: string): Promise<LoginLocation | null> {
 export function extractClientIpFromRequest(request: Request): string {
   const candidates = [
     request.headers.get("cf-connecting-ip"),
+    request.headers.get("x-forwarded-for"),
     request.headers.get("fly-client-ip"),
     request.headers.get("x-real-ip"),
     request.headers.get("x-client-ip"),
-    request.headers.get("x-forwarded-for"),
     request.headers.get("forwarded"),
   ]
     .filter((value): value is string => Boolean(value))

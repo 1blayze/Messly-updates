@@ -41,6 +41,9 @@ export interface GatewayEnv {
   mediaCdnBaseUrl: string;
 }
 
+const DEFAULT_MEDIA_CDN_BASE_URL = "https://cdn.messly.site";
+const LEGACY_MEDIA_CDN_ENV_KEYS = ["VITE_MEDIA_PUBLIC_BASE_URL", "VITE_R2_PUBLIC_BASE_URL"] as const;
+
 function parseOrigins(...values: Array<string | undefined>): string[] {
   const unique = new Set<string>();
   for (const value of values) {
@@ -63,6 +66,121 @@ function parseBoolean(value: string | undefined, fallback: boolean): boolean {
   return normalized === "1" || normalized === "true" || normalized === "yes";
 }
 
+function normalizeHttpUrl(valueRaw: string | null | undefined): string | null {
+  const normalized = String(valueRaw ?? "").trim();
+  if (!normalized) {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(normalized);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return null;
+    }
+    return parsed.toString().replace(/\/+$/, "");
+  } catch {
+    return null;
+  }
+}
+
+function isProductionRuntime(): boolean {
+  return String(process.env.NODE_ENV ?? "").trim().toLowerCase() === "production";
+}
+
+function isLocalHostname(hostnameRaw: string | null | undefined): boolean {
+  const hostname = String(hostnameRaw ?? "").trim().toLowerCase();
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+}
+
+function isRawR2StorageHostname(hostnameRaw: string | null | undefined): boolean {
+  const hostname = String(hostnameRaw ?? "").trim().toLowerCase();
+  return hostname.endsWith(".r2.dev") || hostname.endsWith(".r2.cloudflarestorage.com");
+}
+
+function resolveMediaCdnBaseUrl(): {
+  url: string;
+  source: string;
+  fallbackDetected: boolean;
+} {
+  const explicitPrimary = normalizeHttpUrl(process.env.MESSLY_CDN_URL ?? process.env.VITE_MESSLY_CDN_URL);
+  if (explicitPrimary) {
+    return {
+      url: explicitPrimary,
+      source: process.env.MESSLY_CDN_URL ? "MESSLY_CDN_URL" : "VITE_MESSLY_CDN_URL",
+      fallbackDetected: false,
+    };
+  }
+
+  for (const key of LEGACY_MEDIA_CDN_ENV_KEYS) {
+    const value = normalizeHttpUrl(process.env[key]);
+    if (value) {
+      return {
+        url: value,
+        source: key,
+        fallbackDetected: true,
+      };
+    }
+  }
+
+  return {
+    url: DEFAULT_MEDIA_CDN_BASE_URL,
+    source: "default-cdn-constant",
+    fallbackDetected: false,
+  };
+}
+
+function assertProductionMediaCdnBaseUrl(url: string): void {
+  try {
+    const parsed = new URL(url);
+    const hostname = parsed.hostname.toLowerCase();
+    const blocked =
+      parsed.protocol !== "https:" ||
+      isLocalHostname(hostname) ||
+      isRawR2StorageHostname(hostname);
+    if (!blocked) {
+      return;
+    }
+  } catch {
+    // handled below
+  }
+
+  console.error("invalid production media base url", {
+    received: url,
+    expected: "https://<custom-domain>",
+  });
+  throw new Error(`Invalid production media base URL: ${url}`);
+}
+
+function reportMediaCdnSelection(resolved: { url: string; source: string; fallbackDetected: boolean }): void {
+  const mode = isProductionRuntime() ? "production" : "development";
+  console.info("public media base url selected", {
+    mode,
+    source: resolved.source,
+    url: resolved.url,
+  });
+
+  if (resolved.fallbackDetected) {
+    console.warn("cdn fallback detected", {
+      mode,
+      source: resolved.source,
+      url: resolved.url,
+    });
+  }
+
+  try {
+    const parsed = new URL(resolved.url);
+    const hostname = parsed.hostname.toLowerCase();
+    if (!isLocalHostname(hostname) && !isRawR2StorageHostname(hostname)) {
+      console.info("custom domain active", {
+        mode,
+        hostname,
+      });
+    }
+  } catch {
+    // noop
+  }
+}
+
 export function readGatewayEnv(): GatewayEnv {
   const shardIndex = Number.parseInt(process.env.MESSLY_GATEWAY_SHARD_INDEX ?? "", 10);
   const eventBusChannel = String(process.env.MESSLY_GATEWAY_EVENT_CHANNEL ?? "messly:eventbus").trim();
@@ -80,18 +198,14 @@ export function readGatewayEnv(): GatewayEnv {
       process.env.SUPABASE_SECRET_KEY ??
       "",
   ).trim();
-  const mediaCdnBaseUrl = String(
-    process.env.MESSLY_CDN_URL ??
-      process.env.VITE_MESSLY_CDN_URL ??
-      process.env.VITE_MEDIA_PUBLIC_BASE_URL ??
-      process.env.VITE_R2_PUBLIC_BASE_URL ??
-      "https://cdn.messly.site",
-  )
-    .trim()
-    .replace(/\/+$/, "");
+  const resolvedMediaCdn = resolveMediaCdnBaseUrl();
+  if (isProductionRuntime()) {
+    assertProductionMediaCdnBaseUrl(resolvedMediaCdn.url);
+  }
+  reportMediaCdnSelection(resolvedMediaCdn);
 
   return {
-    port: Number.parseInt(process.env.MESSLY_GATEWAY_PORT ?? "8788", 10),
+    port: Number.parseInt(process.env.MESSLY_GATEWAY_PORT ?? process.env.PORT ?? "8788", 10),
     shardCount: Number.parseInt(process.env.MESSLY_GATEWAY_SHARD_COUNT ?? "3", 10),
     localShardIndex: Number.isFinite(shardIndex) ? Math.max(0, shardIndex) : null,
     supabaseUrl,
@@ -148,6 +262,6 @@ export function readGatewayEnv(): GatewayEnv {
     r2SecretAccessKey: String(process.env.R2_SECRET_ACCESS_KEY ?? "").trim(),
     r2Region: String(process.env.R2_REGION ?? "auto").trim() || "auto",
     r2ForcePathStyle: parseBoolean(process.env.R2_FORCE_PATH_STYLE, true),
-    mediaCdnBaseUrl,
+    mediaCdnBaseUrl: resolvedMediaCdn.url,
   };
 }

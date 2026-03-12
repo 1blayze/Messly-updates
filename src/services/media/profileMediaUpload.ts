@@ -10,12 +10,14 @@ import {
   BANNER_MIN_H,
   BANNER_MIN_W,
 } from "./imageLimits";
+import { MediaApiError, uploadProfileMediaProxy } from "../../api/mediaController";
 import { uploadMediaAsset } from "../uploadMedia";
 import { hashFile } from "../../utils/hashFile";
 import { getSupabaseFunctionHeaders } from "../supabase";
 import { EdgeFunctionError, invokeEdgeJson } from "../edge/edgeClient";
 import { uploadWithRetry } from "./uploadWithRetry";
 import { getRuntimeAppApiUrl } from "../../config/runtimeApiConfig";
+import { getApiBaseUrl, getCanonicalWebOrigin, getProfileMediaUploadUrl } from "../../config/domains";
 import { authService } from "../auth";
 
 export type ProfileMediaKind = "avatar" | "banner";
@@ -30,10 +32,22 @@ export type ProfileMediaUploadErrorCode =
 
 const ELECTRON_MEDIA_UPLOAD_ERROR_PREFIX = "MEDIA_UPLOAD_ERROR::";
 
+interface PersistedProfileMediaFields {
+  avatar_key?: string | null;
+  avatar_hash?: string | null;
+  avatar_url?: string | null;
+  banner_key?: string | null;
+  banner_hash?: string | null;
+  banner_url?: string | null;
+}
+
 interface UploadProfileMediaResponse {
   key: string;
   hash: string;
   size: number;
+  versionedUrl?: string | null;
+  strategy?: string | null;
+  persistedProfile?: PersistedProfileMediaFields | null;
 }
 
 interface EdgeUploadResponse {
@@ -51,8 +65,105 @@ interface EdgePresignUploadResponse {
   expiresIn?: unknown;
 }
 
+interface ProxyUploadProfileMediaResponse {
+  uploaded?: unknown;
+  kind?: unknown;
+  key?: unknown;
+  hash?: unknown;
+  size?: unknown;
+  contentType?: unknown;
+  cdnUrl?: unknown;
+  versionedUrl?: unknown;
+  strategy?: unknown;
+  persistedProfile?: unknown;
+}
+
 let r2UploadFunctionUnavailable = false;
 let r2PresignFunctionUnavailable = false;
+const PROFILE_MEDIA_DIAGNOSTIC_SOURCE = "profile-media-upload";
+
+type ProfileMediaUploadLogEvent =
+  | "upload start"
+  | "upload endpoint"
+  | "upload response"
+  | "upload error"
+  | "upload fallback selected"
+  | "upload final strategy"
+  | "upload persisted profile";
+
+function getUploadRuntimeEnvironment():
+  | "web"
+  | "desktop" {
+  return typeof window !== "undefined" && window.electronAPI ? "desktop" : "web";
+}
+
+function getUploadDiagnosticContext(): Record<string, unknown> {
+  const origin = typeof window !== "undefined" ? String(window.location.origin ?? "").trim() || null : null;
+  return {
+    environment: getUploadRuntimeEnvironment(),
+    origin,
+    canonicalWebOrigin: getCanonicalWebOrigin(),
+    apiBaseUrl: String(getApiBaseUrl() ?? "").trim() || null,
+    mediaProxyUrl: String(getProfileMediaUploadUrl() ?? "").trim() || null,
+  };
+}
+
+function logProfileMediaUpload(
+  event: ProfileMediaUploadLogEvent,
+  details: Record<string, unknown>,
+  level: "info" | "warn" | "error" = "info",
+): void {
+  const payload = {
+    ...getUploadDiagnosticContext(),
+    ...details,
+  };
+  try {
+    const line = `[profile-media] ${event}`;
+    if (level === "error") {
+      console.error(line, payload);
+    } else if (level === "warn") {
+      console.warn(line, payload);
+    } else {
+      console.info(line, payload);
+    }
+  } catch {
+    // Ignore renderer logging failures.
+  }
+
+  const logDiagnostic = typeof window !== "undefined" ? window.electronAPI?.logDiagnostic : undefined;
+  if (typeof logDiagnostic === "function") {
+    void logDiagnostic({
+      source: PROFILE_MEDIA_DIAGNOSTIC_SOURCE,
+      event,
+      level,
+      details: payload,
+    }).catch(() => undefined);
+  }
+}
+
+function isInvalidManagedMediaApiBaseUrl(valueRaw: string | null | undefined): boolean {
+  const value = String(valueRaw ?? "").trim();
+  if (!value) {
+    return true;
+  }
+
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return true;
+    }
+
+    const hostname = parsed.hostname.trim().toLowerCase();
+    const pathname = parsed.pathname.replace(/\/+$/, "");
+    if ((hostname === "messly.site" || hostname === "www.messly.site") && (!pathname || !pathname.startsWith("/api"))) {
+      return true;
+    }
+
+    return false;
+  } catch {
+    return true;
+  }
+}
 
 function toNumberOrUndefined(value: unknown): number | undefined {
   if (typeof value === "number" && Number.isFinite(value)) {
@@ -130,6 +241,39 @@ function getUploadErrorMessage(code: ProfileMediaUploadErrorCode, details: Recor
   }
 }
 
+function toProfileMediaUploadCode(value: unknown): ProfileMediaUploadErrorCode | null {
+  const code = String(value ?? "").trim().toUpperCase();
+  if (
+    code === "FILE_TOO_LARGE"
+    || code === "UNSUPPORTED_TYPE"
+    || code === "DIMENSIONS_TOO_SMALL"
+    || code === "DIMENSIONS_TOO_LARGE"
+    || code === "INVALID_IMAGE"
+    || code === "GIF_TOO_MANY_FRAMES"
+  ) {
+    return code;
+  }
+  return null;
+}
+
+function parseProfileMediaApiError(error: unknown): ProfileMediaUploadError | null {
+  if (!(error instanceof MediaApiError)) {
+    return null;
+  }
+
+  const code = toProfileMediaUploadCode(error.code);
+  if (!code) {
+    return null;
+  }
+
+  const details =
+    error.details && typeof error.details === "object" && !Array.isArray(error.details)
+      ? (error.details as Record<string, unknown>)
+      : {};
+
+  return new ProfileMediaUploadError(code, details, getUploadErrorMessage(code, details));
+}
+
 function parseElectronProfileMediaUploadError(error: unknown): ProfileMediaUploadError | null {
   const message = String(error instanceof Error ? error.message : error ?? "").trim();
   const markerIndex = message.indexOf(ELECTRON_MEDIA_UPLOAD_ERROR_PREFIX);
@@ -168,26 +312,25 @@ function parseElectronProfileMediaUploadError(error: unknown): ProfileMediaUploa
 }
 
 function shouldFallbackFromElectronUploadError(error: unknown): boolean {
-  // Installed desktop should stay on the Electron/native upload path.
-  // Falling back to browser-based edge upload causes CORS issues.
-  if (typeof window !== "undefined" && Boolean(window.electronAPI?.isPackaged)) {
-    return false;
-  }
-
   const message = String(error instanceof Error ? error.message : error ?? "").trim().toLowerCase();
   if (!message) {
     return false;
   }
 
-  if (message.includes("missing required environment variable")) {
-    return true;
-  }
-
-  if (message.includes("error invoking remote method") && message.includes("media:upload-profile")) {
-    return true;
-  }
-
-  return false;
+  return [
+    "missing required environment variable",
+    "managed media upload failed",
+    "profile media proxy upload failed",
+    "error invoking remote method",
+    "no handler registered for 'media:upload-profile'",
+    "invalid app api base url",
+    "network",
+    "timeout",
+    "fetch failed",
+    "econnrefused",
+    "enotfound",
+    "getaddrinfo",
+  ].some((pattern) => message.includes(pattern));
 }
 
 function getSupabaseFunctionsBaseUrl(): string | null {
@@ -216,16 +359,9 @@ function shouldSkipGatewayMediaFallback(): boolean {
   }
 
   const explicitApiUrl = String(import.meta.env.VITE_MESSLY_API_URL ?? "").trim();
-  if (explicitApiUrl) {
-    return false;
-  }
-
   const runtimeApiUrl = String(getRuntimeAppApiUrl() ?? "").trim();
-  if (runtimeApiUrl) {
-    return false;
-  }
-
-  return true;
+  const candidateApiUrl = explicitApiUrl || runtimeApiUrl;
+  return isInvalidManagedMediaApiBaseUrl(candidateApiUrl);
 }
 
 function parseEdgeUploadErrorMessage(payload: unknown, fallbackMessage: string): string {
@@ -452,6 +588,14 @@ async function uploadProfileMediaViaElectron(
   }
 
   try {
+    logProfileMediaUpload("upload start", {
+      transport: "electron-ipc",
+      kind,
+      userId,
+      fileName: uploadFile.name,
+      fileSize: uploadFile.size,
+      mimeType: uploadFile.type,
+    });
     const bytes = await uploadFile.arrayBuffer();
     const accessToken = await authService.getCurrentAccessToken().catch(() => null);
     const uploaded = await uploadProfileMedia({
@@ -463,19 +607,189 @@ async function uploadProfileMediaViaElectron(
       accessToken: accessToken || undefined,
     });
 
+    logProfileMediaUpload("upload response", {
+      transport: "electron-ipc",
+      kind,
+      userId,
+      key: uploaded.key,
+      size: uploaded.size,
+      strategy: uploaded.strategy ?? "electron-ipc",
+    });
+    if (uploaded.persistedProfile && typeof uploaded.persistedProfile === "object") {
+      logProfileMediaUpload("upload persisted profile", {
+        transport: "electron-ipc",
+        kind,
+        userId,
+        persistedProfile: uploaded.persistedProfile,
+      });
+    }
+    logProfileMediaUpload("upload final strategy", {
+      transport: "electron-ipc",
+      kind,
+      userId,
+      strategy: uploaded.strategy ?? "electron-ipc",
+    });
+    const versionedUrl = typeof uploaded.versionedUrl === "string" ? uploaded.versionedUrl.trim() : "";
+    if (versionedUrl) {
+      console.info("media public url generated", {
+        strategy: "profile-upload",
+        transport: "electron-ipc",
+        key: uploaded.key,
+        url: versionedUrl,
+      });
+    } else {
+      console.warn("cdn fallback detected", {
+        reason: "missing-versioned-url",
+        transport: "electron-ipc",
+        key: uploaded.key,
+      });
+    }
     return {
       key: uploaded.key,
       hash: uploaded.hash,
       size: uploaded.size,
+      versionedUrl: versionedUrl || null,
+      strategy: typeof uploaded.strategy === "string" ? uploaded.strategy : "electron-ipc",
+      persistedProfile:
+        uploaded.persistedProfile && typeof uploaded.persistedProfile === "object"
+          ? (uploaded.persistedProfile as PersistedProfileMediaFields)
+          : null,
     };
   } catch (error) {
     const parsedError = parseElectronProfileMediaUploadError(error);
     if (parsedError) {
+      logProfileMediaUpload("upload error", {
+        transport: "electron-ipc",
+        kind,
+        userId,
+        code: parsedError.code,
+        message: parsedError.message,
+        details: parsedError.details,
+      }, "error");
       throw parsedError;
     }
+
+    logProfileMediaUpload("upload error", {
+      transport: "electron-ipc",
+      kind,
+      userId,
+      message: error instanceof Error ? error.message : String(error ?? "unknown_error"),
+    }, "error");
+
     if (shouldFallbackFromElectronUploadError(error)) {
+      logProfileMediaUpload("upload response", {
+        transport: "electron-ipc",
+        kind,
+        userId,
+        fallback: "supabase-edge",
+      }, "warn");
       return null;
     }
+    throw error;
+  }
+}
+
+async function uploadProfileMediaViaOfficialProxy(
+  kind: ProfileMediaKind,
+  userId: string,
+  uploadFile: File,
+): Promise<UploadProfileMediaResponse> {
+  const endpoint = getProfileMediaUploadUrl();
+  logProfileMediaUpload("upload endpoint", {
+    transport: "official-profile-proxy",
+    kind,
+    userId,
+    endpoint,
+    method: "POST",
+  });
+
+  try {
+    const uploaded = await uploadProfileMediaProxy({
+      kind,
+      file: uploadFile,
+      fileName: uploadFile.name,
+    }) as ProxyUploadProfileMediaResponse;
+
+    const key = String(uploaded.key ?? "").trim();
+    const hash = String(uploaded.hash ?? "").trim().toLowerCase();
+    const size = Number(uploaded.size ?? uploadFile.size);
+    const strategy = String(uploaded.strategy ?? "server-proxy").trim() || "server-proxy";
+    const versionedUrl = String(uploaded.versionedUrl ?? uploaded.cdnUrl ?? "").trim() || null;
+    const persistedProfile =
+      uploaded.persistedProfile && typeof uploaded.persistedProfile === "object" && !Array.isArray(uploaded.persistedProfile)
+        ? (uploaded.persistedProfile as PersistedProfileMediaFields)
+        : null;
+    if (versionedUrl) {
+      console.info("media public url generated", {
+        strategy: "profile-upload",
+        transport: "official-profile-proxy",
+        key,
+        url: versionedUrl,
+      });
+    } else {
+      console.warn("cdn fallback detected", {
+        reason: "missing-versioned-url",
+        transport: "official-profile-proxy",
+        key,
+      });
+    }
+
+    logProfileMediaUpload("upload response", {
+      transport: "official-profile-proxy",
+      kind,
+      userId,
+      endpoint,
+      key,
+      size,
+      strategy,
+    });
+    logProfileMediaUpload("upload final strategy", {
+      transport: "official-profile-proxy",
+      kind,
+      userId,
+      strategy,
+    });
+    if (persistedProfile) {
+      logProfileMediaUpload("upload persisted profile", {
+        transport: "official-profile-proxy",
+        kind,
+        userId,
+        persistedProfile,
+      });
+    }
+
+    return {
+      key,
+      hash,
+      size: Number.isFinite(size) ? size : uploadFile.size,
+      versionedUrl,
+      strategy,
+      persistedProfile,
+    };
+  } catch (error) {
+    const parsedError = parseProfileMediaApiError(error);
+    if (parsedError) {
+      logProfileMediaUpload("upload error", {
+        transport: "official-profile-proxy",
+        kind,
+        userId,
+        endpoint,
+        code: parsedError.code,
+        message: parsedError.message,
+        details: parsedError.details,
+      }, "error");
+      throw parsedError;
+    }
+
+    logProfileMediaUpload("upload error", {
+      transport: "official-profile-proxy",
+      kind,
+      userId,
+      endpoint,
+      message: error instanceof Error ? error.message : String(error ?? "unknown_error"),
+      statusCode: error instanceof MediaApiError ? error.status : null,
+      code: error instanceof MediaApiError ? error.code : null,
+    }, "error");
     throw error;
   }
 }
@@ -506,6 +820,14 @@ async function uploadProfileMediaViaEdgeFunction(
   }
 
   const mediaKey = getProfileMediaKey(kind, userId);
+  const endpoint = `${functionBaseUrl}/r2-upload`;
+  logProfileMediaUpload("upload endpoint", {
+    transport: "supabase-edge-binary",
+    kind,
+    userId,
+    endpoint,
+    method: "POST",
+  });
   const response = await fetch(`${functionBaseUrl}/r2-upload`, {
     method: "POST",
     headers: {
@@ -525,17 +847,41 @@ async function uploadProfileMediaViaEdgeFunction(
     }
 
     const fallbackMessage = "Falha ao enviar imagem de perfil.";
+    logProfileMediaUpload("upload error", {
+      transport: "supabase-edge-binary",
+      kind,
+      userId,
+      endpoint,
+      status: response.status,
+      response: parsed,
+    }, "error");
     throw new Error(parseEdgeUploadErrorMessage(parsed, fallbackMessage));
   }
 
   const returnedKey = String(parsed?.key ?? "").trim() || mediaKey;
   const sha256 = await hashFile(normalizedFile);
   const uploadedSize = Number(parsed?.size ?? normalizedFile.size);
+  logProfileMediaUpload("upload response", {
+    transport: "supabase-edge-binary",
+    kind,
+    userId,
+    endpoint,
+    status: response.status,
+    key: returnedKey,
+    size: uploadedSize,
+  });
+  logProfileMediaUpload("upload final strategy", {
+    transport: "supabase-edge-binary",
+    kind,
+    userId,
+    strategy: "supabase-edge-binary",
+  });
 
   return {
     key: returnedKey,
     hash: sha256,
     size: Number.isFinite(uploadedSize) ? uploadedSize : normalizedFile.size,
+    strategy: "supabase-edge-binary",
   };
 }
 
@@ -550,6 +896,15 @@ async function uploadProfileMediaViaPresign(
 
   const mediaKey = getProfileMediaKey(kind, userId);
   let presignResponse: EdgePresignUploadResponse;
+  const endpoint = `${getSupabaseFunctionsBaseUrl() ?? "unknown"}/r2-presign`;
+
+  logProfileMediaUpload("upload endpoint", {
+    transport: "supabase-presign",
+    kind,
+    userId,
+    endpoint,
+    method: "POST",
+  });
 
   try {
     presignResponse = await invokeEdgeJson<
@@ -592,21 +947,57 @@ async function uploadProfileMediaViaPresign(
   const contentType = String(presignResponse?.contentType ?? normalizedFile.type ?? "application/octet-stream").trim()
     || "application/octet-stream";
 
-  await uploadWithRetry({
-    url: uploadUrl,
-    file: normalizedFile,
+  logProfileMediaUpload("upload start", {
+    transport: "supabase-presign",
+    kind,
+    userId,
+    endpoint: uploadUrl,
+    method: "PUT",
     contentType,
-    retries: 2,
-    timeoutMs: 60_000,
+    fileSize: normalizedFile.size,
   });
+
+  try {
+    await uploadWithRetry({
+      url: uploadUrl,
+      file: normalizedFile,
+      contentType,
+      retries: 1,
+      timeoutMs: 60_000,
+    });
+  } catch (error) {
+    logProfileMediaUpload("upload error", {
+      transport: "supabase-presign",
+      kind,
+      userId,
+      endpoint: uploadUrl,
+      message: error instanceof Error ? error.message : String(error ?? "unknown_error"),
+    }, "error");
+    throw error;
+  }
 
   const returnedKey = String(presignResponse?.key ?? "").trim() || mediaKey;
   const sha256 = await hashFile(normalizedFile);
+  logProfileMediaUpload("upload response", {
+    transport: "supabase-presign",
+    kind,
+    userId,
+    endpoint: uploadUrl,
+    key: returnedKey,
+    size: normalizedFile.size,
+  });
+  logProfileMediaUpload("upload final strategy", {
+    transport: "supabase-presign",
+    kind,
+    userId,
+    strategy: "supabase-presign-direct",
+  });
 
   return {
     key: returnedKey,
     hash: sha256,
     size: normalizedFile.size,
+    strategy: "supabase-presign-direct",
   };
 }
 
@@ -615,30 +1006,76 @@ export async function uploadProfileMediaAsset(
   userId: string,
   file: File,
 ): Promise<UploadProfileMediaResponse> {
+  const isDesktopRuntime = typeof window !== "undefined" && Boolean(window.electronAPI);
   ensureLocalConstraints(kind, file);
-  if (typeof window !== "undefined" && window.electronAPI) {
-    const electronUploadApi = window.electronAPI.uploadProfileMedia;
+  logProfileMediaUpload("upload start", {
+    transport: isDesktopRuntime ? "desktop" : "web",
+    kind,
+    userId,
+    fileName: file.name,
+    fileSize: file.size,
+    mimeType: file.type,
+  });
+
+  if (isDesktopRuntime) {
+    const electronUploadApi = window.electronAPI?.uploadProfileMedia;
     if (electronUploadApi) {
       const electronUpload = await uploadProfileMediaViaElectron(kind, userId, file);
       if (electronUpload) {
         return electronUpload;
       }
     }
-    throw new Error("Upload de imagem indisponivel no desktop. Reinicie o aplicativo e tente novamente.");
+    logProfileMediaUpload("upload fallback selected", {
+      transport: "desktop",
+      kind,
+      userId,
+      from: "electron-ipc",
+      to: "official-profile-proxy",
+      reason: "electron handler unavailable or returned fallback",
+    }, "warn");
+
+    return uploadProfileMediaViaOfficialProxy(kind, userId, file);
   }
 
   const normalizedFile = await normalizeProfileMedia(kind, file, userId);
-  const shouldPreferEdgeBinaryUpload = false;
-  if (shouldPreferEdgeBinaryUpload) {
-    const edgeFirstUpload = await uploadProfileMediaViaEdgeFunction(kind, userId, normalizedFile);
-    if (edgeFirstUpload) {
-      return edgeFirstUpload;
+
+  try {
+    const presignUpload = await uploadProfileMediaViaPresign(kind, userId, normalizedFile);
+    if (presignUpload) {
+      return presignUpload;
     }
+  } catch (error) {
+    logProfileMediaUpload("upload fallback selected", {
+      transport: "web",
+      kind,
+      userId,
+      from: "supabase-presign-direct",
+      to: "official-profile-proxy",
+      reason: error instanceof Error ? error.message : String(error ?? "unknown_error"),
+    }, "warn");
+    return uploadProfileMediaViaOfficialProxy(kind, userId, normalizedFile);
   }
 
-  const presignUpload = await uploadProfileMediaViaPresign(kind, userId, normalizedFile);
-  if (presignUpload) {
-    return presignUpload;
+  logProfileMediaUpload("upload fallback selected", {
+    transport: "web",
+    kind,
+    userId,
+    from: "supabase-presign-direct",
+    to: "official-profile-proxy",
+    reason: "presign_unavailable",
+  }, "warn");
+
+  try {
+    return await uploadProfileMediaViaOfficialProxy(kind, userId, normalizedFile);
+  } catch (proxyError) {
+    logProfileMediaUpload("upload fallback selected", {
+      transport: "web",
+      kind,
+      userId,
+      from: "official-profile-proxy",
+      to: "supabase-edge-binary",
+      reason: proxyError instanceof Error ? proxyError.message : String(proxyError ?? "unknown_error"),
+    }, "warn");
   }
 
   const edgeUpload = await uploadProfileMediaViaEdgeFunction(kind, userId, normalizedFile);
@@ -646,20 +1083,46 @@ export async function uploadProfileMediaAsset(
     return edgeUpload;
   }
 
-  if (shouldSkipGatewayMediaFallback()) {
-    throw new Error(
-      "Upload de imagem indisponivel: configure VITE_MESSLY_API_URL no build do desktop ou publique a Edge Function r2-presign.",
-    );
+  if (!shouldSkipGatewayMediaFallback()) {
+    logProfileMediaUpload("upload fallback selected", {
+      transport: "web",
+      kind,
+      userId,
+      from: "supabase-edge-binary",
+      to: "managed-media-api",
+      reason: "legacy_gateway_fallback",
+    }, "warn");
+    logProfileMediaUpload("upload endpoint", {
+      transport: "managed-media-api",
+      kind,
+      userId,
+      endpoint: String(getRuntimeAppApiUrl() ?? import.meta.env.VITE_MESSLY_API_URL ?? "").trim() || null,
+    });
+    const uploaded = await uploadMediaAsset({
+      kind,
+      file: normalizedFile,
+    });
+
+    logProfileMediaUpload("upload response", {
+      transport: "managed-media-api",
+      kind,
+      userId,
+      key: uploaded.fileKey,
+      size: normalizedFile.size,
+    });
+    logProfileMediaUpload("upload final strategy", {
+      transport: "managed-media-api",
+      kind,
+      userId,
+      strategy: "managed-media-api",
+    });
+    return {
+      key: uploaded.fileKey,
+      hash: uploaded.sha256,
+      size: normalizedFile.size,
+      strategy: "managed-media-api",
+    };
   }
 
-  const uploaded = await uploadMediaAsset({
-    kind,
-    file: normalizedFile,
-  });
-
-  return {
-    key: uploaded.fileKey,
-    hash: uploaded.sha256,
-    size: normalizedFile.size,
-  };
+  throw new Error(kind === "avatar" ? "Falha ao enviar avatar. Tente novamente." : "Falha ao enviar banner. Tente novamente.");
 }

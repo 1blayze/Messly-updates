@@ -6,10 +6,18 @@ type BannerImageProps = Omit<ImgHTMLAttributes<HTMLImageElement>, "src"> & {
   src?: string | null;
 };
 
+const LEGACY_CDN_HOSTS = new Set(["cdn.messly.site"]);
+
+function isRawR2StorageHostname(hostnameRaw: string | null | undefined): boolean {
+  const hostname = String(hostnameRaw ?? "").trim().toLowerCase();
+  return hostname.endsWith(".r2.dev") || hostname.endsWith(".r2.cloudflarestorage.com");
+}
+
 function normalizeLocalMediaUrl(src: string): string {
   try {
     const parsed = new URL(src);
-    if (parsed.hostname.toLowerCase() !== "cdn.messly.site") {
+    const hostname = parsed.hostname.toLowerCase();
+    if (!LEGACY_CDN_HOSTS.has(hostname) && !isRawR2StorageHostname(hostname)) {
       return src;
     }
 

@@ -8,6 +8,7 @@ import {
   type CreateUploadInput,
   type DeleteMediaInput,
   type ProxyUploadInput,
+  type UploadProfileMediaInput,
 } from "./service";
 
 const createUploadSchema = z.object({
@@ -42,6 +43,14 @@ function buildNotFoundBody() {
   };
 }
 
+function normalizeMediaPath(pathnameRaw: string): string {
+  const pathname = String(pathnameRaw ?? "").trim() || "/";
+  if (pathname === "/api/media" || pathname.startsWith("/api/media/")) {
+    return pathname.slice(4) || "/media";
+  }
+  return pathname;
+}
+
 async function readRawBody(request: IncomingMessage): Promise<Buffer> {
   const chunks: Buffer[] = [];
   for await (const chunk of request) {
@@ -65,7 +74,8 @@ export class MediaRouter {
 
   async handle(request: IncomingMessage, response: ServerResponse): Promise<boolean> {
     const url = new URL(request.url ?? "/", "http://messly.local");
-    if (!url.pathname.startsWith("/media")) {
+    const requestPath = normalizeMediaPath(url.pathname);
+    if (!requestPath.startsWith("/media")) {
       return false;
     }
 
@@ -84,8 +94,8 @@ export class MediaRouter {
         return true;
       }
 
-      if (request.method === "GET" && url.pathname.startsWith("/media/public/")) {
-        const fileKey = decodeURIComponent(url.pathname.slice("/media/public/".length));
+      if (request.method === "GET" && requestPath.startsWith("/media/public/")) {
+        const fileKey = decodeURIComponent(requestPath.slice("/media/public/".length));
         const location = await this.mediaService.getPublicReadUrl(fileKey);
         response.writeHead(302, {
           location,
@@ -96,7 +106,7 @@ export class MediaRouter {
         return true;
       }
 
-      if (request.method === "POST" && url.pathname === "/media/create-upload") {
+      if (request.method === "POST" && requestPath === "/media/create-upload") {
         const body = createUploadSchema.parse(await readJsonBody<CreateUploadInput>(request));
         const payload = await this.mediaService.createUpload(
           context.authorizationToken ?? "",
@@ -107,7 +117,29 @@ export class MediaRouter {
         return true;
       }
 
-      if (request.method === "POST" && url.pathname === "/media/upload-proxy") {
+      if (request.method === "POST" && requestPath === "/media/upload/profile") {
+        const kind = String(url.searchParams.get("kind") ?? "").trim().toLowerCase();
+        if (kind !== "avatar" && kind !== "banner") {
+          throw new AuthHttpError(400, "INVALID_MEDIA_KIND", "kind deve ser avatar ou banner.");
+        }
+        const fileName = String(url.searchParams.get("fileName") ?? "").trim() || null;
+        const contentType = String(request.headers["content-type"] ?? "").trim().toLowerCase();
+        const body = await readRawBody(request);
+        const payload = await this.mediaService.uploadProfileMedia(
+          context.authorizationToken ?? "",
+          {
+            kind,
+            fileName,
+            contentType,
+            body,
+          } satisfies UploadProfileMediaInput,
+          context.ipAddress,
+        );
+        writeJson(response, 200, payload, corsHeaders);
+        return true;
+      }
+
+      if (request.method === "POST" && requestPath === "/media/upload-proxy") {
         const fileKey = String(url.searchParams.get("fileKey") ?? "").trim();
         const contentType = String(request.headers["content-type"] ?? "").trim().toLowerCase();
         const body = await readRawBody(request);
@@ -124,7 +156,7 @@ export class MediaRouter {
         return true;
       }
 
-      if (request.method === "DELETE" && url.pathname === "/media") {
+      if (request.method === "DELETE" && requestPath === "/media") {
         const body = deleteMediaSchema.parse(await readJsonBody<DeleteMediaInput>(request));
         const payload = await this.mediaService.deleteMedia(context.authorizationToken ?? "", body);
         writeJson(response, 200, payload, corsHeaders);

@@ -2,7 +2,7 @@
   "name": "messly",
   "private": true,
   "productName": "Messly",
-  "version": "0.0.14",
+  "version": "0.0.15",
   "author": "Mackstony Labs",
   "type": "module",
   "main": "electron/main.cjs",
@@ -27,6 +27,7 @@
     "dist:win": "npm run package:win",
     "dist:publish": "npm run release:win",
     "preview": "vite preview",
+    "start:gateway": "tsx server/src/index.ts",
     "start:electron": "set ELECTRON_RUN_AS_NODE=&& electron .",
     "test:security": "node scripts/test-security.mjs",
     "test:e2ee": "node scripts/test-e2ee.mjs"
@@ -37,6 +38,7 @@
     "dotenv": "^17.3.1",
     "electron-updater": "^6.6.2",
     "sharp": "^0.34.5",
+    "tsx": "^4.20.6",
     "zod": "^4.3.6"
   },
   "devDependencies": {

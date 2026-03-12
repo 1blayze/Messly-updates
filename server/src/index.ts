@@ -62,6 +62,23 @@ async function buildRateLimiter(redisUrl: string, closeHooks: Array<() => Promis
 async function bootstrap(): Promise<void> {
   const env = readGatewayEnv();
   const logger = createLogger("gateway");
+  const mode = String(process.env.NODE_ENV ?? "").trim().toLowerCase() === "production" ? "production" : "development";
+  logger.info("public media base url selected", {
+    mode,
+    url: env.mediaCdnBaseUrl,
+  });
+  try {
+    const parsedMediaBaseUrl = new URL(env.mediaCdnBaseUrl);
+    const hostname = parsedMediaBaseUrl.hostname.toLowerCase();
+    if (!hostname.endsWith(".r2.dev") && !hostname.endsWith(".r2.cloudflarestorage.com")) {
+      logger.info("custom domain active", {
+        mode,
+        hostname,
+      });
+    }
+  } catch {
+    // noop: env validation already handles malformed/unsafe production URLs.
+  }
   const runtimeMetrics = new GatewayMetrics(process.env.HOSTNAME ?? "messly-gateway");
   const redisCloseHooks: Array<() => Promise<void>> = [];
 

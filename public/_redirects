@@ -1,3 +1,6 @@
+/api/* https://gateway.messly.site/api/:splat 200
+/auth/* https://gateway.messly.site/auth/:splat 200
+/media/* https://gateway.messly.site/media/:splat 200
 /gateway https://gateway.messly.site/gateway 307
 /gateway/* https://gateway.messly.site/gateway/:splat 307
 /* /index.html 200

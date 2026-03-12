@@ -21,6 +21,12 @@ import {
   removeKnownAccount,
   upsertKnownAccount,
 } from "../services/auth/accountRegistry";
+import {
+  clearCurrentLoginSessionStorage,
+  endCurrentLoginSession,
+  getCurrentLoginSessionStatus,
+  recordLoginSession,
+} from "../services/security/loginSessions";
 import { normalizeUsername } from "../shared/username";
 
 export interface AuthUser {
@@ -472,6 +478,73 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, [applySessionAndProfile, dispatch]);
 
+  useEffect(() => {
+    const currentAccessToken = String(session?.access_token ?? "").trim();
+    const currentUserId = String(session?.user?.id ?? "").trim();
+    if (!currentAccessToken || !currentUserId) {
+      return;
+    }
+
+    void recordLoginSession().catch((error) => {
+      if (import.meta.env.DEV) {
+        console.warn("[auth:record-login-session]", error);
+      }
+    });
+  }, [session?.access_token, session?.user?.id]);
+
+  useEffect(() => {
+    const currentAccessToken = String(session?.access_token ?? "").trim();
+    const currentUserId = String(session?.user?.id ?? "").trim();
+    if (!currentAccessToken || !currentUserId) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const assertCurrentSessionActive = async (): Promise<void> => {
+      try {
+        const status = await getCurrentLoginSessionStatus();
+        if (cancelled || status !== "ended") {
+          return;
+        }
+
+        await authService.logout().catch(async () => {
+          await supabase.auth.signOut({ scope: "local" }).catch(() => undefined);
+        });
+        clearCurrentLoginSessionStorage();
+      } catch (error) {
+        if (import.meta.env.DEV) {
+          console.warn("[auth:session-status]", error);
+        }
+      }
+    };
+
+    const intervalId = window.setInterval(() => {
+      void assertCurrentSessionActive();
+    }, 60_000);
+
+    const handleVisibilityChange = (): void => {
+      if (document.visibilityState === "visible") {
+        void assertCurrentSessionActive();
+      }
+    };
+
+    const handleFocus = (): void => {
+      void assertCurrentSessionActive();
+    };
+
+    void assertCurrentSessionActive();
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("focus", handleFocus);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("focus", handleFocus);
+    };
+  }, [session?.access_token, session?.user?.id]);
+
   const signIn = useCallback(
     async (email: string, password: string): Promise<{ user: AuthUser; profile: ProfileRow | null }> => {
       const normalizedUserEmail = normalizeEmail(email);
@@ -624,7 +697,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const signOut = useCallback(async (): Promise<void> => {
+    try {
+      await endCurrentLoginSession();
+    } catch {
+      // Best effort only. Local sign-out continues below.
+    }
     await authService.logout();
+    clearCurrentLoginSessionStorage();
     setSession(null);
     setUser(null);
     setProfile(null);

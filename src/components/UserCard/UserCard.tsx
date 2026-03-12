@@ -592,7 +592,8 @@ export default function UserCard({
               ) : null}
               <div className={styles.voiceStripHeader}>
                 {sidebarCallState.phase !== "disconnected" ? (
-                  <button
+                  <div className={styles.voiceNetworkWrap}>
+                    <button
                     type="button"
                     className={styles.voiceNetworkButton}
                     aria-label="Qualidade da conexão"
@@ -603,7 +604,9 @@ export default function UserCard({
                     }}
                   >
                     <MaterialSymbolIcon name="wifi" size={18} />
-                  </button>
+                    </button>
+                    <span className={styles.voiceNetworkPingLabel}>{averagePingLabel}</span>
+                  </div>
                 ) : null}
                 <div className={styles.voiceHeaderMeta}>
                   <p className={styles.voiceHeaderTitle}>{voiceStatusTitle}</p>

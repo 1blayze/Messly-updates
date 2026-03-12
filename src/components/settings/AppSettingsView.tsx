@@ -53,6 +53,7 @@ import {
   type LoginSessionView,
 } from "../../services/security/loginSessions";
 import {
+  getOrCreatePresenceDeviceId,
   getPresenceDeviceMetadataSnapshot,
   hydratePresenceDeviceMetadata,
   type PresenceDeviceMetadata,
@@ -92,16 +93,6 @@ const ref = () => null;
 async function remove(): Promise<void> {
   return;
 }
-const getOrCreatePresenceDeviceId = (): string => {
-  if (typeof window === "undefined") return "device";
-  const key = "messly:presence:device-id";
-  const existing = window.localStorage.getItem(key);
-  if (existing) return existing;
-  const created = crypto.randomUUID ? crypto.randomUUID() : `device-${Date.now()}`;
-  window.localStorage.setItem(key, created);
-  return created;
-};
-
 interface AppSettingsViewProps {
   onClose: () => void;
   currentUserId?: string | null;
@@ -164,14 +155,19 @@ interface BlockedAccountItem {
 }
 
 interface DeviceSessionItem {
-  deviceId: string;
+  id: string;
+  sessionId: string | null;
+  deviceId: string | null;
   platform: PresencePlatform;
   state: PresenceState;
   clientName: string;
   osName: string;
   locationLabel: string | null;
   lastActive: number | null;
+  createdAt: number | null;
   updatedAt: number | null;
+  appVersion: string | null;
+  ipAddressMasked: string | null;
   isCurrent: boolean;
   source: "presence" | "loginSession";
 }
@@ -304,7 +300,7 @@ interface CachedSidebarResolvedMediaFallback {
 }
 
 interface CachedLoginSessionsPayload {
-  v: 1;
+  v: 2;
   updatedAt: number;
   sessions: LoginSessionView[];
 }
@@ -764,6 +760,26 @@ function getErrorMessage(error: unknown): string {
   return "Não foi possível concluir o upload agora.";
 }
 
+function getProfileMediaErrorMessage(kind: ProfileMediaKind, error: unknown): string {
+  if (isProfileMediaUploadError(error)) {
+    return error.message;
+  }
+
+  const resolvedMessage = getErrorMessage(error);
+  if (
+    resolvedMessage.includes("Usuário ainda não sincronizado")
+    || resolvedMessage.includes("colunas de mídia")
+    || resolvedMessage.includes("Versão antiga do backend")
+    || resolvedMessage.includes("Reinicie o aplicativo")
+  ) {
+    return resolvedMessage;
+  }
+
+  return kind === "avatar"
+    ? "Falha ao enviar avatar. Tente novamente."
+    : "Falha ao enviar banner. Tente novamente.";
+}
+
 function getAccountActionErrorMessage(error: unknown): string {
   const firebaseCode =
     typeof error === "object" && error !== null && "code" in error
@@ -994,7 +1010,7 @@ function readCachedLoginSessions(scope: string | null | undefined): LoginSession
     }
 
     const parsed = JSON.parse(raw) as Partial<CachedLoginSessionsPayload>;
-    if (parsed.v !== 1) {
+    if (parsed.v !== 2) {
       return [];
     }
 
@@ -1011,25 +1027,41 @@ function readCachedLoginSessions(scope: string | null | undefined): LoginSession
           return null;
         }
 
+        const recordId = String((entry as Partial<LoginSessionView>)?.recordId ?? "").trim() || id;
+        const deviceId = String((entry as Partial<LoginSessionView>)?.deviceId ?? "").trim() || `legacy:${recordId}`;
+        const clientType = String((entry as Partial<LoginSessionView>)?.clientType ?? "").trim() || "unknown";
+        const platform = String((entry as Partial<LoginSessionView>)?.platform ?? "").trim() || "unknown";
         const device = String((entry as Partial<LoginSessionView>)?.device ?? "").trim() || "Cliente";
         const os = String((entry as Partial<LoginSessionView>)?.os ?? "").trim() || "Sistema";
+        const appVersionRaw = (entry as Partial<LoginSessionView>)?.appVersion;
         const clientVersionRaw = (entry as Partial<LoginSessionView>)?.clientVersion;
         const locationRaw = (entry as Partial<LoginSessionView>)?.location;
         const ipAddressMasked = String((entry as Partial<LoginSessionView>)?.ipAddressMasked ?? "").trim() || "0.0.0.0";
         const createdAt = String((entry as Partial<LoginSessionView>)?.createdAt ?? "").trim() || new Date().toISOString();
+        const lastSeenAt = String((entry as Partial<LoginSessionView>)?.lastSeenAt ?? "").trim() || createdAt;
         const loggedInLabel =
           String((entry as Partial<LoginSessionView>)?.loggedInLabel ?? "").trim() || "Logged in recently";
+        const revokedAtRaw = (entry as Partial<LoginSessionView>)?.revokedAt;
+        const userAgentRaw = (entry as Partial<LoginSessionView>)?.userAgent;
         const suspicious = Boolean((entry as Partial<LoginSessionView>)?.suspicious);
 
         return {
           id,
+          recordId,
+          deviceId,
+          clientType,
+          platform,
           device,
           os,
+          appVersion: appVersionRaw == null ? null : String(appVersionRaw).trim() || null,
           clientVersion: clientVersionRaw == null ? null : String(clientVersionRaw).trim() || null,
           location: locationRaw == null ? null : String(locationRaw).trim() || null,
           ipAddressMasked,
           createdAt,
+          lastSeenAt,
           loggedInLabel,
+          revokedAt: revokedAtRaw == null ? null : String(revokedAtRaw).trim() || null,
+          userAgent: userAgentRaw == null ? null : String(userAgentRaw).trim() || null,
           suspicious,
         } satisfies LoginSessionView;
       })
@@ -1056,7 +1088,7 @@ function writeCachedLoginSessions(scope: string | null | undefined, sessions: Lo
     }
 
     const payload: CachedLoginSessionsPayload = {
-      v: 1,
+      v: 2,
       updatedAt: Date.now(),
       sessions,
     };
@@ -1303,6 +1335,28 @@ function formatDeviceLocationLabel(locationLabelRaw: string | null | undefined):
 }
 
 function getPlatformFromLoginSession(session: LoginSessionView): PresencePlatform {
+  const normalizedClientType = session.clientType.trim().toLocaleLowerCase();
+  if (normalizedClientType === "mobile") {
+    return "mobile";
+  }
+  if (normalizedClientType === "desktop") {
+    return "desktop";
+  }
+  if (normalizedClientType === "web") {
+    return "browser";
+  }
+
+  const normalizedPlatform = session.platform.trim().toLocaleLowerCase();
+  if (normalizedPlatform === "android" || normalizedPlatform === "ios") {
+    return "mobile";
+  }
+  if (normalizedPlatform === "windows" || normalizedPlatform === "macos" || normalizedPlatform === "linux") {
+    return "desktop";
+  }
+  if (normalizedPlatform === "browser") {
+    return "browser";
+  }
+
   const device = session.device.trim().toLocaleLowerCase();
   const os = session.os.trim().toLocaleLowerCase();
 
@@ -1354,21 +1408,27 @@ function mapLoginSessionsToDeviceItems(
   currentSessionId: string | null,
   currentDeviceMetadata: PresenceDeviceMetadata,
 ): DeviceSessionItem[] {
-  const nextItems: DeviceSessionItem[] = sessions.map((session, index) => {
-    const isCurrent = currentSessionId ? session.id === currentSessionId : index === 0;
+  const nextItems: DeviceSessionItem[] = sessions.map((session) => {
+    const isCurrent = Boolean(currentSessionId && session.id === currentSessionId);
     const platform = getPlatformFromLoginSession(session);
     const parsedCreatedAt = Date.parse(session.createdAt);
+    const parsedLastSeenAt = Date.parse(session.lastSeenAt);
     const state: PresenceState = "online";
 
     return {
-      deviceId: session.id,
+      id: session.id,
+      sessionId: session.id,
+      deviceId: session.deviceId,
       platform,
       state,
-      clientName: isCurrent ? currentDeviceMetadata.clientName : session.device.trim() || "Cliente",
-      osName: isCurrent ? currentDeviceMetadata.osName : formatSessionOsName(session.os),
-      locationLabel: session.location ?? currentDeviceMetadata.locationLabel,
-      lastActive: Number.isFinite(parsedCreatedAt) ? parsedCreatedAt : null,
-      updatedAt: Number.isFinite(parsedCreatedAt) ? parsedCreatedAt : null,
+      clientName: session.device.trim() || (isCurrent ? currentDeviceMetadata.clientName : "Cliente"),
+      osName: formatSessionOsName(session.os),
+      locationLabel: session.location,
+      lastActive: Number.isFinite(parsedLastSeenAt) ? parsedLastSeenAt : null,
+      createdAt: Number.isFinite(parsedCreatedAt) ? parsedCreatedAt : null,
+      updatedAt: Number.isFinite(parsedLastSeenAt) ? parsedLastSeenAt : null,
+      appVersion: session.appVersion ?? session.clientVersion ?? null,
+      ipAddressMasked: session.ipAddressMasked ?? null,
       isCurrent,
       source: "loginSession" as const,
     };
@@ -1498,6 +1558,32 @@ async function updateUserMediaWithSchemaFallback(
   }
 
   return filtered as ProfileMediaUpdatePayload;
+}
+
+function toPersistedProfileMediaUpdates(
+  kind: ProfileMediaKind,
+  persistedProfile: unknown,
+): ProfileMediaUpdatePayload {
+  if (!persistedProfile || typeof persistedProfile !== "object" || Array.isArray(persistedProfile)) {
+    return {};
+  }
+
+  const relevantKeys =
+    kind === "avatar"
+      ? ["avatar_key", "avatar_hash", "avatar_url"]
+      : ["banner_key", "banner_hash", "banner_url"];
+
+  const normalized: ProfileMediaUpdatePayload = {};
+  for (const key of relevantKeys) {
+    if (!Object.prototype.hasOwnProperty.call(persistedProfile, key)) {
+      continue;
+    }
+
+    const rawValue = (persistedProfile as Record<string, unknown>)[key];
+    normalized[key] = typeof rawValue === "string" && rawValue.trim() ? rawValue.trim() : null;
+  }
+
+  return normalized;
 }
 
 async function updateUserProfileWithSchemaFallback(
@@ -2911,8 +2997,11 @@ export default function AppSettingsView({
       return;
     }
 
+    const currentLoginSessionId = getCurrentLoginSessionId();
     const currentFallbackSession: DeviceSessionItem | null = currentPresenceDeviceId
       ? {
+          id: currentLoginSessionId ?? currentPresenceDeviceId,
+          sessionId: currentLoginSessionId,
           deviceId: currentPresenceDeviceId,
           platform: currentPresenceDeviceMetadata.platform,
           state: "online",
@@ -2920,7 +3009,10 @@ export default function AppSettingsView({
           osName: currentPresenceDeviceMetadata.osName,
           locationLabel: currentPresenceDeviceMetadata.locationLabel,
           lastActive: Date.now(),
+          createdAt: Date.now(),
           updatedAt: Date.now(),
+          appVersion: String(appPackage.version ?? "").trim() || null,
+          ipAddressMasked: null,
           isCurrent: true,
           source: "presence",
         }
@@ -3012,11 +3104,10 @@ export default function AppSettingsView({
     if (cachedLoginSessions.length > 0) {
       const mappedCachedSessions = mapLoginSessionsToDeviceItems(
         cachedLoginSessions,
-        getCurrentLoginSessionId(),
+        currentLoginSessionId,
         currentPresenceDeviceMetadata,
       );
-      const currentOnlyCachedSessions = mappedCachedSessions.filter((session) => session.isCurrent);
-      setDeviceSessions(currentOnlyCachedSessions.length > 0 ? currentOnlyCachedSessions : mappedCachedSessions);
+      setDeviceSessions(mappedCachedSessions);
       setIsDeviceSessionsLoading(false);
     }
 
@@ -3038,7 +3129,7 @@ export default function AppSettingsView({
           setDeviceSessions(
             mapLoginSessionsToDeviceItems(
               visibleLoginSessions,
-              getCurrentLoginSessionId(),
+              currentLoginSessionId,
               currentPresenceDeviceMetadata,
             ),
           );
@@ -3428,7 +3519,7 @@ export default function AppSettingsView({
   );
   const openEndDeviceSessionModal = useCallback(
     (session: DeviceSessionItem): void => {
-      if (endingDeviceSessionId || !isUuidLike(session.deviceId)) {
+      if (endingDeviceSessionId || !isUuidLike(String(session.sessionId ?? ""))) {
         return;
       }
 
@@ -3450,7 +3541,7 @@ export default function AppSettingsView({
   }, [endingDeviceSessionId]);
   const handleEndDeviceSession = useCallback(
     async (session: DeviceSessionItem, password: string): Promise<boolean> => {
-      const sessionId = session.deviceId;
+      const sessionId = String(session.sessionId ?? "").trim();
       if (endingDeviceSessionId || !isUuidLike(sessionId)) {
         return false;
       }
@@ -3482,7 +3573,7 @@ export default function AppSettingsView({
         } else {
           markDeviceSessionRecentlyEnded(sessionId);
         }
-        setDeviceSessions((current) => current.filter((session) => session.deviceId !== sessionId));
+        setDeviceSessions((current) => current.filter((entry) => entry.id !== sessionId));
         return true;
       } catch (error) {
         console.error("[devices:end-session]", error);
@@ -4081,31 +4172,63 @@ export default function AppSettingsView({
 
   useEffect(() => {
     let isMounted = true;
+    let preloadImage: HTMLImageElement | null = null;
 
     const avatarSource = avatarKey ?? avatarUrl;
     const hasAvatarSource = Boolean(String(avatarSource ?? "").trim());
 
     void getAvatarUrl(dbUserId, avatarSource, avatarHash).then((url) => {
+      if (!isMounted) {
+        return;
+      }
+
       if (isMounted) {
         const resolvedUrl = String(url ?? "").trim() || getDefaultAvatarUrl(dbUserId || user?.uid || safeUsername);
-        if (temporaryAvatarUrlRef.current && url !== temporaryAvatarUrlRef.current) {
-          URL.revokeObjectURL(temporaryAvatarUrlRef.current);
-          temporaryAvatarUrlRef.current = null;
+        if (isDefaultAvatarUrl(resolvedUrl)) {
+          setAvatarSrc((current) => {
+            if (current === resolvedUrl || (isDefaultAvatarUrl(resolvedUrl) && current === "")) {
+              return current;
+            }
+            if (hasAvatarSource && current && !isDefaultAvatarUrl(current)) {
+              return current;
+            }
+            return "";
+          });
+          return;
         }
-        setAvatarSrc((current) => {
-          if (current === resolvedUrl || (isDefaultAvatarUrl(resolvedUrl) && current === "")) {
-            return current;
+
+        preloadImage = new Image();
+        preloadImage.decoding = "async";
+        preloadImage.onload = () => {
+          if (!isMounted) {
+            return;
           }
-          if (hasAvatarSource && isDefaultAvatarUrl(resolvedUrl) && current && !isDefaultAvatarUrl(current)) {
-            return current;
+          if (temporaryAvatarUrlRef.current && resolvedUrl !== temporaryAvatarUrlRef.current) {
+            URL.revokeObjectURL(temporaryAvatarUrlRef.current);
+            temporaryAvatarUrlRef.current = null;
           }
-          return isDefaultAvatarUrl(resolvedUrl) ? "" : resolvedUrl;
-        });
+          setAvatarSrc((current) => (current === resolvedUrl ? current : resolvedUrl));
+        };
+        preloadImage.onerror = () => {
+          if (!isMounted || !hasAvatarSource) {
+            return;
+          }
+          setAvatarSrc((current) => (current && !isDefaultAvatarUrl(current) ? current : ""));
+        };
+        preloadImage.src = resolvedUrl;
+        if (typeof preloadImage.decode === "function") {
+          void preloadImage.decode().catch(() => undefined);
+        }
       }
     });
 
     return () => {
       isMounted = false;
+      if (preloadImage) {
+        preloadImage.onload = null;
+        preloadImage.onerror = null;
+        preloadImage = null;
+      }
     };
   }, [avatarHash, avatarKey, avatarUrl, dbUserId, safeUsername, user?.uid]);
 
@@ -4121,11 +4244,6 @@ export default function AppSettingsView({
       const resolvedUrl = String(url ?? "").trim() || getDefaultBannerUrl();
       if (bannerKey && resolvedUrl === getDefaultBannerUrl()) {
         return;
-      }
-
-      if (temporaryBannerUrlRef.current && resolvedUrl !== temporaryBannerUrlRef.current) {
-        URL.revokeObjectURL(temporaryBannerUrlRef.current);
-        temporaryBannerUrlRef.current = null;
       }
 
       if (resolvedUrl === getDefaultBannerUrl()) {
@@ -4146,6 +4264,10 @@ export default function AppSettingsView({
       preloadImage.onload = () => {
         if (!isMounted) {
           return;
+        }
+        if (temporaryBannerUrlRef.current && resolvedUrl !== temporaryBannerUrlRef.current) {
+          URL.revokeObjectURL(temporaryBannerUrlRef.current);
+          temporaryBannerUrlRef.current = null;
         }
         setBannerSrc((current) => (current === resolvedUrl ? current : resolvedUrl));
       };
@@ -4232,35 +4354,46 @@ export default function AppSettingsView({
       setBannerFeedback(null);
     }
 
+    const previousVisualSrc = kind === "avatar" ? avatarSrc : bannerSrc;
+    const optimisticPreviewUrl = URL.createObjectURL(file);
+    setTemporaryPreviewUrl(kind, optimisticPreviewUrl);
+
     try {
       const previousKey = kind === "avatar" ? avatarKey : bannerKey;
       const uploaded = await uploadProfileMediaAsset(kind, writableUserId, file);
-      const updates: ProfileMediaUpdatePayload =
+      const canonicalVersionedUrl = String(uploaded.versionedUrl ?? "").trim() || null;
+      const fallbackUpdates: ProfileMediaUpdatePayload =
         kind === "avatar"
           ? {
               avatar_key: uploaded.key,
               avatar_hash: uploaded.hash,
-              avatar_url: null,
+              avatar_url: canonicalVersionedUrl,
             }
           : {
               banner_key: uploaded.key,
               banner_hash: uploaded.hash,
+              banner_url: canonicalVersionedUrl,
             };
+      const persistedUpdates = toPersistedProfileMediaUpdates(kind, uploaded.persistedProfile);
 
       let appliedUpdates: ProfileMediaUpdatePayload;
-      try {
-        appliedUpdates = await updateUserMediaWithSchemaFallback(writableUserId, updates);
-      } catch (error) {
-        if (!(error instanceof Error) || error.message !== USERS_UPDATE_ROW_NOT_FOUND_ERROR) {
-          throw error;
-        }
+      if (Object.keys(persistedUpdates).length > 0) {
+        appliedUpdates = persistedUpdates;
+      } else {
+        try {
+          appliedUpdates = await updateUserMediaWithSchemaFallback(writableUserId, fallbackUpdates);
+        } catch (error) {
+          if (!(error instanceof Error) || error.message !== USERS_UPDATE_ROW_NOT_FOUND_ERROR) {
+            throw error;
+          }
 
-        const refreshedUserId = await refreshDbUserIdFromSession();
-        if (!refreshedUserId || refreshedUserId === writableUserId) {
-          throw error;
+          const refreshedUserId = await refreshDbUserIdFromSession();
+          if (!refreshedUserId || refreshedUserId === writableUserId) {
+            throw error;
+          }
+          writableUserId = refreshedUserId;
+          appliedUpdates = await updateUserMediaWithSchemaFallback(writableUserId, fallbackUpdates);
         }
-        writableUserId = refreshedUserId;
-        appliedUpdates = await updateUserMediaWithSchemaFallback(writableUserId, updates);
       }
 
       if (kind === "avatar" && !Object.prototype.hasOwnProperty.call(appliedUpdates, "avatar_key")) {
@@ -4272,17 +4405,31 @@ export default function AppSettingsView({
       }
 
       if (kind === "avatar") {
-        setAvatarKey(Object.prototype.hasOwnProperty.call(appliedUpdates, "avatar_key") ? uploaded.key : null);
-        setAvatarHash(Object.prototype.hasOwnProperty.call(appliedUpdates, "avatar_hash") ? uploaded.hash : null);
+        setAvatarKey(
+          Object.prototype.hasOwnProperty.call(appliedUpdates, "avatar_key")
+            ? String(appliedUpdates.avatar_key ?? "").trim() || null
+            : null,
+        );
+        setAvatarHash(
+          Object.prototype.hasOwnProperty.call(appliedUpdates, "avatar_hash")
+            ? String(appliedUpdates.avatar_hash ?? "").trim() || null
+            : null,
+        );
         if (Object.prototype.hasOwnProperty.call(appliedUpdates, "avatar_url")) {
-          setAvatarUrl(null);
+          setAvatarUrl(String(appliedUpdates.avatar_url ?? "").trim() || null);
         }
-        setTemporaryPreviewUrl("avatar", URL.createObjectURL(file));
         setAvatarFeedback(null);
       } else {
-        setBannerKey(Object.prototype.hasOwnProperty.call(appliedUpdates, "banner_key") ? uploaded.key : null);
-        setBannerHash(Object.prototype.hasOwnProperty.call(appliedUpdates, "banner_hash") ? uploaded.hash : null);
-        setTemporaryPreviewUrl("banner", URL.createObjectURL(file));
+        setBannerKey(
+          Object.prototype.hasOwnProperty.call(appliedUpdates, "banner_key")
+            ? String(appliedUpdates.banner_key ?? "").trim() || null
+            : null,
+        );
+        setBannerHash(
+          Object.prototype.hasOwnProperty.call(appliedUpdates, "banner_hash")
+            ? String(appliedUpdates.banner_hash ?? "").trim() || null
+            : null,
+        );
         setBannerFeedback(null);
       }
 
@@ -4299,19 +4446,19 @@ export default function AppSettingsView({
       };
 
       if (Object.prototype.hasOwnProperty.call(appliedUpdates, "avatar_key")) {
-        detail.avatar_key = uploaded.key;
+        detail.avatar_key = String(appliedUpdates.avatar_key ?? "").trim() || null;
       }
       if (Object.prototype.hasOwnProperty.call(appliedUpdates, "avatar_hash")) {
-        detail.avatar_hash = uploaded.hash;
+        detail.avatar_hash = String(appliedUpdates.avatar_hash ?? "").trim() || null;
       }
       if (Object.prototype.hasOwnProperty.call(appliedUpdates, "avatar_url")) {
-        detail.avatar_url = null;
+        detail.avatar_url = String(appliedUpdates.avatar_url ?? "").trim() || null;
       }
       if (Object.prototype.hasOwnProperty.call(appliedUpdates, "banner_key")) {
-        detail.banner_key = uploaded.key;
+        detail.banner_key = String(appliedUpdates.banner_key ?? "").trim() || null;
       }
       if (Object.prototype.hasOwnProperty.call(appliedUpdates, "banner_hash")) {
-        detail.banner_hash = uploaded.hash;
+        detail.banner_hash = String(appliedUpdates.banner_hash ?? "").trim() || null;
       }
       if (kind === "banner") {
         detail.banner_color = normalizeBannerColor(savedBannerColor) ?? null;
@@ -4324,9 +4471,16 @@ export default function AppSettingsView({
       }
       return true;
     } catch (error) {
+      clearTemporaryPreviewUrl(kind);
+      if (kind === "avatar") {
+        setAvatarSrc(previousVisualSrc);
+      } else {
+        setBannerSrc(previousVisualSrc);
+      }
+
       const feedback: UploadFeedbackState = {
         tone: "error",
-        message: getErrorMessage(error),
+        message: getProfileMediaErrorMessage(kind, error),
       };
 
       if (kind === "avatar") {
@@ -6246,27 +6400,43 @@ export default function AppSettingsView({
                         <section className={styles.devicesGroup} aria-label="Dispositivo atual">
                           <h4 className={styles.devicesGroupTitle}>Dispositivo atual</h4>
 
-                          <article className={`${styles.deviceRow} ${styles.deviceRowCurrent}`}>
-                            <div className={styles.deviceIconWrap} aria-hidden="true">
-                              <MaterialSymbolIcon
-                                className={styles.deviceIcon}
-                                name={getDevicePlatformIcon(currentDeviceSession.platform)}
-                                size={24}
-                                filled={false}
-                              />
-                            </div>
+                          {(() => {
+                            const currentLastSeenLabel = formatRelativeLastSeen(
+                              currentDeviceSession.lastActive ?? currentDeviceSession.updatedAt,
+                            );
+                            const currentLocationLabel = formatDeviceLocationLabel(currentDeviceSession.locationLabel);
+                            const currentVersionLabel = currentDeviceSession.appVersion
+                              ? `v${currentDeviceSession.appVersion}`
+                              : null;
+                            const currentSubtitle = [
+                              currentLocationLabel,
+                              currentVersionLabel,
+                              currentDeviceSession.ipAddressMasked,
+                              currentLastSeenLabel,
+                            ]
+                              .filter((value): value is string => Boolean(value))
+                              .join(" · ");
 
-                            <div className={styles.deviceMeta}>
-                              <p className={styles.deviceTitle}>
-                                {`${getDevicePlatformLabel(currentDeviceSession.platform)} · ${currentDeviceSession.osName} · ${currentDeviceSession.clientName}`.toUpperCase()}
-                              </p>
-                              {formatDeviceLocationLabel(currentDeviceSession.locationLabel) ? (
-                                <p className={styles.deviceLocation}>
-                                  {formatDeviceLocationLabel(currentDeviceSession.locationLabel)}
-                                </p>
-                              ) : null}
-                            </div>
-                          </article>
+                            return (
+                              <article className={`${styles.deviceRow} ${styles.deviceRowCurrent}`}>
+                                <div className={styles.deviceIconWrap} aria-hidden="true">
+                                  <MaterialSymbolIcon
+                                    className={styles.deviceIcon}
+                                    name={getDevicePlatformIcon(currentDeviceSession.platform)}
+                                    size={24}
+                                    filled={false}
+                                  />
+                                </div>
+
+                                <div className={styles.deviceMeta}>
+                                  <p className={styles.deviceTitle}>
+                                    {`${getDevicePlatformLabel(currentDeviceSession.platform)} · ${currentDeviceSession.osName} · ${currentDeviceSession.clientName}`.toUpperCase()}
+                                  </p>
+                                  {currentSubtitle ? <p className={styles.deviceLocation}>{currentSubtitle}</p> : null}
+                                </div>
+                              </article>
+                            );
+                          })()}
                         </section>
                       ) : null}
 
@@ -6278,14 +6448,15 @@ export default function AppSettingsView({
                             {otherDeviceSessions.map((session) => {
                               const lastSeenLabel = formatRelativeLastSeen(session.lastActive ?? session.updatedAt);
                               const locationLabel = formatDeviceLocationLabel(session.locationLabel);
-                              const subtitle = [locationLabel, lastSeenLabel]
+                              const versionLabel = session.appVersion ? `v${session.appVersion}` : null;
+                              const subtitle = [locationLabel, versionLabel, session.ipAddressMasked, lastSeenLabel]
                                 .filter((value): value is string => Boolean(value))
                                 .join(" · ");
-                              const canEndSession = isUuidLike(session.deviceId);
-                              const isEndingSession = endingDeviceSessionId === session.deviceId;
+                              const canEndSession = isUuidLike(String(session.sessionId ?? ""));
+                              const isEndingSession = endingDeviceSessionId === session.sessionId;
 
                               return (
-                                <article key={session.deviceId} className={styles.deviceRow}>
+                                <article key={session.id} className={styles.deviceRow}>
                                   <div className={styles.deviceIconWrap} aria-hidden="true">
                                     <MaterialSymbolIcon
                                       className={styles.deviceIcon}

@@ -34,26 +34,35 @@ const clientVersionSchema = z
   .optional()
   .nullable();
 
+const clientTypeSchema = z.enum(["desktop", "web", "mobile", "unknown"]);
+const platformSchema = z.string().trim().min(1).max(32);
+const deviceIdSchema = z.string().trim().min(1).max(128);
+const clientNameSchema = z.string().trim().min(1).max(80).optional().nullable();
+
 const postPayloadSchema = z.discriminatedUnion("action", [
   z
     .object({
       action: z.literal("upsert"),
-      sessionToken: z.string().uuid(),
-      clientVersion: clientVersionSchema,
+      sessionId: z.string().uuid().optional().nullable(),
+      sessionToken: z.string().uuid().optional().nullable(),
+      deviceId: deviceIdSchema,
+      clientType: clientTypeSchema,
+      platform: platformSchema,
+      clientName: clientNameSchema,
+      appVersion: clientVersionSchema,
     })
     .strict(),
   z
     .object({
       action: z.literal("end"),
-      sessionToken: z.string().uuid(),
-      clientVersion: clientVersionSchema,
+      sessionId: z.string().uuid().optional().nullable(),
+      sessionToken: z.string().uuid().optional().nullable(),
     })
     .strict(),
   z
     .object({
       action: z.literal("endById"),
       sessionId: z.string().uuid(),
-      clientVersion: clientVersionSchema,
     })
     .strict(),
 ]);
@@ -62,12 +71,18 @@ interface UserSessionRow {
   id: string;
   user_id: string;
   session_token: string;
+  auth_session_id: string | null;
+  device_id: string | null;
+  client_type: string | null;
+  platform: string | null;
   ip_address: string;
   city: string | null;
   region: string | null;
   country: string | null;
+  location_label: string | null;
   device: string;
   os: string;
+  app_version: string | null;
   client_version: string | null;
   user_agent: string | null;
   suspicious: boolean;
@@ -76,17 +91,26 @@ interface UserSessionRow {
   created_at: string;
   last_seen_at: string;
   ended_at: string | null;
+  revoked_at: string | null;
 }
 
 interface SessionView {
   id: string;
+  recordId: string;
+  deviceId: string;
+  clientType: string;
+  platform: string;
   device: string;
   os: string;
+  appVersion: string | null;
   clientVersion: string | null;
   location: string | null;
   ipAddressMasked: string;
   createdAt: string;
+  lastSeenAt: string;
   loggedInLabel: string;
+  revokedAt: string | null;
+  userAgent: string | null;
   suspicious: boolean;
 }
 
@@ -175,6 +199,29 @@ async function hashUid(uidRaw: string): Promise<string> {
     .slice(0, 12);
 }
 
+function decodeSupabaseSessionId(tokenRaw: string): string | null {
+  const token = String(tokenRaw ?? "").trim();
+  if (!token) {
+    return null;
+  }
+
+  const [, payloadSegment = ""] = token.split(".");
+  if (!payloadSegment) {
+    return null;
+  }
+
+  try {
+    const normalizedPayload = payloadSegment.replace(/-/g, "+").replace(/_/g, "/");
+    const paddedPayload = normalizedPayload.padEnd(Math.ceil(normalizedPayload.length / 4) * 4, "=");
+    const payloadText = atob(paddedPayload);
+    const payload = JSON.parse(payloadText) as { session_id?: unknown };
+    const sessionId = String(payload.session_id ?? "").trim();
+    return sessionId || null;
+  } catch {
+    return null;
+  }
+}
+
 function parsePostPayload(payload: unknown): PostPayload {
   const parsed = postPayloadSchema.safeParse(payload);
   if (parsed.success) {
@@ -198,6 +245,11 @@ function toNullableText(value: unknown, maxLength: number): string | null {
   return normalized || null;
 }
 
+function resolveRequestedSessionId(payload: PostPayload, accessToken: string): string {
+  const authSessionId = decodeSupabaseSessionId(accessToken);
+  return authSessionId ?? "";
+}
+
 function buildLocationLabel(city: string | null, region: string | null, country: string | null): string | null {
   const parts = [city, region, country]
     .map((part) => toNullableText(part, 120))
@@ -211,6 +263,45 @@ function buildLocationFingerprint(city: string | null, region: string | null, co
     .map((part) => String(part ?? "").trim().toLowerCase())
     .filter(Boolean);
   return normalized.length > 0 ? normalized.join("|") : null;
+}
+
+function isUuidLike(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+function normalizePlatformLabel(platformRaw: string | null | undefined): string {
+  const platform = String(platformRaw ?? "").trim().toLowerCase();
+  switch (platform) {
+    case "win32":
+    case "windows":
+      return "windows";
+    case "darwin":
+    case "mac":
+    case "macos":
+      return "macos";
+    case "linux":
+      return "linux";
+    case "web":
+    case "browser":
+      return "browser";
+    case "android":
+      return "android";
+    case "ios":
+    case "iphone":
+    case "ipad":
+      return "ios";
+    default:
+      return platform || "unknown";
+  }
+}
+
+function resolveClientName(payload: Extract<PostPayload, { action: "upsert" }>, request: Request): string {
+  const explicit = toNullableText(payload.clientName, 80);
+  if (explicit) {
+    return explicit;
+  }
+
+  return toNullableText(getClientDeviceInfoFromRequest(request).device, 80) ?? "Unknown Client";
 }
 
 function maskIpAddress(ipAddressRaw: string): string {
@@ -261,24 +352,54 @@ function formatLoggedInLabel(createdAtRaw: string): string {
 
 function toSessionView(row: UserSessionRow): SessionView {
   return {
-    id: row.id,
+    id: row.auth_session_id ?? row.id,
+    recordId: row.id,
+    deviceId: toNullableText(row.device_id, 128) ?? `legacy:${row.id}`,
+    clientType: toNullableText(row.client_type, 32) ?? "unknown",
+    platform: toNullableText(row.platform, 32) ?? "unknown",
     device: row.device,
     os: row.os,
+    appVersion: toNullableText(row.app_version, 32),
     clientVersion: toNullableText(row.client_version, 32),
-    location: buildLocationLabel(row.city, row.region, row.country),
+    location: toNullableText(row.location_label, 240) ?? buildLocationLabel(row.city, row.region, row.country),
     ipAddressMasked: maskIpAddress(row.ip_address),
     createdAt: row.created_at,
+    lastSeenAt: row.last_seen_at,
     loggedInLabel: formatLoggedInLabel(row.created_at),
+    revokedAt: row.revoked_at ?? row.ended_at ?? null,
+    userAgent: toNullableText(row.user_agent, 512),
     suspicious: Boolean(row.suspicious),
   };
 }
 
-async function findSessionByToken(sessionToken: string): Promise<UserSessionRow | null> {
+async function findSessionByKey(sessionIdRaw: string): Promise<UserSessionRow | null> {
+  const sessionId = toNullableText(sessionIdRaw, 64);
+  if (!sessionId) {
+    return null;
+  }
+
   const supabase = getSupabaseAdminClient();
+  if (isUuidLike(sessionId)) {
+    const authSessionLookup = await supabase
+      .from("user_sessions")
+      .select("*")
+      .eq("auth_session_id", sessionId)
+      .limit(1)
+      .maybeSingle();
+
+    if (authSessionLookup.error) {
+      throw new HttpError(500, "SESSION_LOOKUP_FAILED", "Falha ao consultar a sessao atual.");
+    }
+
+    if (authSessionLookup.data) {
+      return authSessionLookup.data as UserSessionRow;
+    }
+  }
+
   const { data, error } = await supabase
     .from("user_sessions")
     .select("*")
-    .eq("session_token", sessionToken)
+    .eq("session_token", sessionId)
     .limit(1)
     .maybeSingle();
 
@@ -323,15 +444,24 @@ async function insertLoginSession(
   payload: PostPayload,
   request: Request,
   location: LoginLocation,
+  accessToken: string,
 ): Promise<{ session: UserSessionRow; created: boolean; securityNotificationTriggered: boolean }> {
-  const sessionToken = payload.sessionToken;
-  const existingSession = await findSessionByToken(sessionToken);
+  if (payload.action !== "upsert") {
+    throw new HttpError(400, "INVALID_PAYLOAD", "Payload de sessao invalido.");
+  }
+
+  const sessionId = resolveRequestedSessionId(payload, accessToken);
+  if (!sessionId) {
+    throw new HttpError(401, "INVALID_TOKEN", "Sessao atual invalida.");
+  }
+
+  const existingSession = await findSessionByKey(sessionId);
   if (existingSession) {
     if (existingSession.user_id !== userId) {
       throw new HttpError(403, "SESSION_TOKEN_CONFLICT", "Token de sessao invalido para este usuario.");
     }
 
-    if (existingSession.ended_at) {
+    if (existingSession.ended_at || existingSession.revoked_at) {
       throw new HttpError(409, "SESSION_ALREADY_ENDED", "A sessao atual ja foi encerrada.");
     }
 
@@ -341,15 +471,28 @@ async function insertLoginSession(
     const { data, error } = await supabase
       .from("user_sessions")
       .update({
+        auth_session_id: sessionId,
+        session_token: sessionId,
+        device_id: payload.deviceId,
+        client_type: payload.clientType,
+        platform: normalizePlatformLabel(payload.platform),
         ip_address: location.ip,
         city: toNullableText(location.city, 120),
         region: toNullableText(location.region, 120),
         country: toNullableText(location.country, 120),
-        device: toNullableText(clientInfo.device, 80) ?? "Unknown Client",
+        location_label: buildLocationLabel(
+          toNullableText(location.city, 120),
+          toNullableText(location.region, 120),
+          toNullableText(location.country, 120),
+        ),
+        device: resolveClientName(payload, request),
         os: toNullableText(clientInfo.os, 80) ?? "Unknown OS",
-        client_version: toNullableText(payload.clientVersion, 32),
+        app_version: toNullableText(payload.appVersion, 32),
+        client_version: toNullableText(payload.appVersion, 32),
         user_agent: toNullableText(clientInfo.userAgent, 512),
         last_seen_at: nowIso,
+        ended_at: null,
+        revoked_at: null,
       })
       .eq("id", existingSession.id)
       .select("*")
@@ -374,14 +517,24 @@ async function insertLoginSession(
     .from("user_sessions")
     .insert({
       user_id: userId,
-      session_token: sessionToken,
+      session_token: sessionId,
+      auth_session_id: sessionId,
+      device_id: payload.deviceId,
+      client_type: payload.clientType,
+      platform: normalizePlatformLabel(payload.platform),
       ip_address: location.ip,
       city: toNullableText(location.city, 120),
       region: toNullableText(location.region, 120),
       country: toNullableText(location.country, 120),
-      device: toNullableText(clientInfo.device, 80) ?? "Unknown Client",
+      location_label: buildLocationLabel(
+        toNullableText(location.city, 120),
+        toNullableText(location.region, 120),
+        toNullableText(location.country, 120),
+      ),
+      device: resolveClientName(payload, request),
       os: toNullableText(clientInfo.os, 80) ?? "Unknown OS",
-      client_version: toNullableText(payload.clientVersion, 32),
+      app_version: toNullableText(payload.appVersion, 32),
+      client_version: toNullableText(payload.appVersion, 32),
       user_agent: toNullableText(clientInfo.userAgent, 512),
       suspicious,
       suspicious_reason: suspicious ? SESSION_REASON_NEW_LOCATION : null,
@@ -403,8 +556,29 @@ async function insertLoginSession(
   };
 }
 
-async function endLoginSession(userId: string, sessionToken: string): Promise<UserSessionRow | null> {
-  const existingSession = await findSessionByToken(sessionToken);
+async function findSessionByRecordId(sessionIdRaw: string): Promise<UserSessionRow | null> {
+  const sessionId = toNullableText(sessionIdRaw, 64);
+  if (!sessionId) {
+    return null;
+  }
+
+  const supabase = getSupabaseAdminClient();
+  const { data, error } = await supabase
+    .from("user_sessions")
+    .select("*")
+    .eq("id", sessionId)
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    throw new HttpError(500, "SESSION_LOOKUP_FAILED", "Falha ao consultar a sessao selecionada.");
+  }
+
+  return (data as UserSessionRow | null) ?? null;
+}
+
+async function endLoginSession(userId: string, sessionIdRaw: string): Promise<UserSessionRow | null> {
+  const existingSession = await findSessionByKey(sessionIdRaw);
   if (!existingSession) {
     return null;
   }
@@ -413,7 +587,7 @@ async function endLoginSession(userId: string, sessionToken: string): Promise<Us
     throw new HttpError(403, "SESSION_TOKEN_CONFLICT", "Token de sessao invalido para este usuario.");
   }
 
-  if (existingSession.ended_at) {
+  if (existingSession.ended_at || existingSession.revoked_at) {
     return existingSession;
   }
 
@@ -423,6 +597,7 @@ async function endLoginSession(userId: string, sessionToken: string): Promise<Us
     .from("user_sessions")
     .update({
       ended_at: nowIso,
+      revoked_at: nowIso,
       last_seen_at: nowIso,
     })
     .eq("id", existingSession.id)
@@ -437,19 +612,7 @@ async function endLoginSession(userId: string, sessionToken: string): Promise<Us
 }
 
 async function endLoginSessionById(userId: string, sessionId: string): Promise<UserSessionRow | null> {
-  const supabase = getSupabaseAdminClient();
-  const { data: existingData, error: existingError } = await supabase
-    .from("user_sessions")
-    .select("*")
-    .eq("id", sessionId)
-    .limit(1)
-    .maybeSingle();
-
-  if (existingError) {
-    throw new HttpError(500, "SESSION_LOOKUP_FAILED", "Falha ao consultar a sessao selecionada.");
-  }
-
-  const existingSession = (existingData as UserSessionRow | null) ?? null;
+  const existingSession = (await findSessionByKey(sessionId)) ?? (await findSessionByRecordId(sessionId));
   if (!existingSession) {
     return null;
   }
@@ -458,15 +621,17 @@ async function endLoginSessionById(userId: string, sessionId: string): Promise<U
     throw new HttpError(403, "SESSION_TOKEN_CONFLICT", "Sessao invalida para este usuario.");
   }
 
-  if (existingSession.ended_at) {
+  if (existingSession.ended_at || existingSession.revoked_at) {
     return existingSession;
   }
 
   const nowIso = new Date().toISOString();
+  const supabase = getSupabaseAdminClient();
   const { data, error } = await supabase
     .from("user_sessions")
     .update({
       ended_at: nowIso,
+      revoked_at: nowIso,
       last_seen_at: nowIso,
     })
     .eq("id", existingSession.id)
@@ -486,7 +651,8 @@ async function listActiveSessions(accessToken: string): Promise<SessionView[]> {
     .from("user_sessions")
     .select("*")
     .is("ended_at", null)
-    .order("created_at", { ascending: false });
+    .is("revoked_at", null)
+    .order("last_seen_at", { ascending: false });
 
   if (error) {
     throw new HttpError(500, "SESSION_LIST_FAILED", "Falha ao listar as sessoes ativas.");
@@ -516,9 +682,7 @@ Deno.serve(async (request: Request) => {
       action: "auth",
     });
 
-    const auth = await validateSupabaseToken(request, {
-      allowAuthorizationFallback: false,
-    });
+    const auth = await validateSupabaseToken(request);
 
     const uidHash = await hashUid(auth.uid);
     const userId = await resolveUserId(auth.uid, auth.email);
@@ -567,11 +731,11 @@ Deno.serve(async (request: Request) => {
     );
 
     if (payload.action === "end") {
-      const session = await endLoginSession(userId, payload.sessionToken);
+      const session = await endLoginSession(userId, resolveRequestedSessionId(payload, auth.token));
       logStructured("info", "session_end_success", context, {
         status: 200,
         uidHash,
-        sessionId: session?.id ?? null,
+        sessionId: session?.auth_session_id ?? session?.id ?? null,
       });
 
       return responseJson(
@@ -589,7 +753,7 @@ Deno.serve(async (request: Request) => {
       logStructured("info", "session_end_by_id_success", context, {
         status: 200,
         uidHash,
-        sessionId: session?.id ?? null,
+        sessionId: session?.auth_session_id ?? session?.id ?? null,
       });
 
       return responseJson(
@@ -603,13 +767,13 @@ Deno.serve(async (request: Request) => {
     }
 
     const location = await getLoginLocation(requestIp);
-    const result = await insertLoginSession(userId, payload, request, location);
+    const result = await insertLoginSession(userId, payload, request, location, auth.token);
 
     if (result.securityNotificationTriggered) {
       logStructured("warn", "suspicious_login_location", context, {
         status: 200,
         uidHash,
-        sessionId: result.session.id,
+        sessionId: result.session.auth_session_id ?? result.session.id,
         ipAddress: location.ip,
         city: location.city || null,
         region: location.region || null,
@@ -619,7 +783,7 @@ Deno.serve(async (request: Request) => {
       logStructured("info", "session_upsert_success", context, {
         status: 200,
         uidHash,
-        sessionId: result.session.id,
+        sessionId: result.session.auth_session_id ?? result.session.id,
         created: result.created,
       });
     }

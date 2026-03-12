@@ -66,9 +66,11 @@ export interface GatewayHelloPayload {
 export interface GatewayIdentifyPayload {
   token: string;
   client: {
-    name: "messly-desktop";
+    name: string;
     version: string;
     platform: string;
+    clientType: "desktop" | "web" | "mobile" | "unknown";
+    deviceId: string;
   };
   subscriptions: GatewaySubscription[];
 }

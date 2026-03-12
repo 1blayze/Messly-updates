@@ -1,6 +1,7 @@
 import { getGatewayUrl, getSupabaseAccessToken } from "../api/client";
 import { GatewayClient, type GatewayClientState } from "../gateway/client";
 import { createGatewayEventRouter } from "../gateway/router";
+import { authService } from "./auth";
 import type {
   GatewayDispatchEventType,
   GatewayDispatchPayloadMap,
@@ -9,6 +10,7 @@ import type {
   GatewayPublishPayloadMap,
   GatewaySubscription,
 } from "../gateway/protocol";
+import { getSessionClientDescriptor } from "./security/sessionClientInfo";
 import { gatewayActions } from "../stores/gatewaySlice";
 import { messlyStore } from "../stores/store";
 
@@ -51,11 +53,7 @@ class MesslyGatewayService {
       this.client = new GatewayClient({
         url: resolvedGatewayUrl,
         tokenProvider: getSupabaseAccessToken,
-        clientInfo: {
-          name: "messly-desktop",
-          version: String(import.meta.env.VITE_MESSLY_GATEWAY_CLIENT_VERSION ?? "0.0.5"),
-          platform: typeof window !== "undefined" ? String(window.electronAPI?.platform ?? "web") : "web",
-        },
+        clientInfo: getSessionClientDescriptor(String(import.meta.env.VITE_MESSLY_GATEWAY_CLIENT_VERSION ?? "0.0.5")),
       });
 
       const router = createGatewayEventRouter(messlyStore.dispatch, () => ({
@@ -194,6 +192,11 @@ class MesslyGatewayService {
   }
 
   private handleGatewayFrame(frame: GatewayFrame): void {
+    if (frame.op === "INVALID_SESSION") {
+      void authService.logout().catch(() => undefined);
+      return;
+    }
+
     if (frame.op !== "DISPATCH" || !frame.t) {
       return;
     }

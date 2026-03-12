@@ -40,6 +40,16 @@ interface UploadProfileMediaResult {
   key: string;
   hash: string;
   size: number;
+  versionedUrl?: string | null;
+  strategy?: string | null;
+  persistedProfile?: {
+    avatar_key?: string | null;
+    avatar_hash?: string | null;
+    avatar_url?: string | null;
+    banner_key?: string | null;
+    banner_hash?: string | null;
+    banner_url?: string | null;
+  } | null;
 }
 
 interface UploadAttachmentPayload {
@@ -297,6 +307,9 @@ interface ElectronStartupSnapshotApiConfig {
   gatewayUrl: string | null;
   authApiUrl: string | null;
   appApiUrl: string | null;
+  webOrigin?: string | null;
+  shellOrigin?: string | null;
+  mediaProxyUrl?: string | null;
 }
 
 interface ElectronStartupSnapshotCacheHints {
