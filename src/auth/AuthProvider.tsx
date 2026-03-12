@@ -357,27 +357,36 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      setIsLoading(true);
-      try {
-        let ensuredProfile = await ensureProfileForUser(mappedUser.raw, {
-          preferredUsername: options.preferredUsername ?? mappedUser.raw.user_metadata?.username,
-          displayName: options.displayName ?? mappedUser.displayName ?? mappedUser.email ?? null,
+      const loadEnsuredProfile = async (targetUser: AuthUser): Promise<ProfileRow | null> => {
+        let ensuredProfile = await ensureProfileForUser(targetUser.raw, {
+          preferredUsername: options.preferredUsername ?? targetUser.raw.user_metadata?.username,
+          displayName: options.displayName ?? targetUser.displayName ?? targetUser.email ?? null,
         });
 
         if (!ensuredProfile) {
-          const exists = await profileExists(mappedUser.uid);
+          const exists = await profileExists(targetUser.uid);
           if (!exists) {
-            await authService.clearLocalSession().catch(() => undefined);
-            setSession(null);
-            setUser(null);
-            setProfile(null);
-            setError("Sua conta não existe mais. Faça login novamente.");
-            dispatch(authActions.authSignedOut());
-            setAuthReady(true);
-            setIsLoading(false);
-            return;
+            return null;
           }
-          ensuredProfile = await fetchProfileById(mappedUser.uid);
+          ensuredProfile = await fetchProfileById(targetUser.uid);
+        }
+
+        return ensuredProfile;
+      };
+
+      setIsLoading(true);
+      try {
+        const ensuredProfile = await loadEnsuredProfile(mappedUser);
+        if (!ensuredProfile) {
+          await authService.clearLocalSession().catch(() => undefined);
+          setSession(null);
+          setUser(null);
+          setProfile(null);
+          setError("Sua conta nao existe mais. Faca login novamente.");
+          dispatch(authActions.authSignedOut());
+          setAuthReady(true);
+          setIsLoading(false);
+          return;
         }
 
         setProfile(ensuredProfile);
@@ -396,12 +405,57 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           console.error("[auth:profile]", profileError);
         }
         if (isAuthSessionInvalidError(profileError)) {
+          const refreshedSession = await authService.refreshSession().catch(() => null);
+          const refreshedUser = mapSupabaseUser(refreshedSession?.user ?? null);
+          if (refreshedSession && refreshedUser && refreshedUser.uid === mappedUser.uid) {
+            try {
+              lastSessionAccessTokenRef.current = refreshedSession.access_token ?? null;
+              setSession(refreshedSession);
+              setUser(refreshedUser);
+              syncKnownAccount(refreshedUser);
+
+              const recoveredProfile = await loadEnsuredProfile(refreshedUser);
+              if (!recoveredProfile) {
+                await authService.clearLocalSession().catch(() => undefined);
+                setSession(null);
+                setUser(null);
+                setProfile(null);
+                setError("Sua conta nao existe mais. Faca login novamente.");
+                dispatch(authActions.authSignedOut());
+                return;
+              }
+
+              setProfile(recoveredProfile);
+              setError(null);
+              dispatch(authActions.authErrorChanged(null));
+              dispatch(
+                authActions.authSessionChanged({
+                  userId: refreshedUser.uid,
+                  email: refreshedUser.email,
+                  emailVerified: refreshedUser.emailVerified,
+                  expiresAt: refreshedSession?.expires_at ?? null,
+                }),
+              );
+              return;
+            } catch (recoveryError) {
+              if (import.meta.env.DEV) {
+                console.error("[auth:profile:recovery]", recoveryError);
+              }
+              if (!isAuthSessionInvalidError(recoveryError)) {
+                setError("Falha ao carregar ou criar o perfil.");
+                setProfile(null);
+                dispatch(authActions.authErrorChanged("Falha ao carregar ou criar o perfil."));
+                return;
+              }
+            }
+          }
+
           await authService.clearLocalSession().catch(() => undefined);
           setSession(null);
           setUser(null);
           setProfile(null);
-          setError("Sessão inválida ou expirada. Faça login novamente.");
-          dispatch(authActions.authErrorChanged("Sessão inválida ou expirada. Faça login novamente."));
+          setError("Sessao invalida ou expirada. Faca login novamente.");
+          dispatch(authActions.authErrorChanged("Sessao invalida ou expirada. Faca login novamente."));
           dispatch(authActions.authSignedOut());
           return;
         }

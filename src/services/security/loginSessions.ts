@@ -339,7 +339,9 @@ function clearLocalSessionIfInvalid(error: unknown, uidRaw?: string | null): voi
     clearStoredSessionId(uid);
     invalidateListSessionsCache(uid);
   }
-  void authService.clearLocalSession().catch(() => undefined);
+  // Session registry checks are optional hardening. Do not force a global sign-out
+  // when this subsystem detects auth/session inconsistencies, because transient
+  // edge/RLS/config issues here can otherwise eject valid users from the app.
 }
 
 function shouldFallbackToEdgeSessionsList(error: unknown): boolean {

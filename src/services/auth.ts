@@ -657,7 +657,9 @@ class AuthService {
         if (import.meta.env.DEV) {
           console.warn("[auth:login] validacao de token remota indisponivel", validationError);
         }
-        remoteAccessTokenAccepted = true;
+        // Do not trust a remotely-issued token when validation is unavailable.
+        // Force direct Supabase sign-in fallback to avoid immediate 401 loops post-login.
+        remoteAccessTokenAccepted = false;
       }
       if (!remoteAccessTokenAccepted) {
         await clearSessionState();
