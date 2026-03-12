@@ -162,8 +162,6 @@ const EDGE_DELETE_MESSAGES_UNAUTHORIZED_BYPASS_MS = 5 * 60_000;
 const EDGE_CHAT_MESSAGES_UNAUTHORIZED_BYPASS_STORAGE_KEY = "messly:chat-edge-bypass-until";
 const EDIT_WINDOW_MINUTES = 15;
 const EDIT_WINDOW_MS = EDIT_WINDOW_MINUTES * 60 * 1000;
-const DELETE_WINDOW_HOURS = 24;
-const DELETE_WINDOW_MS = DELETE_WINDOW_HOURS * 60 * 60 * 1000;
 const initialMessagesCache = new Map<string, CachedInitialMessagesEntry>();
 const initialMessagesInFlight = new Map<string, Promise<ListMessagesResponse>>();
 const initialMessagesUnauthorizedCooldown = new Map<string, number>();
@@ -1575,21 +1573,6 @@ async function deleteChatMessageDirect(messageIdRaw: string): Promise<ChatMessag
 
   if (String(currentRow.sender_id ?? "").trim() !== currentUserId) {
     throw new EdgeFunctionError("Somente o autor pode excluir a mensagem.", 403, "FORBIDDEN");
-  }
-
-  if (!currentRow.deleted_at) {
-    const createdAtMs = Date.parse(String(currentRow.created_at ?? ""));
-    if (!Number.isFinite(createdAtMs)) {
-      throw new EdgeFunctionError("Falha ao validar o estado da mensagem.", 500, "MESSAGE_STATE_INVALID");
-    }
-
-    if (Date.now() - createdAtMs > DELETE_WINDOW_MS) {
-      throw new EdgeFunctionError(
-        `Mensagens so podem ser excluidas em ate ${DELETE_WINDOW_HOURS} horas.`,
-        400,
-        "MESSAGE_DELETE_WINDOW_EXPIRED",
-      );
-    }
   }
 
   if (currentRow.deleted_at) {

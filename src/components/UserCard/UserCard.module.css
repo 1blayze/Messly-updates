@@ -5,7 +5,7 @@
 
 .voiceStrip {
   position: relative;
-  padding: 6px 2px 10px;
+  padding: 6px 8px 10px;
   margin-bottom: 6px;
   border: 0;
   border-bottom: 1px solid var(--profile-divider);
@@ -16,16 +16,18 @@
 }
 
 .voiceStripHeader {
-  display: flex;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 10px;
+  column-gap: 10px;
   min-height: 40px;
 }
 
 .voiceNetworkWrap {
-  display: inline-flex;
+  width: 32px;
+  display: flex;
   align-items: center;
-  gap: 6px;
+  justify-content: center;
   flex-shrink: 0;
 }
 
@@ -99,15 +101,6 @@
   background: color-mix(in srgb, var(--profile-positive-soft) 62%, var(--profile-hover-surface));
 }
 
-.voiceNetworkPingLabel {
-  color: var(--profile-text-muted);
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1;
-  letter-spacing: 0.01em;
-  white-space: nowrap;
-}
-
 .voiceHeaderMeta {
   flex: 1;
   min-width: 0;
@@ -152,6 +145,7 @@
 .voiceHeaderIcons {
   display: inline-flex;
   align-items: center;
+  justify-self: end;
   gap: 8px;
   color: var(--profile-text-muted);
 }

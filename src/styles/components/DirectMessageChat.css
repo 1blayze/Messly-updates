@@ -1404,9 +1404,12 @@
   margin-left: 4px;
   margin-right: 18px;
   border-radius: 6px;
-  contain: layout paint style;
+  contain: layout style;
   content-visibility: auto;
   contain-intrinsic-size: 72px;
+  position: relative;
+  isolation: isolate;
+  z-index: 0;
 }
 
 .dm-chat__message-wrapper--grouped:has(.dm-chat__message-file-card) {
@@ -1450,7 +1453,7 @@
   pointer-events: none;
   transition: opacity 120ms ease, transform 120ms ease;
   backdrop-filter: blur(6px);
-  z-index: 240;
+  z-index: 320;
   isolation: isolate;
 }
 

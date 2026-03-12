@@ -596,7 +596,7 @@ export default function UserCard({
                     <button
                     type="button"
                     className={styles.voiceNetworkButton}
-                    aria-label="Qualidade da conexão"
+                    aria-label={`Qualidade da conexão: ${averagePingLabel}`}
                     data-ping={averagePingLabel}
                     aria-expanded={isVoiceDetailsOpen}
                     onClick={() => {
@@ -605,7 +605,6 @@ export default function UserCard({
                   >
                     <MaterialSymbolIcon name="wifi" size={18} />
                     </button>
-                    <span className={styles.voiceNetworkPingLabel}>{averagePingLabel}</span>
                   </div>
                 ) : null}
                 <div className={styles.voiceHeaderMeta}>

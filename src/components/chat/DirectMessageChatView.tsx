@@ -2247,15 +2247,18 @@ export default function DirectMessageChatView({
       ? normalizedTargetUsername
       : normalizedTargetUsername) ||
     "Usuario";
-  const targetFallbackAvatar = getNameAvatarUrl(targetDisplayNameForFallback || "U");
-  const currentFallbackAvatar =
-    getNameAvatarUrl(currentUser.displayName || currentUser.username || "U");
+  const currentFirebaseUid = String(currentUser.firebaseUid ?? "").trim();
+  const targetFirebaseUid = String(targetUser.firebaseUid ?? "").trim();
+  const targetFallbackAvatar = getNameAvatarUrl(
+    targetUser.userId || targetFirebaseUid || targetDisplayNameForFallback || normalizedTargetUsername || "U",
+  );
+  const currentFallbackAvatar = getNameAvatarUrl(
+    currentUser.userId || currentFirebaseUid || currentUser.username || currentUser.displayName || "U",
+  );
   const targetAvatarSrc = (targetUser.avatarSrc || "").trim() || targetFallbackAvatar;
   const currentAvatarSrc = (currentUser.avatarSrc || "").trim() || currentFallbackAvatar;
   const safeTargetDisplayName = targetDisplayNameForFallback;
   const safeTargetUsername = normalizedTargetUsername || "usuario";
-  const currentFirebaseUid = String(currentUser.firebaseUid ?? "").trim();
-  const targetFirebaseUid = String(targetUser.firebaseUid ?? "").trim();
   const normalizedCurrentSidebarUserId = String(currentUserId ?? "").trim();
   const normalizedTargetSidebarUserId = String(targetUser.userId ?? "").trim();
   const currentSidebarDisplayName =
@@ -2837,9 +2840,43 @@ export default function DirectMessageChatView({
     };
   }, [targetAboutText]);
 
+  const currentParticipantIds = useMemo(() => {
+    const normalizedIds = [
+      String(currentUserId ?? "").trim().toLowerCase(),
+      String(currentUser.userId ?? "").trim().toLowerCase(),
+      String(currentUser.firebaseUid ?? "").trim().toLowerCase(),
+    ].filter(Boolean);
+    return new Set(normalizedIds);
+  }, [currentUser.firebaseUid, currentUser.userId, currentUserId]);
+
+  const targetParticipantIds = useMemo(() => {
+    const normalizedIds = [
+      String(targetUser.userId ?? "").trim().toLowerCase(),
+      String(targetUser.firebaseUid ?? "").trim().toLowerCase(),
+    ].filter(Boolean);
+    return new Set(normalizedIds);
+  }, [targetUser.firebaseUid, targetUser.userId]);
+
+  const isCurrentUserSender = useCallback(
+    (userId: string): boolean => {
+      const normalizedUserId = String(userId ?? "").trim().toLowerCase();
+      return Boolean(normalizedUserId) && currentParticipantIds.has(normalizedUserId);
+    },
+    [currentParticipantIds],
+  );
+
   const getParticipantById = useCallback(
-    (userId: string) => (userId === currentUser.userId ? currentUser : targetUser),
-    [currentUser, targetUser],
+    (userId: string) => {
+      const normalizedUserId = String(userId ?? "").trim().toLowerCase();
+      if (normalizedUserId && currentParticipantIds.has(normalizedUserId)) {
+        return currentUser;
+      }
+      if (normalizedUserId && targetParticipantIds.has(normalizedUserId)) {
+        return targetUser;
+      }
+      return targetUser;
+    },
+    [currentParticipantIds, currentUser, targetParticipantIds, targetUser],
   );
 
   const openMessageProfileParticipant = useMemo(() => {
@@ -2856,7 +2893,9 @@ export default function DirectMessageChatView({
   const openMessageProfileAvatarSrc = String(openMessageProfileParticipant?.avatarSrc ?? "").trim() || openMessageProfileFallbackAvatar;
   const openMessageProfilePresenceState: PresenceState = openMessageProfileParticipant?.presenceState ?? "invisivel";
   const openMessageProfilePresenceLabel = PRESENCE_LABELS[openMessageProfilePresenceState];
-  const isOpenMessageProfileCurrentUser = openMessageProfileUserId === currentUserId;
+  const isOpenMessageProfileCurrentUser = openMessageProfileUserId
+    ? isCurrentUserSender(openMessageProfileUserId)
+    : false;
   const openMessageProfileBannerSrc = useMemo(() => {
     if (!openMessageProfileUserId) {
       return getDefaultBannerUrl();
@@ -7293,8 +7332,8 @@ export default function DirectMessageChatView({
           ) : null}
 
           {visibleMessageRenderEntries.map(({ message, showHeader, mediaGroup }) => {
-            const isFromCurrentUser = message.senderId === currentUserId;
-            const sender = isFromCurrentUser ? currentUser : targetUser;
+            const isFromCurrentUser = isCurrentUserSender(message.senderId);
+            const sender = getParticipantById(message.senderId);
             const senderAvatar = isFromCurrentUser ? currentAvatarSrc : targetAvatarSrc;
             const senderFallbackAvatar = isFromCurrentUser ? currentFallbackAvatar : targetFallbackAvatar;
             if (message.type === "call_event") {

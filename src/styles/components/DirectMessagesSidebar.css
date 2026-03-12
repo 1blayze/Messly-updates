@@ -9,7 +9,7 @@
   font-family: var(--font-sans);
   position: relative;
   --friends-sidebar-section-padding-x: 16px;
-  --friends-sidebar-dm-section-padding-x: 8px;
+  --friends-sidebar-dm-section-padding-x: var(--friends-sidebar-section-padding-x);
   --friends-sidebar-row-height: 44px;
   --friends-sidebar-row-padding-y: 6px;
   --friends-sidebar-row-padding-x: 8px;
@@ -202,6 +202,7 @@
 
 .friends-sidebar__dm-list {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 2px;
 }
 

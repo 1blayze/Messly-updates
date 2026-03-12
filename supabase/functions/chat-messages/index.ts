@@ -25,9 +25,7 @@ const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 100;
 const MAX_ATTACHMENT_BATCH_SIZE = 100;
 const EDIT_WINDOW_MINUTES = 15;
-const DELETE_WINDOW_HOURS = 24;
 const EDIT_WINDOW_MS = EDIT_WINDOW_MINUTES * 60 * 1000;
-const DELETE_WINDOW_MS = DELETE_WINDOW_HOURS * 60 * 60 * 1000;
 const REPLY_SNAPSHOT_MAX_KEYS = 6;
 const REPLY_SNAPSHOT_MAX_BYTES = 2048;
 const EDIT_HISTORY_LIMIT = 5;
@@ -1140,13 +1138,6 @@ async function deleteMessage(payload: DeletePayload, userId: string, context: Re
   if (row.deleted_at) {
     return await hydrateSingleMessageRow(row, context);
   }
-
-  assertMutationWindow(
-    row.created_at,
-    DELETE_WINDOW_MS,
-    "MESSAGE_DELETE_WINDOW_EXPIRED",
-    `Mensagens so podem ser excluidas em ate ${DELETE_WINDOW_HOURS} horas.`,
-  );
 
   const { data, error } = await supabase
     .from("messages")
