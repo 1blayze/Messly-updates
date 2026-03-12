@@ -1,5 +1,5 @@
 import { Suspense, lazy, type ReactNode, useEffect, useRef } from "react";
-import { HashRouter, Navigate, Route, Routes } from "react-router-dom";
+import { BrowserRouter, HashRouter, Navigate, Route, Routes } from "react-router-dom";
 import { useAuthSession } from "../auth/AuthProvider";
 import LoginPage from "../auth/LoginPage";
 import { useAppBootstrapSnapshot } from "../core/appBootstrap";
@@ -350,8 +350,10 @@ export default function AppRoutes() {
     };
   }, [bootstrap.phase, currentUserId, shouldShowLoginNow, shouldShowRestorationShell]);
 
+  const Router = typeof window !== "undefined" && window.electronAPI ? HashRouter : BrowserRouter;
+
   return (
-    <HashRouter>
+    <Router>
       <Routes>
         <Route path="/" element={<RootRedirect />} />
         <Route path="/auth/login" element={<LoginRoute />} />
@@ -360,6 +362,6 @@ export default function AppRoutes() {
         <Route path="/app" element={<AppRoute />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
-    </HashRouter>
+    </Router>
   );
 }

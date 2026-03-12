@@ -819,6 +819,45 @@ function getConversationIdFromHash(hashRaw: string): string | null {
   return conversationId || null;
 }
 
+function getConversationIdFromSearch(searchRaw: string): string | null {
+  const search = String(searchRaw ?? "").trim();
+  const query = search.startsWith("?") ? search.slice(1) : search;
+  if (!query) {
+    return null;
+  }
+
+  const params = new URLSearchParams(query);
+  const conversationId = String(params.get("conversation") ?? "").trim();
+  return conversationId || null;
+}
+
+function getConversationIdFromLocation(location: Location): string | null {
+  return getConversationIdFromSearch(location.search) ?? getConversationIdFromHash(location.hash);
+}
+
+function clearConversationIdFromLocation(): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const url = new URL(window.location.href);
+  const hadSearchConversation = url.searchParams.has("conversation");
+  if (hadSearchConversation) {
+    url.searchParams.delete("conversation");
+  }
+
+  const hashQueryIndex = url.hash.indexOf("?");
+  const hadHashConversation = hashQueryIndex >= 0;
+  const cleanHash = hadHashConversation ? url.hash.slice(0, hashQueryIndex) : url.hash;
+
+  if (!hadSearchConversation && !hadHashConversation) {
+    return;
+  }
+
+  const nextPath = `${url.pathname}${url.search}${cleanHash}`;
+  window.history.replaceState(null, document.title, nextPath);
+}
+
 function readFriendsCache(userId: string | null | undefined): FriendListItem[] | null {
   if (!userId || typeof window === "undefined") {
     return null;
@@ -1103,7 +1142,7 @@ export default function AppShell() {
     if (typeof window === "undefined") {
       return null;
     }
-    return getConversationIdFromHash(window.location.hash);
+    return getConversationIdFromLocation(window.location);
   });
   const [callHostDirectMessage, setCallHostDirectMessage] = useState<SidebarDirectMessageSelection | null>(null);
   const [isSidebarCallActive, setIsSidebarCallActive] = useState(false);
@@ -1994,18 +2033,20 @@ export default function AppShell() {
   );
 
   useEffect(() => {
-    const consumeHashConversation = (): void => {
-      const conversationId = getConversationIdFromHash(window.location.hash);
+    const consumeLocationConversation = (): void => {
+      const conversationId = getConversationIdFromLocation(window.location);
       if (!conversationId) {
         return;
       }
       setPendingNotificationConversationId(conversationId);
     };
 
-    consumeHashConversation();
-    window.addEventListener("hashchange", consumeHashConversation);
+    consumeLocationConversation();
+    window.addEventListener("hashchange", consumeLocationConversation);
+    window.addEventListener("popstate", consumeLocationConversation);
     return () => {
-      window.removeEventListener("hashchange", consumeHashConversation);
+      window.removeEventListener("hashchange", consumeLocationConversation);
+      window.removeEventListener("popstate", consumeLocationConversation);
     };
   }, []);
 
@@ -2028,16 +2069,7 @@ export default function AppShell() {
     }
 
     void openDirectMessageConversationById(pendingNotificationConversationId).finally(() => {
-      const currentHash = window.location.hash;
-      const queryIndex = currentHash.indexOf("?");
-      if (queryIndex >= 0) {
-        const cleanHash = currentHash.slice(0, queryIndex);
-        window.history.replaceState(
-          null,
-          document.title,
-          `${window.location.pathname}${window.location.search}${cleanHash}`,
-        );
-      }
+      clearConversationIdFromLocation();
       setPendingNotificationConversationId(null);
     });
   }, [currentUserId, openDirectMessageConversationById, pendingNotificationConversationId]);
