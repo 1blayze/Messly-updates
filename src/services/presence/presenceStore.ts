@@ -18,6 +18,7 @@ import {
   resolvePresenceSelectColumns,
 } from "./presenceTable";
 import { gatewayService } from "../gateway";
+import { authService } from "../auth";
 
 const MAX_USER_IDS_PER_FILTER = 100;
 const PRESENCE_UI_DEBOUNCE_MS = 50;
@@ -64,6 +65,40 @@ function logPresenceDebug(event: string, details: Record<string, unknown> = {}):
   console.debug(`[presence:store] ${event}`, details);
 }
 
+function isPresenceAuthError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const normalized = error as {
+    status?: unknown;
+    code?: unknown;
+    message?: unknown;
+    details?: unknown;
+  };
+  const status = Number(normalized.status ?? 0);
+  const code = String(normalized.code ?? "").trim().toUpperCase();
+  const message = String(normalized.message ?? "").trim().toLowerCase();
+  const details = String(normalized.details ?? "").trim().toLowerCase();
+  const combined = `${code} ${message} ${details}`;
+
+  return (
+    status === 401 ||
+    status === 403 ||
+    code === "UNAUTHENTICATED" ||
+    code === "UNAUTHORIZED" ||
+    code === "INVALID_TOKEN" ||
+    code === "INVALID_JWT" ||
+    code === "JWT_EXPIRED" ||
+    code === "PGRST301" ||
+    combined.includes("invalid jwt") ||
+    combined.includes("jwt expired") ||
+    combined.includes("session from session_id claim in jwt does not exist") ||
+    combined.includes("session_id claim") ||
+    combined.includes("authorization")
+  );
+}
+
 function shouldMaintainRealtimeConnection(): boolean {
   return listeners.size > 0 || trackedUserRefCounts.size > 0;
 }
@@ -100,8 +135,8 @@ async function syncRealtimeAuth(accessTokenRaw: string | null | undefined): Prom
 
 async function ensureRealtimeAuth(): Promise<void> {
   try {
-    const { data } = await supabase.auth.getSession();
-    await syncRealtimeAuth(data.session?.access_token ?? null);
+    const validatedToken = await authService.getValidatedEdgeAccessToken();
+    await syncRealtimeAuth(validatedToken);
   } catch (error) {
     logPresenceDebug("realtime_auth_sync_failed", {
       reason: error instanceof Error ? error.message : String(error),
@@ -350,7 +385,10 @@ async function fetchPresenceRows(userIds: string[]): Promise<void> {
       .in("user_id", userIds);
 
     if (error) {
-      shouldRetry = true;
+      shouldRetry = !isPresenceAuthError(error);
+      if (isPresenceAuthError(error)) {
+        void authService.clearLocalSession().catch(() => undefined);
+      }
       logPresenceDebug("fetch_rows_failed", {
         reason: String((error as { message?: unknown } | null)?.message ?? "unknown"),
         userCount: userIds.length,
@@ -366,7 +404,10 @@ async function fetchPresenceRows(userIds: string[]): Promise<void> {
       );
     }
   } catch (error) {
-    shouldRetry = true;
+    shouldRetry = !isPresenceAuthError(error);
+    if (isPresenceAuthError(error)) {
+      void authService.clearLocalSession().catch(() => undefined);
+    }
     logPresenceDebug("fetch_rows_threw", {
       reason: error instanceof Error ? error.message : String(error),
       userCount: userIds.length,

@@ -68,7 +68,7 @@ function stopRuntimeServices(): void {
 }
 
 async function warmSupabaseRealtime(): Promise<void> {
-  const accessToken = await authService.getCurrentAccessToken();
+  const accessToken = await authService.getValidatedEdgeAccessToken();
   if (accessToken) {
     try {
       await supabase.realtime.setAuth(accessToken);

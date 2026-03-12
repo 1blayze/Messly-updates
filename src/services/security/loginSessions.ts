@@ -536,14 +536,8 @@ function getClientVersion(): string {
 }
 
 async function resolveSessionsAccessToken(): Promise<string | null> {
-  const currentAccessToken = String(await authService.getCurrentAccessToken() ?? "").trim();
-  if (currentAccessToken) {
-    return currentAccessToken;
-  }
-
-  const refreshedSession = await authService.refreshSession().catch(() => null);
-  const refreshedToken = String(refreshedSession?.access_token ?? "").trim();
-  return refreshedToken || null;
+  const validatedAccessToken = String(await authService.getValidatedEdgeAccessToken() ?? "").trim();
+  return validatedAccessToken || null;
 }
 
 export async function recordLoginSession(): Promise<LoginSessionView | null> {

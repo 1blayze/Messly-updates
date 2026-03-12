@@ -154,7 +154,11 @@ function extractBearerToken(authorizationHeader: string | null): string | null {
 }
 
 function isUnauthorizedEdgeError(error: unknown): boolean {
-  if (!(error instanceof EdgeFunctionError) || error.status !== 401) {
+  if (!(error instanceof EdgeFunctionError)) {
+    return false;
+  }
+
+  if (error.status !== 401 && error.status !== 403) {
     return false;
   }
 

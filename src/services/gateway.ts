@@ -260,21 +260,14 @@ class MesslyGatewayService {
   }
 
   private async resolveGatewayToken(): Promise<string | null> {
-    const currentToken = String(await authService.getCurrentAccessToken() ?? "").trim();
-    if (currentToken) {
-      this.latestAccessToken = currentToken;
-      return currentToken;
+    const validatedToken = String(await authService.getValidatedEdgeAccessToken() ?? "").trim();
+    if (!validatedToken) {
+      this.latestAccessToken = null;
+      return null;
     }
 
-    const refreshed = await authService.refreshSession().catch(() => null);
-    const refreshedToken = String(refreshed?.access_token ?? "").trim();
-    if (refreshedToken) {
-      this.latestAccessToken = refreshedToken;
-      return refreshedToken;
-    }
-
-    this.latestAccessToken = null;
-    return null;
+    this.latestAccessToken = validatedToken;
+    return validatedToken;
   }
 
   private ensureAuthStateListener(): void {
@@ -289,7 +282,7 @@ class MesslyGatewayService {
         event === "USER_UPDATED"
       ) {
         void (async () => {
-          const currentToken = String(await authService.getCurrentAccessToken() ?? "").trim() || null;
+          const currentToken = String(await authService.getValidatedEdgeAccessToken() ?? "").trim() || null;
           this.latestAccessToken = currentToken;
           this.client?.updateToken(currentToken);
           if (!currentToken) {

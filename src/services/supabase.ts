@@ -41,17 +41,8 @@ export async function getSupabaseFunctionHeaders(
   }
 
   if (options.requireAuth) {
-    const currentAccessToken = String(await authService.getCurrentAccessToken() ?? "").trim();
-    if (currentAccessToken) {
-      return {
-        apikey: supabaseAnonKey,
-        authorization: `Bearer ${currentAccessToken}`,
-      };
-    }
-
-    const refreshedSession = await authService.refreshSession().catch(() => null);
-    const refreshedAccessToken = String(refreshedSession?.access_token ?? "").trim();
-    if (!refreshedAccessToken) {
+    const validatedAccessToken = String(await authService.getValidatedEdgeAccessToken() ?? "").trim();
+    if (!validatedAccessToken) {
       return {
         apikey: supabaseAnonKey,
       };
@@ -59,7 +50,7 @@ export async function getSupabaseFunctionHeaders(
 
     return {
       apikey: supabaseAnonKey,
-      authorization: `Bearer ${refreshedAccessToken}`,
+      authorization: `Bearer ${validatedAccessToken}`,
     };
   }
 

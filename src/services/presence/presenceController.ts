@@ -246,9 +246,88 @@ function areSemanticSnapshotsEqual(
   return safeLeft.state === safeRight.state && areSpotifyActivitiesMeaningfullyEqual(safeLeft.activity, safeRight.activity);
 }
 
+function isPresenceAuthStatus(statusRaw: unknown): boolean {
+  const status = Number(statusRaw ?? 0);
+  return status === 401 || status === 403;
+}
+
+function isPresenceAuthError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const normalized = error as {
+    status?: unknown;
+    code?: unknown;
+    message?: unknown;
+    details?: unknown;
+    hint?: unknown;
+    error?: unknown;
+  };
+  const status = Number(normalized.status ?? 0);
+  const code = String(normalized.code ?? "").trim().toUpperCase();
+  const message = String(normalized.message ?? "").trim().toLowerCase();
+  const details = String(normalized.details ?? "").trim().toLowerCase();
+  const hint = String(normalized.hint ?? "").trim().toLowerCase();
+  const errorCode = String(normalized.error ?? "").trim().toUpperCase();
+  const combined = `${code} ${errorCode} ${message} ${details} ${hint}`;
+
+  return (
+    status === 401 ||
+    status === 403 ||
+    code === "UNAUTHENTICATED" ||
+    code === "UNAUTHORIZED" ||
+    code === "INVALID_TOKEN" ||
+    code === "INVALID_JWT" ||
+    code === "JWT_EXPIRED" ||
+    code === "PGRST301" ||
+    errorCode === "UNAUTHENTICATED" ||
+    errorCode === "UNAUTHORIZED" ||
+    errorCode === "INVALID_TOKEN" ||
+    combined.includes("invalid jwt") ||
+    combined.includes("jwt expired") ||
+    combined.includes("session not found") ||
+    combined.includes("session from session_id claim in jwt does not exist") ||
+    combined.includes("session_id claim") ||
+    combined.includes("authorization")
+  );
+}
+
+async function upsertPresenceViaRest(
+  tableName: string,
+  rowPayload: Record<string, unknown>,
+  accessToken: string,
+  keepalive = false,
+): Promise<Response> {
+  if (typeof fetch !== "function" || !supabaseUrl || !supabaseAnonKey) {
+    throw new Error("Supabase REST API unavailable for presence upsert.");
+  }
+
+  return fetch(`${supabaseUrl}/rest/v1/${tableName}?on_conflict=user_id`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      apikey: supabaseAnonKey,
+      Prefer: "resolution=merge-duplicates,return=minimal",
+      authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify(rowPayload),
+    ...(keepalive ? { keepalive: true } : {}),
+  });
+}
+
 async function persistPresencePayload(payload: PersistedPresencePayload): Promise<void> {
   const tableName = await getPresenceTableName();
   const { hasActivitiesColumn } = await getPresenceTableColumnCapabilities();
+  const accessToken = String(await authService.getValidatedEdgeAccessToken() ?? "").trim();
+  if (!accessToken) {
+    throw {
+      status: 401,
+      code: "UNAUTHENTICATED",
+      message: "Sessao invalida ou expirada para presence.",
+    };
+  }
+
   const rowPayload: Record<string, unknown> = {
     user_id: payload.user_id,
     status: payload.status,
@@ -260,7 +339,26 @@ async function persistPresencePayload(payload: PersistedPresencePayload): Promis
     rowPayload.activities = payload.activities;
   }
 
-  await supabase.from(tableName).upsert(rowPayload, { onConflict: "user_id" });
+  if (!supabaseUrl || !supabaseAnonKey || typeof fetch !== "function") {
+    const { error } = await supabase.from(tableName).upsert(rowPayload, { onConflict: "user_id" });
+    if (error) {
+      throw error;
+    }
+    return;
+  }
+
+  const response = await upsertPresenceViaRest(tableName, rowPayload, accessToken);
+  if (response.ok) {
+    return;
+  }
+
+  const details = await response.text().catch(() => "");
+  throw {
+    status: response.status,
+    code: `HTTP_${response.status}`,
+    message: "Presence upsert failed.",
+    details,
+  };
 }
 
 function persistPresenceWithKeepalive(
@@ -291,19 +389,10 @@ function persistPresenceWithKeepalive(
       keepalivePayload.activities = payload.activities;
     }
 
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-      apikey: supabaseAnonKey,
-      Prefer: "resolution=merge-duplicates,return=minimal",
-      authorization: `Bearer ${accessToken}`,
-    };
-
-    await fetch(`${supabaseUrl}/rest/v1/${tableName}?on_conflict=user_id`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(keepalivePayload),
-      keepalive: true,
-    });
+    const response = await upsertPresenceViaRest(tableName, keepalivePayload, accessToken, true);
+    if (isPresenceAuthStatus(response.status)) {
+      void authService.clearLocalSession().catch(() => undefined);
+    }
   };
 
   void sendKeepalive().catch(() => undefined);
@@ -415,7 +504,11 @@ async function syncPresenceState(
     try {
       await persistPresencePayload(payload);
       lastPersistedSnapshot = nextSnapshot;
-    } catch {
+    } catch (error) {
+      if (isPresenceAuthError(error)) {
+        await authService.clearLocalSession().catch(() => undefined);
+        return;
+      }
       // Keep trying on the next heartbeat or semantic change.
     }
   }
