@@ -2,6 +2,7 @@ import { getGatewayUrl, getSupabaseAccessToken } from "../api/client";
 import { GatewayClient, type GatewayClientState } from "../gateway/client";
 import { createGatewayEventRouter } from "../gateway/router";
 import { authService } from "./auth";
+import { supabase } from "../lib/supabaseClient";
 import type {
   GatewayDispatchEventType,
   GatewayDispatchPayloadMap,
@@ -32,6 +33,8 @@ class MesslyGatewayService {
   private unsubscribeFrames: (() => void) | null = null;
   private currentUserId: string | null = null;
   private lastLoggedStateSignature: string | null = null;
+  private latestAccessToken: string | null = null;
+  private unsubscribeAuthState: (() => void) | null = null;
   private readonly subscriptions = new Map<string, GatewaySubscription>();
   private readonly eventListeners = new Map<MesslyGatewayEventType, Set<(payload: unknown) => void>>();
   private readonly stateListeners = new Set<GatewayStateListener>();
@@ -52,10 +55,19 @@ class MesslyGatewayService {
       platform: typeof window !== "undefined" ? String(window.electronAPI?.platform ?? "web") : "web",
     });
 
+    this.ensureAuthStateListener();
+
+    const accessToken = await this.resolveGatewayToken();
+    if (!accessToken) {
+      this.client?.disconnect();
+      this.updateUnauthenticatedState("Sessao invalida ou expirada. Faca login novamente.");
+      return;
+    }
+
     if (!this.client) {
       this.client = new GatewayClient({
         url: resolvedGatewayUrl,
-        tokenProvider: getSupabaseAccessToken,
+        tokenProvider: () => this.resolveGatewayToken(),
         clientInfo: getSessionClientDescriptor(String(import.meta.env.VITE_MESSLY_GATEWAY_CLIENT_VERSION ?? "0.0.5")),
       });
 
@@ -69,6 +81,8 @@ class MesslyGatewayService {
         router.routeFrame(frame);
       });
     }
+
+    this.client.updateToken(accessToken);
 
     this.replaceSubscriptions([
       { type: "user", id: normalizedUserId },
@@ -85,9 +99,12 @@ class MesslyGatewayService {
     this.client?.disconnect();
     this.unsubscribeFrames?.();
     this.unsubscribeState?.();
+    this.unsubscribeAuthState?.();
     this.unsubscribeFrames = null;
     this.unsubscribeState = null;
+    this.unsubscribeAuthState = null;
     this.client = null;
+    this.latestAccessToken = null;
     this.subscriptions.clear();
     messlyStore.dispatch(gatewayActions.gatewayReset());
   }
@@ -209,7 +226,9 @@ class MesslyGatewayService {
     if (frame.op === "INVALID_SESSION") {
       const payload = (frame.d ?? null) as GatewayInvalidSessionPayload | null;
       if (payload?.reason === "UNAUTHENTICATED" || payload?.reason === "SESSION_REVOKED") {
-        void authService.logout().catch(() => undefined);
+        this.client?.disconnect();
+        this.updateUnauthenticatedState(`Sessao do gateway invalidada: ${payload.reason}.`);
+        void authService.clearLocalSession().catch(() => undefined);
       }
       return;
     }
@@ -238,6 +257,62 @@ class MesslyGatewayService {
     listeners.forEach((listener) => {
       listener(frame.d);
     });
+  }
+
+  private async resolveGatewayToken(): Promise<string | null> {
+    const validatedToken = String(await getSupabaseAccessToken() ?? "").trim();
+    if (validatedToken) {
+      this.latestAccessToken = validatedToken;
+      return validatedToken;
+    }
+
+    const hintedToken = String(this.latestAccessToken ?? "").trim();
+    return hintedToken || null;
+  }
+
+  private ensureAuthStateListener(): void {
+    if (this.unsubscribeAuthState) {
+      return;
+    }
+
+    const authState = supabase.auth.onAuthStateChange((event, session) => {
+      const nextAccessToken = String(session?.access_token ?? "").trim() || null;
+      this.latestAccessToken = nextAccessToken;
+
+      if (
+        event === "TOKEN_REFRESHED" ||
+        event === "SIGNED_IN" ||
+        event === "USER_UPDATED"
+      ) {
+        this.client?.updateToken(nextAccessToken);
+      }
+
+      if (event === "SIGNED_OUT") {
+        this.client?.disconnect();
+        this.updateUnauthenticatedState("Sessao encerrada.");
+      }
+    });
+
+    this.unsubscribeAuthState = () => {
+      authState.data.subscription.unsubscribe();
+    };
+  }
+
+  private updateUnauthenticatedState(message: string): void {
+    messlyStore.dispatch(
+      gatewayActions.gatewayStateChanged({
+        status: "unauthenticated",
+        reconnectAttempt: 0,
+        lastError: message,
+      }),
+    );
+    messlyStore.dispatch(
+      gatewayActions.gatewaySessionUpdated({
+        sessionId: null,
+        seq: null,
+      }),
+    );
+    messlyStore.dispatch(gatewayActions.gatewayLatencyUpdated(null));
   }
 }
 

@@ -20,6 +20,7 @@ import { computeReconnectDelayMs } from "./reconnect";
 export type GatewayClientStatus =
   | "idle"
   | "disabled"
+  | "unauthenticated"
   | "connecting"
   | "connected"
   | "reconnecting"
@@ -72,6 +73,7 @@ export class GatewayClient {
   private heartbeat: GatewayHeartbeat | null = null;
   private reconnectTimerId: number | null = null;
   private intentionalClose = false;
+  private intentionalCloseStatus: GatewayClientStatus = "closed";
   private subscriptions = new Map<string, GatewaySubscription>();
   private pendingFrames: GatewayFrame[] = [];
   private stateListeners = new Set<StateListener>();
@@ -88,6 +90,7 @@ export class GatewayClient {
   private connectionFailureStreak = 0;
   private reconnectSuspendedUntil = 0;
   private resumeToken: string | null = null;
+  private tokenHint: string | null = null;
 
   constructor(options: GatewayClientOptions) {
     this.options = options;
@@ -151,6 +154,13 @@ export class GatewayClient {
       return;
     }
 
+    const preflightToken = await this.resolveGatewayToken();
+    if (!preflightToken) {
+      this.stopUnauthenticated("Sessao invalida ou expirada para conectar no gateway.");
+      return;
+    }
+    this.tokenHint = preflightToken;
+
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
       this.log("info", "conexao websocket ja ativa/pendente", {
         url: this.activeSocketUrl,
@@ -160,6 +170,7 @@ export class GatewayClient {
     }
 
     this.intentionalClose = false;
+    this.intentionalCloseStatus = "closed";
     this.clearReconnectTimer();
     this.activeSocketUrl = resolvedSocketUrl;
 
@@ -213,9 +224,11 @@ export class GatewayClient {
 
   disconnect(): void {
     this.intentionalClose = true;
+    this.intentionalCloseStatus = "closed";
     this.stopHeartbeat();
     this.clearReconnectTimer();
     this.resumeToken = null;
+    this.tokenHint = null;
     if (this.ws) {
       this.ws.close();
     }
@@ -242,6 +255,11 @@ export class GatewayClient {
     return this.state;
   }
 
+  updateToken(tokenRaw: string | null | undefined): void {
+    const token = String(tokenRaw ?? "").trim();
+    this.tokenHint = this.isLikelyJwt(token) ? token : null;
+  }
+
   private async handleHello(payload: GatewayHelloPayload): Promise<void> {
     this.stopHeartbeat();
     this.heartbeat = new GatewayHeartbeat({
@@ -264,9 +282,9 @@ export class GatewayClient {
     });
     this.heartbeat.start();
 
-    const token = await this.options.tokenProvider();
+    const token = await this.resolveGatewayToken();
     if (!token) {
-      this.forceReconnect("Token de autenticacao ausente para o gateway.");
+      this.stopUnauthenticated("Token de autenticacao ausente para o gateway.");
       return;
     }
 
@@ -399,9 +417,15 @@ export class GatewayClient {
 
     if (this.intentionalClose) {
       this.updateState({
-        status: "closed",
+        status: this.intentionalCloseStatus,
       });
       this.connectionFailureStreak = 0;
+      this.intentionalCloseStatus = "closed";
+      return;
+    }
+
+    if (closeCode === 4001 && closeReason?.toUpperCase().includes("UNAUTHENTICATED")) {
+      this.stopUnauthenticated("Sessao do gateway invalida: UNAUTHENTICATED.");
       return;
     }
 
@@ -445,6 +469,10 @@ export class GatewayClient {
         sessionId: null,
         seq: 0,
       });
+    }
+    if (payload.reason === "UNAUTHENTICATED" || payload.reason === "SESSION_REVOKED") {
+      this.stopUnauthenticated(`Sessao do gateway invalidada: ${payload.reason}.`);
+      return;
     }
     this.forceReconnect(`Sessao do gateway invalidada: ${payload.reason}.`);
   }
@@ -587,6 +615,52 @@ export class GatewayClient {
       window.clearTimeout(this.reconnectTimerId);
       this.reconnectTimerId = null;
     }
+  }
+
+  private async resolveGatewayToken(): Promise<string | null> {
+    const provided = String(await this.options.tokenProvider() ?? "").trim();
+    if (this.isLikelyJwt(provided)) {
+      this.tokenHint = provided;
+      return provided;
+    }
+
+    if (this.isLikelyJwt(this.tokenHint)) {
+      return this.tokenHint;
+    }
+
+    return null;
+  }
+
+  private stopUnauthenticated(reason: string): void {
+    this.stopHeartbeat();
+    this.clearReconnectTimer();
+    this.resumeToken = null;
+    this.pendingFrames = [];
+    this.updateState({
+      status: "unauthenticated",
+      reconnectAttempt: 0,
+      lastError: reason,
+      sessionId: null,
+      seq: 0,
+    });
+
+    if (this.ws) {
+      this.intentionalClose = true;
+      this.intentionalCloseStatus = "unauthenticated";
+      this.ws.close(4001, "UNAUTHENTICATED");
+    } else {
+      this.ws = null;
+      this.activeSocketUrl = null;
+    }
+  }
+
+  private isLikelyJwt(tokenRaw: string | null | undefined): boolean {
+    const token = String(tokenRaw ?? "").trim();
+    if (!token) {
+      return false;
+    }
+    const parts = token.split(".");
+    return parts.length === 3 && parts.every((part) => part.length > 0);
   }
 
   private updateState(patch: Partial<GatewayClientState>): void {

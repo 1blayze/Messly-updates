@@ -4,6 +4,7 @@ import type { GatewaySubscription } from "../gateway/protocol";
 export type GatewayConnectionStatus =
   | "idle"
   | "disabled"
+  | "unauthenticated"
   | "connecting"
   | "connected"
   | "reconnecting"
