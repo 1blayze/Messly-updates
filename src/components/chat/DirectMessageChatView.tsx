@@ -2472,7 +2472,6 @@ export default function DirectMessageChatView({
   });
   const pendingOfferByCallIdRef = useRef<Map<string, Record<string, unknown>>>(new Map());
   const processedSignalIdsRef = useRef<Set<string>>(new Set());
-  const persistedCallAutoResumeAttemptRef = useRef<Set<string>>(new Set());
   const callPopoutWindowRef = useRef<Window | null>(null);
   const callRingingAudioRef = useRef<HTMLAudioElement | null>(null);
   const callJoinAudioRef = useRef<HTMLAudioElement | null>(null);
@@ -6727,26 +6726,13 @@ export default function DirectMessageChatView({
       return;
     }
 
-    const dedupeKey = `${currentFirebaseUid}:${conversationId}:${persistedState.callId}`;
-    if (persistedCallAutoResumeAttemptRef.current.has(dedupeKey)) {
-      return;
-    }
-    persistedCallAutoResumeAttemptRef.current.add(dedupeKey);
-
+    // Only expose the reconnect card. Do not auto-join when opening a conversation.
     setRejoinAvailableCall(persistedState);
-    void resumeCallSession(persistedState).catch((error) => {
-      reportClientError(error, {
-        scope: "call.autoResumePersisted",
-        callId: persistedState.callId,
-        conversationId,
-      });
-    });
   }, [
     callPhase,
     conversationId,
     currentFirebaseUid,
     rejoinAvailableCall,
-    resumeCallSession,
   ]);
 
   const handleToggleCallMute = useCallback((): void => {

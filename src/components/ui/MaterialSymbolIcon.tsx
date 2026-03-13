@@ -30,6 +30,7 @@ const closeIconUrl = new URL("../../assets/icons/ui/close.svg", import.meta.url)
 const colorizeIconUrl = new URL("../../assets/icons/ui/colorize.svg", import.meta.url).href;
 const copyIconUrl = new URL("../../assets/icons/ui/copy-alt.svg", import.meta.url).href;
 const deleteIconUrl = new URL("../../assets/icons/ui/delete.svg", import.meta.url).href;
+const deviceIconUrl = new URL("../../assets/icons/ui/device.svg", import.meta.url).href;
 const displayIconUrl = new URL("../../assets/icons/ui/Display 1.svg", import.meta.url).href;
 const downloadIconUrl = new URL("../../assets/icons/ui/Download.svg", import.meta.url).href;
 const editIconUrl = new URL("../../assets/icons/ui/edit-2.svg", import.meta.url).href;
@@ -85,9 +86,10 @@ const ICON_URLS: Record<string, string> = {
   close: closeIconUrl,
   colorize: colorizeIconUrl,
   delete: deleteIconUrl,
+  device: deviceIconUrl,
   description: paperIconUrl,
   desktop_windows: displayIconUrl,
-  devices: displayIconUrl,
+  devices: deviceIconUrl,
   done: checkIconUrl,
   download: downloadIconUrl,
   edit: editIconUrl,
