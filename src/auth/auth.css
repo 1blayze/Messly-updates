@@ -299,7 +299,7 @@
   cursor: pointer;
 }
 
-.auth-input-addon svg {
+.auth-input-addon .ms-icon {
   width: 18px;
   height: 18px;
 }
@@ -413,7 +413,6 @@
 .auth-birth-chevron-icon {
   width: 14px;
   height: 14px;
-  display: block;
 }
 
 .auth-birth-menu {

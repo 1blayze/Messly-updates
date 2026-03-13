@@ -2336,12 +2336,7 @@
   animation: processingCoreCheckboxIconIn 360ms cubic-bezier(0.2, 0.9, 0.24, 1.2);
 }
 
-.processingCoreCheckboxInput:checked ~ .processingCoreCheckboxIcon :global(.material-symbols-rounded),
-.processingCoreCheckboxInput:checked ~ .processingCoreCheckboxIcon :global(.material-symbols-outlined) {
-  animation: processingCoreCheckboxIconPulse 360ms cubic-bezier(0.2, 0.9, 0.24, 1.2);
-}
-
-.processingCoreCheckboxInput:checked ~ .processingCoreCheckboxIcon :global(.material-symbols-sharp) {
+.processingCoreCheckboxInput:checked ~ .processingCoreCheckboxIcon :global(.ms-icon) {
   animation: processingCoreCheckboxIconPulse 360ms cubic-bezier(0.2, 0.9, 0.24, 1.2);
 }
 

@@ -2,6 +2,7 @@ import { FormEvent, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuthSession } from "./AuthProvider";
 import { toFriendlySupabaseAuthError } from "./supabaseAuthErrors";
+import MaterialSymbolIcon from "../components/ui/MaterialSymbolIcon";
 import mewsLogo from "../assets/icons/ui/messly.svg";
 import "./auth.css";
 
@@ -131,19 +132,7 @@ export default function LoginPage() {
                 aria-label={showPassword ? "Ocultar senha" : "Mostrar senha"}
                 disabled={isSubmitting}
               >
-                {showPassword ? (
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M17.94 17.94A10.94 10.94 0 0 1 12 20c-7 0-10-8-10-8a21.77 21.77 0 0 1 4.42-5.66M9.53 9.53A3 3 0 0 0 12 15a3 3 0 0 0 2.12-.88" />
-                    <path d="M1 1l22 22" />
-                    <path d="M14.12 14.12A3 3 0 0 1 9.88 9.88" />
-                    <path d="M10.73 5.08A10.94 10.94 0 0 1 12 4c7 0 10 8 10 8a21.77 21.77 0 0 1-3.17 4.11" />
-                  </svg>
-                ) : (
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M1 12s3-8 11-8 11 8 11 8-3 8-11 8-11-8-11-8z" />
-                    <circle cx="12" cy="12" r="3" />
-                  </svg>
-                )}
+                <MaterialSymbolIcon name={showPassword ? "visibility_off" : "visibility"} size={18} />
               </button>
             </div>
           </div>

@@ -277,7 +277,7 @@ const SETTINGS_SIDEBAR_ITEMS: ReadonlyArray<{
   { key: "connections", label: "Conexões", icon: "link" },
   { key: "social", label: "Conteúdo social", icon: "groups" },
   { key: "devices", label: "Dispositivos", icon: "devices" },
-  { key: "audio", label: "Voz e vídeo", icon: "graphic_eq" },
+  { key: "audio", label: "Voz e vídeo", icon: "mic" },
   { key: "windows", label: "Config. Windows", icon: "desktop_windows" },
 ];
 
@@ -1258,9 +1258,9 @@ function getDevicePlatformIcon(platform: PresencePlatform): string {
     case "desktop":
       return "desktop_windows";
     case "mobile":
-      return "smartphone";
+      return "mobile";
     default:
-      return "language";
+      return "browser";
   }
 }
 

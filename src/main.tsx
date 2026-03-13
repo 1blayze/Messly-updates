@@ -10,7 +10,7 @@ import "@fontsource/inter/latin-500.css";
 import "@fontsource/inter/latin-ext-500.css";
 import "@fontsource/inter/latin-600.css";
 import "@fontsource/inter/latin-ext-600.css";
-import "./styles/base/material-symbols.css";
+import "./styles/base/ui-icons.css";
 import { queryClient } from "./shared/queryClient";
 import { messlyStore } from "./stores/store";
 import { initializeRuntimeApiConfig } from "./config/runtimeApiConfig";

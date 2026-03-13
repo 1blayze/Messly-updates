@@ -12,6 +12,7 @@ import {
 import { formatUsernameForDisplay, normalizeUsername } from "../shared/username";
 import { ensureUser, savePendingProfile } from "../services/userSync";
 import TurnstileWidget, { type TurnstileWidgetHandle } from "../components/security/TurnstileWidget";
+import MaterialSymbolIcon from "../components/ui/MaterialSymbolIcon";
 import { createRegistrationFingerprint } from "../security/createRegistrationFingerprint";
 import mewsLogo from "../assets/icons/ui/messly.svg";
 import "./auth.css";
@@ -157,9 +158,7 @@ function BirthSelect({
       >
         <span className="auth-birth-trigger-text">{selectedOption?.label ?? placeholder}</span>
         <span className={`auth-birth-chevron ${isOpen ? "auth-birth-chevron--open" : ""}`} aria-hidden="true">
-          <svg className="auth-birth-chevron-icon" viewBox="0 0 24 24" focusable="false">
-            <path d="M6 9L12 15L18 9" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-          </svg>
+          <MaterialSymbolIcon className="auth-birth-chevron-icon" name="expand_more" size={14} />
         </span>
       </button>
 
@@ -637,19 +636,7 @@ export default function RegisterPage() {
                   onClick={() => setShowPassword((v) => !v)}
                   aria-label={showPassword ? "Ocultar senha" : "Mostrar senha"}
                 >
-                  {showPassword ? (
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M17.94 17.94A10.94 10.94 0 0 1 12 20c-7 0-10-8-10-8a21.77 21.77 0 0 1 4.42-5.66M9.53 9.53A3 3 0 0 0 12 15a3 3 0 0 0 2.12-.88" />
-                      <path d="M1 1l22 22" />
-                      <path d="M14.12 14.12A3 3 0 0 1 9.88 9.88" />
-                      <path d="M10.73 5.08A10.94 10.94 0 0 1 12 4c7 0 10 8 10 8a21.77 21.77 0 0 1-3.17 4.11" />
-                    </svg>
-                  ) : (
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M1 12s3-8 11-8 11 8 11 8-3 8-11 8-11-8-11-8z" />
-                      <circle cx="12" cy="12" r="3" />
-                    </svg>
-                  )}
+                  <MaterialSymbolIcon name={showPassword ? "visibility_off" : "visibility"} size={18} />
                 </button>
               </div>
               <p className="auth-note">Use no mínimo 8 caracteres, com pelo menos 1 letra e 1 número.</p>
