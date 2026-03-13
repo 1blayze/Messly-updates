@@ -44,29 +44,26 @@ function buildDefaultIceServers(): RTCIceServer[] {
   const turnUsername = String(import.meta.env.VITE_WEBRTC_TURN_USERNAME ?? "").trim();
   const turnCredential = String(import.meta.env.VITE_WEBRTC_TURN_CREDENTIAL ?? "").trim();
 
-  const turnServer: RTCIceServer = {
+  const defaultServers: RTCIceServer[] = [{
+    urls: [
+      "stun:stun.l.google.com:19302",
+      "stun:stun1.l.google.com:19302",
+    ],
+  }];
+
+  if (!turnUsername || !turnCredential) {
+    return defaultServers;
+  }
+
+  defaultServers.push({
     urls: [
       "turn:turn.messly.site?transport=udp",
       "turn:turn.messly.site?transport=tcp",
     ],
-  };
-
-  if (turnUsername) {
-    turnServer.username = turnUsername;
-  }
-  if (turnCredential) {
-    turnServer.credential = turnCredential;
-  }
-
-  return [
-    {
-      urls: [
-        "stun:stun.l.google.com:19302",
-        "stun:stun1.l.google.com:19302",
-      ],
-    },
-    turnServer,
-  ];
+    username: turnUsername,
+    credential: turnCredential,
+  });
+  return defaultServers;
 }
 
 const DEFAULT_ICE_SERVERS: RTCIceServer[] = buildDefaultIceServers();
@@ -100,6 +97,60 @@ function parseIntegerEnv(rawValue: unknown, fallback: number, min: number, max: 
   return Math.min(max, Math.max(min, parsed));
 }
 
+function normalizeIceServerUrls(rawUrls: RTCIceServer["urls"]): string[] {
+  if (Array.isArray(rawUrls)) {
+    return rawUrls
+      .filter((url): url is string => typeof url === "string")
+      .map((url) => url.trim())
+      .filter((url) => url.length > 0);
+  }
+
+  if (typeof rawUrls === "string") {
+    const normalized = rawUrls.trim();
+    return normalized ? [normalized] : [];
+  }
+
+  return [];
+}
+
+function isTurnUrl(url: string): boolean {
+  const normalized = String(url ?? "").trim().toLowerCase();
+  return normalized.startsWith("turn:") || normalized.startsWith("turns:");
+}
+
+function normalizeIceServer(rawServer: RTCIceServer): RTCIceServer | null {
+  const urls = normalizeIceServerUrls(rawServer.urls);
+  if (urls.length === 0) {
+    return null;
+  }
+
+  const username = typeof rawServer.username === "string" ? rawServer.username.trim() : "";
+  const credential = typeof rawServer.credential === "string" ? rawServer.credential.trim() : "";
+
+  const turnUrls = urls.filter((url) => isTurnUrl(url));
+  const nonTurnUrls = urls.filter((url) => !isTurnUrl(url));
+  const hasTurnUrls = turnUrls.length > 0;
+  const hasTurnCredentials = Boolean(username && credential);
+
+  if (hasTurnUrls && !hasTurnCredentials) {
+    if (nonTurnUrls.length === 0) {
+      return null;
+    }
+    return {
+      urls: nonTurnUrls,
+    };
+  }
+
+  const normalizedServer: RTCIceServer = {
+    urls,
+  };
+  if (hasTurnCredentials) {
+    normalizedServer.username = username;
+    normalizedServer.credential = credential;
+  }
+  return normalizedServer;
+}
+
 function parseIceServers(): RTCIceServer[] {
   const rawJson = String(import.meta.env.VITE_WEBRTC_ICE_SERVERS_JSON ?? "").trim();
   if (!rawJson) {
@@ -114,31 +165,7 @@ function parseIceServers(): RTCIceServer[] {
 
     const normalizedServers = parsed
       .filter((item) => item && typeof item === "object" && !Array.isArray(item))
-      .map((item) => {
-        const typed = item as RTCIceServer;
-        const urls = Array.isArray(typed.urls)
-          ? typed.urls.filter((url) => typeof url === "string" && url.trim().length > 0)
-          : typeof typed.urls === "string" && typed.urls.trim().length > 0
-            ? typed.urls
-            : null;
-
-        if (!urls) {
-          return null;
-        }
-
-        const nextServer: RTCIceServer = {
-          urls,
-        };
-
-        if (typeof typed.username === "string" && typed.username.trim()) {
-          nextServer.username = typed.username;
-        }
-        if (typeof typed.credential === "string" && typed.credential.trim()) {
-          nextServer.credential = typed.credential;
-        }
-
-        return nextServer;
-      })
+      .map((item) => normalizeIceServer(item as RTCIceServer))
       .filter((value): value is RTCIceServer => Boolean(value));
 
     if (normalizedServers.length === 0) {
