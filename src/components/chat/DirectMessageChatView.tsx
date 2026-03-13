@@ -7400,8 +7400,12 @@ export default function DirectMessageChatView({
     (callPhase !== "idle" && callPhase !== "incoming")
     || isCallParticipantConnected(effectiveCallSession, currentFirebaseUid)
     || Boolean(callLocalStream);
+  const shouldKeepRemoteParticipantVisible =
+    callPhase === "reconnecting" ||
+    (callPhase === "connecting" && Boolean(activeCallIdRef.current));
   const isRemoteParticipantInCall = isCallParticipantConnected(effectiveCallSession, remoteParticipantUidForPresence)
-    || Boolean(callRemoteStream);
+    || Boolean(callRemoteStream)
+    || shouldKeepRemoteParticipantVisible;
   useEffect(() => {
     const shouldPlayRingingTone =
       (callPhase === "outgoing" || callPhase === "incoming") &&
@@ -7444,7 +7448,7 @@ export default function DirectMessageChatView({
     previousRemoteParticipantInCallRef.current = false;
   }, []);
   useEffect(() => {
-    if (!isLocalParticipantInCall || isRemoteParticipantInCall) {
+    if (!isLocalParticipantInCall || !isRemoteParticipantInCall) {
       return;
     }
     setCallErrorText(null);

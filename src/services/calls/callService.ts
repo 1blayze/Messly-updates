@@ -480,6 +480,7 @@ export class CallService {
   private connectionInterruptedAtMs: number | null = null;
   private iceGatheringTimeoutId: number | null = null;
   private connectionTimeoutId: number | null = null;
+  private signalProcessingChain: Promise<void> = Promise.resolve();
   private micManuallyEnabled = true;
   private pushToTalkPressed = false;
   private disposed = false;
@@ -738,33 +739,50 @@ export class CallService {
       return null;
     }
 
-    try {
-      if (signal.type === "offer") {
-        const payload = toSessionDescriptionPayload(signal.payload, "offer");
-        const answerPayload = await this.acceptOffer(payload);
-        return {
-          type: "answer",
-          payload: answerPayload,
-        };
-      }
+    return this.enqueueSignalTask(async () => {
+      try {
+        if (signal.type === "offer") {
+          const payload = toSessionDescriptionPayload(signal.payload, "offer");
+          const answerPayload = await this.acceptOffer(payload);
+          if (!answerPayload) {
+            return null;
+          }
+          return {
+            type: "answer",
+            payload: answerPayload,
+          };
+        }
 
-      if (signal.type === "answer") {
-        const payload = toSessionDescriptionPayload(signal.payload, "answer");
-        await this.applyAnswer(payload);
+        if (signal.type === "answer") {
+          const payload = toSessionDescriptionPayload(signal.payload, "answer");
+          await this.applyAnswer(payload);
+          return null;
+        }
+
+        if (signal.type === "ice") {
+          const payload = toIceCandidatePayload(signal.payload);
+          await this.applyIceCandidate(payload.candidate);
+          return null;
+        }
+
         return null;
-      }
+      } catch (error) {
+        if (this.isRecoverableSignalError(error)) {
+          const peer = this.peerConnection;
+          this.logRtc("signal-ignored", {
+            signalType: signal.type,
+            message: this.getErrorMessage(error),
+            signalingState: peer?.signalingState ?? null,
+            connectionState: peer?.connectionState ?? null,
+            iceConnectionState: peer?.iceConnectionState ?? null,
+          }, true, "warn");
+          return null;
+        }
 
-      if (signal.type === "ice") {
-        const payload = toIceCandidatePayload(signal.payload);
-        await this.applyIceCandidate(payload.candidate);
-        return null;
+        this.emitError(error);
+        throw error;
       }
-
-      return null;
-    } catch (error) {
-      this.emitError(error);
-      throw error;
-    }
+    });
   }
 
   toggleMute(): boolean {
@@ -957,13 +975,55 @@ export class CallService {
     this.videoSender = null;
   }
 
-  private async acceptOffer(offer: SessionDescriptionPayload): Promise<Record<string, unknown>> {
+  private async acceptOffer(offer: SessionDescriptionPayload): Promise<Record<string, unknown> | null> {
     const pc = await this.ensurePeerConnection();
     await this.ensureLocalMedia();
-    await this.setRemoteDescriptionSafe(pc, offer);
+    const normalizedOfferSdp = normalizeSdp(offer.sdp);
+    if (!normalizedOfferSdp) {
+      return null;
+    }
+
+    const currentRemoteSdp = normalizeSdp(pc.currentRemoteDescription?.sdp ?? "");
+    if (pc.signalingState === "stable" && currentRemoteSdp && currentRemoteSdp === normalizedOfferSdp) {
+      // Duplicate offer already answered.
+      return null;
+    }
+
+    if (pc.signalingState === "have-local-offer") {
+      try {
+        await pc.setLocalDescription({ type: "rollback" });
+      } catch {
+        // Ignore rollback failure and continue with best-effort setRemoteDescription.
+      }
+    }
+
+    await this.setRemoteDescriptionSafe(pc, {
+      type: "offer",
+      sdp: normalizedOfferSdp,
+    });
     await this.flushPendingCandidates();
+
+    if (pc.signalingState !== "have-remote-offer") {
+      // Negotiation was superseded while processing this stale/duplicate offer.
+      return null;
+    }
+
     const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
+    if (pc.signalingState !== "have-remote-offer") {
+      return null;
+    }
+
+    try {
+      await pc.setLocalDescription(answer);
+    } catch (error) {
+      const message = String((error as { message?: unknown })?.message ?? "").toLowerCase();
+      const calledInWrongState = message.includes("called in wrong state");
+      const signalingState = String(pc.signalingState ?? "").toLowerCase();
+      if (calledInWrongState && signalingState === "stable") {
+        return null;
+      }
+      throw error;
+    }
     return {
       type: "answer",
       sdp: answer.sdp ?? "",
@@ -1054,7 +1114,19 @@ export class CallService {
       this.pendingRemoteCandidates.push(candidate);
       return;
     }
-    await pc.addIceCandidate(new RTCIceCandidate(candidate));
+    try {
+      await pc.addIceCandidate(new RTCIceCandidate(candidate));
+    } catch (error) {
+      if (this.isRecoverableSignalError(error)) {
+        this.logRtc("remote-ice-candidate-ignored", {
+          type: candidateType,
+          message: this.getErrorMessage(error),
+          signalingState: pc.signalingState,
+        }, true, "warn");
+        return;
+      }
+      throw error;
+    }
   }
 
   private async flushPendingCandidates(): Promise<void> {
@@ -1066,7 +1138,19 @@ export class CallService {
     const pending = [...this.pendingRemoteCandidates];
     this.pendingRemoteCandidates = [];
     for (const candidate of pending) {
-      await pc.addIceCandidate(new RTCIceCandidate(candidate));
+      try {
+        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+      } catch (error) {
+        if (this.isRecoverableSignalError(error)) {
+          this.logRtc("pending-ice-candidate-ignored", {
+            type: getIceCandidateKind(candidate),
+            message: this.getErrorMessage(error),
+            signalingState: pc.signalingState,
+          }, true, "warn");
+          continue;
+        }
+        throw error;
+      }
     }
   }
 
@@ -1815,6 +1899,43 @@ export class CallService {
       return error.message;
     }
     return String(error ?? "unknown");
+  }
+
+  private isRecoverableSignalError(error: unknown): boolean {
+    const message = this.getErrorMessage(error).toLowerCase();
+    if (!message) {
+      return false;
+    }
+    if (message.includes("called in wrong state")) {
+      return true;
+    }
+    if (message.includes("failed to set local") && message.includes("sdp")) {
+      return true;
+    }
+    if (message.includes("failed to set remote") && message.includes("sdp")) {
+      return true;
+    }
+    if (message.includes("addicecandidate") && message.includes("remote description")) {
+      return true;
+    }
+    if (message.includes("ice candidate") && message.includes("ufrag")) {
+      return true;
+    }
+    if (message.includes("error processing ice candidate")) {
+      return true;
+    }
+    if (message.includes("sdp does not match")) {
+      return true;
+    }
+    return false;
+  }
+
+  private enqueueSignalTask<T>(task: () => Promise<T>): Promise<T> {
+    const nextTask = this.signalProcessingChain.then(task, task);
+    this.signalProcessingChain = nextTask
+      .then(() => undefined)
+      .catch(() => undefined);
+    return nextTask;
   }
 
   private logRtc(
