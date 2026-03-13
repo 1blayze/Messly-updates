@@ -214,11 +214,11 @@ export default function UserCard({
       case "connecting":
         return "Conectando";
       case "reconnecting":
-        return "Reconectando";
+        return modeLabel === "video" ? "Chamada de video" : "Chamada de voz";
       case "disconnected":
-        return modeLabel === "video" ? "Chamada de vídeo" : "Chamada de voz";
+        return modeLabel === "video" ? "Chamada de video" : "Chamada de voz";
       case "active":
-        return modeLabel === "video" ? "Chamada de vídeo" : "Chamada de voz";
+        return modeLabel === "video" ? "Chamada de video" : "Chamada de voz";
       default:
         return "Aguardando chamada";
     }
@@ -668,3 +668,4 @@ export default function UserCard({
     </div>
   );
 }
+

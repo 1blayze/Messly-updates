@@ -99,11 +99,13 @@ const CHAT_PERF_DEDUPE_WINDOW_MS = 900;
 const CALL_RING_TIMEOUT_MS = 3 * 60 * 1000;
 const CALL_SOLO_TIMEOUT_MS = 3 * 60 * 1000;
 const CALL_REALTIME_CHANNEL_NAME = "dm-call";
-const CALL_KEEPALIVE_INTERVAL_MS = 4_000;
+const CALL_KEEPALIVE_INTERVAL_MS = 1_500;
 const CALL_DISCONNECT_FINALIZE_TIMEOUT_MS = 8_000;
 const CALL_RESUME_STORAGE_KEY_PREFIX = "messly:call-resume:v1:";
 const CALL_RESUME_MAX_AGE_MS = 15 * 60_000;
 const AUDIO_SETTINGS_STORAGE_KEY_PREFIX = "messly:audio-settings:";
+const AUDIO_SETTINGS_UPDATED_EVENT = "messly:audio-settings-updated";
+const DEFAULT_PUSH_TO_TALK_BIND = "V";
 const CALL_RINGING_SOUND_URL = new URL("../../assets/sounds/call_ringing.mp3", import.meta.url).href;
 const CALL_JOIN_SOUND_URL = new URL("../../assets/sounds/call_join.mp3", import.meta.url).href;
 const CALL_LEAVE_SOUND_URL = new URL("../../assets/sounds/call_leave.mp3", import.meta.url).href;
@@ -1382,25 +1384,33 @@ function resolveRemoteCallParticipantUid(
   currentUidRaw: string | null | undefined,
   fallbackUidRaw: string | null | undefined,
 ): string | null {
+  const currentUid = String(currentUidRaw ?? "").trim();
+  const fallbackUid = String(fallbackUidRaw ?? "").trim();
+
   if (!session) {
-    const fallbackUid = String(fallbackUidRaw ?? "").trim();
-    return fallbackUid || null;
+    if (fallbackUid && fallbackUid !== currentUid) {
+      return fallbackUid;
+    }
+    return null;
   }
 
-  const currentUid = String(currentUidRaw ?? "").trim();
   const participantUids = Object.keys(session.participants ?? {});
   if (participantUids.length === 0) {
-    const fallbackUid = String(fallbackUidRaw ?? "").trim();
-    return fallbackUid || null;
+    if (fallbackUid && fallbackUid !== currentUid) {
+      return fallbackUid;
+    }
+    return null;
   }
 
-  const otherUid = participantUids.find((uid) => uid !== currentUid) ?? participantUids[0];
+  const otherUid = participantUids.find((uid) => uid !== currentUid) ?? null;
   if (otherUid) {
     return otherUid;
   }
 
-  const fallbackUid = String(fallbackUidRaw ?? "").trim();
-  return fallbackUid || null;
+  if (fallbackUid && fallbackUid !== currentUid) {
+    return fallbackUid;
+  }
+  return null;
 }
 
 function normalizeRealtimeCallEvent(raw: unknown): CallRealtimeEvent | null {
@@ -1479,6 +1489,33 @@ function countConnectedCallParticipantsExcluding(
   }).length;
 }
 
+function isRejoinCallStateConnectable(
+  state: RejoinAvailableCallState | null | undefined,
+  currentUidRaw: string | null | undefined,
+): boolean {
+  if (!state) {
+    return false;
+  }
+
+  const conversationId = String(state.conversationId ?? "").trim();
+  const callId = String(state.callId ?? "").trim();
+  if (!conversationId || !callId) {
+    return false;
+  }
+
+  const session = state.session;
+  if (!session || session.status !== "active") {
+    return false;
+  }
+
+  const currentUid = String(currentUidRaw ?? "").trim();
+  if (!currentUid) {
+    return false;
+  }
+
+  return countConnectedCallParticipantsExcluding(session, currentUid) > 0;
+}
+
 function filterScreenShareSourcesByTab(
   sources: CallScreenShareSource[],
   tab: "window" | "screen" | "device",
@@ -1514,6 +1551,7 @@ interface PersistedCallAudioSettings {
   autoSensitivity: boolean;
   sensitivityDb: number;
   pushToTalkEnabled: boolean;
+  pushToTalkBind?: string;
   qosHighPriority: boolean;
 }
 
@@ -1527,6 +1565,82 @@ function toRoundedFiniteNumber(value: unknown, fallback: number, min: number, ma
     return fallback;
   }
   return Math.min(max, Math.max(min, Math.round(numeric)));
+}
+
+function normalizePushToTalkBind(rawValue: unknown): string {
+  const value = String(rawValue ?? "").trim().toUpperCase();
+  return value.length > 0 ? value : DEFAULT_PUSH_TO_TALK_BIND;
+}
+
+function formatPushToTalkBinding(event: KeyboardEvent): string {
+  const code = String(event.code ?? "").trim();
+  if (code.startsWith("Key") && code.length === 4) {
+    return code.slice(3).toUpperCase();
+  }
+  if (code.startsWith("Digit") && code.length === 6) {
+    return code.slice(5);
+  }
+  if (code === "Space") {
+    return "SPACE";
+  }
+  const key = String(event.key ?? "").trim();
+  if (key.length === 1) {
+    return key.toUpperCase();
+  }
+  if (key.toLowerCase() === " ") {
+    return "SPACE";
+  }
+  return key.toUpperCase();
+}
+
+function matchesPushToTalkBinding(event: KeyboardEvent, binding: string): boolean {
+  const normalizedBinding = normalizePushToTalkBind(binding);
+  const normalizedEventBinding = normalizePushToTalkBind(formatPushToTalkBinding(event));
+  return normalizedBinding === normalizedEventBinding;
+}
+
+function toSafeCallErrorMessage(
+  error: unknown,
+  fallback: string,
+  options?: { silentWhenUserCancelled?: boolean; silentWhenRecoverable?: boolean },
+): string | null {
+  const name = String((error as { name?: unknown } | null)?.name ?? "").trim().toLowerCase();
+  const rawMessage = String((error as { message?: unknown } | null)?.message ?? "").trim();
+  const normalizedMessage = rawMessage.toLowerCase();
+  const silentWhenUserCancelled = options?.silentWhenUserCancelled ?? false;
+  const silentWhenRecoverable = options?.silentWhenRecoverable ?? false;
+
+  if (name === "notallowederror" || normalizedMessage.includes("permission denied")) {
+    return silentWhenUserCancelled ? null : "Permissao para compartilhar tela negada.";
+  }
+
+  if (name === "aborterror" || normalizedMessage.includes("cancel")) {
+    return silentWhenUserCancelled ? null : "Compartilhamento de tela cancelado.";
+  }
+
+  if (name === "notfounderror" || normalizedMessage.includes("no screen")) {
+    return "Nenhuma fonte de tela disponivel para compartilhamento.";
+  }
+
+  if (
+    normalizedMessage.includes("called in wrong state")
+    || normalizedMessage.includes("failed to set local")
+    || normalizedMessage.includes("failed to set remote")
+    || normalizedMessage.includes("error processing ice candidate")
+  ) {
+    return silentWhenRecoverable ? null : "Instabilidade de conexao na chamada.";
+  }
+
+  if (!rawMessage) {
+    return fallback;
+  }
+
+  // Prevent surfacing raw browser/RTC internals directly in the UI.
+  if (normalizedMessage.includes("rtcpeerconnection") || normalizedMessage.includes("domexception")) {
+    return fallback;
+  }
+
+  return fallback;
 }
 
 function buildCallAudioSettingsStorageKey(userUid: string | null | undefined): string {
@@ -1585,13 +1699,20 @@ function readPersistedCallResumeState(
       return null;
     }
 
-    return {
+    const nextState: RejoinAvailableCallState = {
       conversationId,
       mode: modeRaw as CallMode,
       callId,
       targetUid: targetUidRaw || null,
       session,
     };
+
+    if (!isRejoinCallStateConnectable(nextState, userUid)) {
+      window.localStorage.removeItem(storageKey);
+      return null;
+    }
+
+    return nextState;
   } catch {
     return null;
   }
@@ -1661,6 +1782,7 @@ function readPersistedCallAudioSettings(userUid: string | null | undefined): Cal
       sensitivityDb: toRoundedFiniteNumber(parsed.sensitivityDb, -55, -100, 0),
       qosHighPriority: toBoolean(parsed.qosHighPriority, false),
       pushToTalkEnabled: toBoolean(parsed.pushToTalkEnabled, false),
+      pushToTalkBind: normalizePushToTalkBind(parsed.pushToTalkBind),
     };
   } catch {
     return null;
@@ -2355,6 +2477,9 @@ export default function DirectMessageChatView({
   const callRingingAudioRef = useRef<HTMLAudioElement | null>(null);
   const callJoinAudioRef = useRef<HTMLAudioElement | null>(null);
   const callLeaveAudioRef = useRef<HTMLAudioElement | null>(null);
+  const pushToTalkBindRef = useRef<string>(DEFAULT_PUSH_TO_TALK_BIND);
+  const pushToTalkEnabledRef = useRef<boolean>(false);
+  const pushToTalkPressedRef = useRef<boolean>(false);
   const previousRemoteParticipantInCallRef = useRef(false);
   const previousCallPhaseRef = useRef<"idle" | "incoming" | "outgoing" | "connecting" | "active" | "reconnecting">("idle");
   const openPerfRef = useRef<{ conversationId: string; openedAt: number; firstPaintLogged: boolean }>({
@@ -5568,7 +5693,7 @@ export default function DirectMessageChatView({
         : null;
 
     const nextState = overrideState ?? fallbackState ?? fallbackRejoinState;
-    if (!nextState) {
+    if (!nextState || !isRejoinCallStateConnectable(nextState, normalizedUid)) {
       clearPersistedCallResumeState(normalizedUid, normalizedConversationId);
       return;
     }
@@ -5657,6 +5782,16 @@ export default function DirectMessageChatView({
   }, [activeCallSession, callPhase, incomingCallSession, outgoingCallSession]);
 
   useEffect(() => {
+    if (!rejoinAvailableCall) {
+      return;
+    }
+    if (isRejoinCallStateConnectable(rejoinAvailableCall, currentFirebaseUid)) {
+      return;
+    }
+    setRejoinAvailableCall(null);
+  }, [currentFirebaseUid, rejoinAvailableCall]);
+
+  useEffect(() => {
     if (!currentFirebaseUid) {
       return;
     }
@@ -5681,7 +5816,11 @@ export default function DirectMessageChatView({
       return;
     }
 
-    if (rejoinAvailableCall && rejoinAvailableCall.conversationId === conversationId) {
+    if (
+      rejoinAvailableCall &&
+      rejoinAvailableCall.conversationId === conversationId &&
+      isRejoinCallStateConnectable(rejoinAvailableCall, currentFirebaseUid)
+    ) {
       persistCurrentCallResumeSnapshot(rejoinAvailableCall);
       return;
     }
@@ -5795,6 +5934,8 @@ export default function DirectMessageChatView({
     }
 
     const persistedAudioSettings = readPersistedCallAudioSettings(currentFirebaseUid || currentUserId);
+    pushToTalkEnabledRef.current = Boolean(persistedAudioSettings?.pushToTalkEnabled);
+    pushToTalkBindRef.current = normalizePushToTalkBind(persistedAudioSettings?.pushToTalkBind);
     const service = new CallService({
       mode,
       audioSettings: persistedAudioSettings,
@@ -5880,7 +6021,11 @@ export default function DirectMessageChatView({
         if (callServiceRef.current !== service || isLocalCallDisconnectedRef.current) {
           return;
         }
-        setCallErrorText(error.message || "Erro na chamada.");
+        setCallErrorText(
+          toSafeCallErrorMessage(error, "Falha temporaria na chamada.", {
+            silentWhenRecoverable: true,
+          }),
+        );
       },
     });
 
@@ -5900,6 +6045,119 @@ export default function DirectMessageChatView({
     targetFirebaseUid,
     targetUser.userId,
   ]);
+
+  const applyLatestCallAudioSettings = useCallback((): void => {
+    const nextSettings = readPersistedCallAudioSettings(currentFirebaseUid || currentUserId);
+    pushToTalkEnabledRef.current = Boolean(nextSettings?.pushToTalkEnabled);
+    pushToTalkBindRef.current = normalizePushToTalkBind(nextSettings?.pushToTalkBind);
+
+    const service = callServiceRef.current;
+    if (!service || !nextSettings) {
+      return;
+    }
+
+    if (!pushToTalkEnabledRef.current && pushToTalkPressedRef.current) {
+      pushToTalkPressedRef.current = false;
+      service.setPushToTalkPressed(false);
+    }
+
+    void service.updateAudioSettings(nextSettings).catch((error) => {
+      reportClientError(error, {
+        scope: "call.applyLatestAudioSettings",
+        callId: activeCallIdRef.current ?? "",
+      });
+    });
+  }, [currentFirebaseUid, currentUserId]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const expectedStorageKey = buildCallAudioSettingsStorageKey(currentFirebaseUid || currentUserId);
+    const applySettings = (): void => {
+      applyLatestCallAudioSettings();
+    };
+    const handleAudioSettingsUpdated = (event: Event): void => {
+      const detail = (event as CustomEvent<{ storageKey?: unknown }>).detail;
+      const detailStorageKey = String(detail?.storageKey ?? "").trim();
+      if (detailStorageKey && detailStorageKey !== expectedStorageKey) {
+        return;
+      }
+      applySettings();
+    };
+    const handleStorageUpdate = (event: StorageEvent): void => {
+      if (event.storageArea !== window.localStorage) {
+        return;
+      }
+      if (event.key && event.key !== expectedStorageKey) {
+        return;
+      }
+      applySettings();
+    };
+
+    applySettings();
+    window.addEventListener(AUDIO_SETTINGS_UPDATED_EVENT, handleAudioSettingsUpdated as EventListener);
+    window.addEventListener("storage", handleStorageUpdate);
+    return () => {
+      window.removeEventListener(AUDIO_SETTINGS_UPDATED_EVENT, handleAudioSettingsUpdated as EventListener);
+      window.removeEventListener("storage", handleStorageUpdate);
+    };
+  }, [applyLatestCallAudioSettings, currentFirebaseUid, currentUserId]);
+
+  useEffect(() => {
+    const releasePushToTalk = (): void => {
+      if (!pushToTalkPressedRef.current) {
+        return;
+      }
+      pushToTalkPressedRef.current = false;
+      callServiceRef.current?.setPushToTalkPressed(false);
+    };
+
+    if (callPhase === "idle") {
+      releasePushToTalk();
+      return;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (!pushToTalkEnabledRef.current || pushToTalkPressedRef.current || event.repeat) {
+        return;
+      }
+      if (!matchesPushToTalkBinding(event, pushToTalkBindRef.current)) {
+        return;
+      }
+      pushToTalkPressedRef.current = true;
+      callServiceRef.current?.setPushToTalkPressed(true);
+    };
+
+    const handleKeyUp = (event: KeyboardEvent): void => {
+      if (!pushToTalkEnabledRef.current || !pushToTalkPressedRef.current) {
+        return;
+      }
+      if (!matchesPushToTalkBinding(event, pushToTalkBindRef.current)) {
+        return;
+      }
+      releasePushToTalk();
+    };
+
+    const handleVisibilityChange = (): void => {
+      if (document.visibilityState !== "visible") {
+        releasePushToTalk();
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown, true);
+    window.addEventListener("keyup", handleKeyUp, true);
+    window.addEventListener("blur", releasePushToTalk);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown, true);
+      window.removeEventListener("keyup", handleKeyUp, true);
+      window.removeEventListener("blur", releasePushToTalk);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      releasePushToTalk();
+    };
+  }, [callPhase]);
 
   const resolveTargetCallFirebaseUid = useCallback(async (): Promise<string | null> => {
     if (targetFirebaseUid) {
@@ -5983,7 +6241,11 @@ export default function DirectMessageChatView({
         conversationId,
         mode,
       });
-      setCallErrorText(error instanceof Error ? error.message : "Nao foi possivel iniciar chamada.");
+      setCallErrorText(
+        toSafeCallErrorMessage(error, "Nao foi possivel iniciar chamada.", {
+          silentWhenRecoverable: true,
+        }),
+      );
       await resetCallUi();
     }
   }, [
@@ -6012,7 +6274,11 @@ export default function DirectMessageChatView({
         scope: "call.declineIncoming",
         callId: incomingCallSession.id,
       });
-      setCallErrorText(error instanceof Error ? error.message : "Nao foi possivel recusar chamada.");
+      setCallErrorText(
+        toSafeCallErrorMessage(error, "Nao foi possivel recusar chamada.", {
+          silentWhenRecoverable: true,
+        }),
+      );
     } finally {
       setIncomingCallSession(null);
       if (!activeCallIdRef.current) {
@@ -6087,7 +6353,11 @@ export default function DirectMessageChatView({
         scope: "call.acceptIncoming",
         callId: incomingCallSession.id,
       });
-      setCallErrorText(error instanceof Error ? error.message : "Nao foi possivel aceitar chamada.");
+      setCallErrorText(
+        toSafeCallErrorMessage(error, "Nao foi possivel aceitar chamada.", {
+          silentWhenRecoverable: true,
+        }),
+      );
       await resetCallUi();
     }
   }, [currentFirebaseUid, ensureCallService, incomingCallSession, resetCallUi, sendCallRealtimeEvent]);
@@ -6128,7 +6398,9 @@ export default function DirectMessageChatView({
         return Boolean(participant?.joinedAt && !participant?.leftAt);
       }),
     );
-    const inferredRemoteConnected = hasAnyOtherParticipantConnected || Boolean(callRemoteStream);
+    const inferredRemoteConnected =
+      hasAnyOtherParticipantConnected ||
+      (preserveForResume && Boolean(callRemoteStream));
     const sessionForHangupPayload = (() => {
       if (!sessionAfterLocalDisconnect) {
         return null;
@@ -6417,7 +6689,11 @@ export default function DirectMessageChatView({
         callId,
         conversationId: normalizedConversationId,
       });
-      setCallErrorText(error instanceof Error ? error.message : "Nao foi possivel reconectar na chamada.");
+      setCallErrorText(
+        toSafeCallErrorMessage(error, "Nao foi possivel reconectar na chamada.", {
+          silentWhenRecoverable: true,
+        }),
+      );
       setRejoinAvailableCall(rejoinState);
       await resetCallUi();
     }
@@ -6583,6 +6859,7 @@ export default function DirectMessageChatView({
         setIsScreenSharePickerOpen(false);
         setCallErrorText(null);
       } else {
+        setActiveScreenSharerUid(null);
         setCallErrorText("Nao foi possivel iniciar o compartilhamento de tela.");
       }
     } catch (error) {
@@ -6590,7 +6867,13 @@ export default function DirectMessageChatView({
         scope: "call.startScreenShare",
         callId: activeCallIdRef.current ?? "",
       });
-      setCallErrorText(error instanceof Error ? error.message : "Falha ao compartilhar tela.");
+      setCallErrorText(
+        toSafeCallErrorMessage(error, "Falha ao compartilhar tela.", {
+          silentWhenUserCancelled: true,
+          silentWhenRecoverable: true,
+        }),
+      );
+      setActiveScreenSharerUid(null);
     }
   }, [currentFirebaseUid, screenShareQuality, sendCallRealtimeEvent]);
 
@@ -6625,6 +6908,8 @@ export default function DirectMessageChatView({
     if (isCallScreenSharing) {
       void service.stopScreenShare().then(async () => {
         setIsCallScreenSharing(false);
+        setActiveScreenSharerUid(null);
+        setCallErrorText(null);
       }).catch((error) => {
         reportClientError(error, {
           scope: "call.stopScreenShare",
@@ -7142,7 +7427,11 @@ export default function DirectMessageChatView({
                   callId: event.callId,
                   signalType: event.signalType,
                 });
-                setCallErrorText(error instanceof Error ? error.message : "Falha no sinal da chamada.");
+                setCallErrorText(
+                  toSafeCallErrorMessage(error, "Falha no sinal da chamada.", {
+                    silentWhenRecoverable: true,
+                  }),
+                );
               }
             })();
           },
@@ -7278,7 +7567,7 @@ export default function DirectMessageChatView({
         return;
       }
       void flushPendingCallEvents();
-    }, 2500);
+    }, 700);
 
     return () => {
       window.clearInterval(timer);
@@ -7402,7 +7691,7 @@ export default function DirectMessageChatView({
     || Boolean(callLocalStream);
   const shouldKeepRemoteParticipantVisible =
     callPhase === "reconnecting" ||
-    (callPhase === "connecting" && Boolean(activeCallIdRef.current));
+    ((callPhase === "connecting" || callPhase === "active") && Boolean(activeCallIdRef.current));
   const isRemoteParticipantInCall = isCallParticipantConnected(effectiveCallSession, remoteParticipantUidForPresence)
     || Boolean(callRemoteStream)
     || shouldKeepRemoteParticipantVisible;
@@ -7483,12 +7772,12 @@ export default function DirectMessageChatView({
     isRemoteParticipantInCall,
   ]);
   const localCallParticipant = {
-    id: currentFirebaseUid || currentUserId,
+    id: currentFirebaseUid || currentUserId || "local-participant",
     name: String(currentUser.displayName ?? "").trim() || String(currentUser.username ?? "").trim() || "Voce",
     avatarSrc: currentAvatarSrc,
   };
   const remoteCallParticipant = {
-    id: targetFirebaseUid || targetUser.userId,
+    id: remoteParticipantUidForPresence || targetFirebaseUid || targetUser.userId || "remote-participant",
     name: safeTargetDisplayName,
     avatarSrc: targetAvatarSrc,
   };
@@ -7515,7 +7804,10 @@ export default function DirectMessageChatView({
       Boolean(activeScreenSharerUid)
     );
   const isExpandedCallLayoutActive = isCallLayoutActive && (inCallMode === "video" || isScreenShareCallLayoutActive);
-  const isRejoinCallLayoutActive = callPhase === "idle" && rejoinAvailableCall?.conversationId === conversationId;
+  const canRejoinAvailableCall =
+    rejoinAvailableCall?.conversationId === conversationId &&
+    isRejoinCallStateConnectable(rejoinAvailableCall, currentFirebaseUid);
+  const isRejoinCallLayoutActive = callPhase === "idle" && canRejoinAvailableCall;
   const visibleScreenShareSources = useMemo(
     () => filterScreenShareSourcesByTab(screenShareSources, screenShareTab),
     [screenShareSources, screenShareTab],
@@ -7525,8 +7817,7 @@ export default function DirectMessageChatView({
     const hasActiveOrPendingCall = callPhase !== "idle";
     const canShowRejoinCall =
       !hasActiveOrPendingCall &&
-      Boolean(rejoinAvailableCall?.conversationId) &&
-      rejoinAvailableCall?.conversationId === conversationId;
+      canRejoinAvailableCall;
     const shouldExposeCallToSidebar = (hasActiveOrPendingCall && callPhase !== "incoming") || canShowRejoinCall;
 
     dispatchSidebarCallState({
@@ -7553,6 +7844,7 @@ export default function DirectMessageChatView({
     isCallMicEnabled,
     isCallPopoutOpen,
     isCallSoundEnabled,
+    canRejoinAvailableCall,
     rejoinAvailableCall,
     safeTargetDisplayName,
   ]);

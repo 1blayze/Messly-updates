@@ -44,6 +44,7 @@ export interface CallAudioSettings {
   sensitivityDb?: number | null;
   qosHighPriority?: boolean | null;
   pushToTalkEnabled?: boolean | null;
+  pushToTalkBind?: string | null;
 }
 
 export interface CallServiceOptions {
@@ -241,11 +242,13 @@ function resolveVadThreshold(autoSensitivity: boolean, sensitivityDb: number): n
   return 0.02 + ((normalizedDb + 100) / 100) * 0.18;
 }
 
-function parseScreenShareQuality(raw: string | null | undefined): {
+interface ScreenShareQualityConfig {
   width: number;
   height: number;
   frameRate: number;
-} {
+}
+
+function parseScreenShareQuality(raw: string | null | undefined): ScreenShareQualityConfig {
   const normalized = String(raw ?? "").trim().toLowerCase();
   switch (normalized) {
     case "480p30":
@@ -268,6 +271,21 @@ function parseScreenShareQuality(raw: string | null | undefined): {
     default:
       return { width: 1280, height: 720, frameRate: 30 };
   }
+}
+
+function resolveScreenShareBitrateBps(quality: ScreenShareQualityConfig): number {
+  const totalPixels = Math.max(1, quality.width * quality.height);
+  const totalFrames = Math.max(1, totalPixels * Math.max(1, quality.frameRate));
+  if (totalFrames >= 3840 * 2160 * 30) {
+    return 16_000_000;
+  }
+  if (totalFrames >= 2560 * 1440 * 30) {
+    return 10_000_000;
+  }
+  if (totalFrames >= 1920 * 1080 * 30) {
+    return 7_000_000;
+  }
+  return 4_000_000;
 }
 
 function extractSdpString(raw: unknown): string {
@@ -867,6 +885,7 @@ export class CallService {
   async startScreenShare(options?: StartScreenShareOptions): Promise<boolean> {
     const pc = await this.ensurePeerConnection();
     const videoSender = this.getVideoSender(pc);
+    const screenShareQuality = parseScreenShareQuality(options?.quality ?? DEFAULT_SCREEN_SHARE_QUALITY);
 
     const displayStream = await getScreenShareStream(options);
 
@@ -877,12 +896,25 @@ export class CallService {
     }
 
     this.screenTrack = nextScreenTrack;
+    this.screenTrack.contentHint = "detail";
     this.screenTrack.onended = () => {
       void this.stopScreenShare();
     };
 
+    if (typeof this.screenTrack.applyConstraints === "function") {
+      await this.screenTrack.applyConstraints({
+        width: { ideal: screenShareQuality.width, max: screenShareQuality.width },
+        height: { ideal: screenShareQuality.height, max: screenShareQuality.height },
+        frameRate: { ideal: screenShareQuality.frameRate, max: screenShareQuality.frameRate },
+      }).catch(() => {
+        // Fallback to browser-managed constraints when strict quality cannot be applied.
+      });
+    }
+
     await videoSender.replaceTrack(nextScreenTrack);
+    await this.applyScreenShareSenderParameters(videoSender, screenShareQuality);
     this.publishLocalPreview();
+    await this.renegotiate("screen-share-started");
     return true;
   }
 
@@ -904,6 +936,7 @@ export class CallService {
 
     previousScreenTrack.stop();
     this.publishLocalPreview();
+    await this.renegotiate("screen-share-stopped");
   }
 
   async close(): Promise<void> {
@@ -1311,11 +1344,33 @@ export class CallService {
 
   private async ensureLocalMedia(): Promise<void> {
     if (this.localStream) {
+      const liveOutboundAudioTrack = this.localStream
+        .getAudioTracks()
+        .find((track) => track.readyState === "live") ?? null;
+      const liveRawAudioTrack = this.rawLocalStream
+        ?.getAudioTracks()
+        .find((track) => track.readyState === "live") ?? null;
+
+      // Recover audio proactively after reconnect/resume when tracks ended.
+      if (!liveOutboundAudioTrack || !liveRawAudioTrack) {
+        await this.rebuildLocalAudioTrack(true);
+      } else {
+        this.syncOutgoingAudioTrackState();
+      }
       return;
     }
 
     const wantsVideo = this.options.mode === "video";
     const capturedMedia = await this.requestLocalMediaWithFallback(wantsVideo);
+    const capturedAudioTrack = capturedMedia
+      .getAudioTracks()
+      .find((track) => track.readyState === "live")
+      ?? capturedMedia.getAudioTracks()[0]
+      ?? null;
+    if (!capturedAudioTrack) {
+      capturedMedia.getTracks().forEach((track) => track.stop());
+      throw new Error("Microfone indisponivel para a chamada.");
+    }
     this.rawLocalStream = capturedMedia;
 
     const outboundStream = await this.buildOutboundLocalStream(capturedMedia);
@@ -1410,20 +1465,26 @@ export class CallService {
       ? await this.buildOutboundAudioTrack(new MediaStream([currentRawAudioTrack]))
       : null;
     const previousOutboundTracks = currentLocalStream.getAudioTracks();
+    if (!nextOutboundAudioTrack) {
+      if (replacementAudioStream) {
+        replacementAudioStream.getTracks().forEach((track) => track.stop());
+      }
+      this.syncOutgoingAudioTrackState();
+      this.publishLocalPreview();
+      return;
+    }
 
     for (const track of previousOutboundTracks) {
       currentLocalStream.removeTrack(track);
     }
-    if (nextOutboundAudioTrack) {
-      currentLocalStream.addTrack(nextOutboundAudioTrack);
-    }
+    currentLocalStream.addTrack(nextOutboundAudioTrack);
 
     const pc = this.peerConnection;
     if (pc) {
       const audioSender = this.getAudioSender(pc);
       if (audioSender) {
-        await audioSender.replaceTrack(nextOutboundAudioTrack ?? null);
-      } else if (nextOutboundAudioTrack) {
+        await audioSender.replaceTrack(nextOutboundAudioTrack);
+      } else {
         this.audioSender = pc.addTrack(nextOutboundAudioTrack, currentLocalStream);
       }
     }
@@ -1863,6 +1924,78 @@ export class CallService {
         message: this.getErrorMessage(error),
       }, true, "warn");
       this.relayFallbackActivated = false;
+    }
+  }
+
+  private async applyScreenShareSenderParameters(
+    sender: RTCRtpSender,
+    quality: ScreenShareQualityConfig,
+  ): Promise<void> {
+    if (typeof sender.getParameters !== "function" || typeof sender.setParameters !== "function") {
+      return;
+    }
+
+    const parameters = sender.getParameters();
+    const encodings =
+      Array.isArray(parameters.encodings) && parameters.encodings.length > 0
+        ? [...parameters.encodings]
+        : [{}];
+
+    const firstEncoding: RTCRtpEncodingParameters = {
+      ...(encodings[0] ?? {}),
+      maxFramerate: quality.frameRate,
+      maxBitrate: resolveScreenShareBitrateBps(quality),
+      priority: "high",
+    };
+    encodings[0] = firstEncoding;
+
+    await sender.setParameters({
+      ...parameters,
+      encodings,
+    }).catch(() => {
+      // Best-effort tuning only.
+    });
+  }
+
+  private async renegotiate(reason: string): Promise<void> {
+    const pc = this.peerConnection;
+    if (!pc || this.disposed || pc.signalingState === "closed") {
+      return;
+    }
+    if (pc.signalingState !== "stable") {
+      this.logRtc("renegotiation-skipped", {
+        reason,
+        signalingState: pc.signalingState,
+      }, true);
+      return;
+    }
+
+    try {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      await this.options.onSignal({
+        type: "offer",
+        payload: {
+          type: "offer",
+          sdp: offer.sdp ?? "",
+        },
+      });
+      this.logRtc("renegotiation-offer-sent", {
+        reason,
+      }, true);
+    } catch (error) {
+      if (this.isRecoverableSignalError(error)) {
+        this.logRtc("renegotiation-ignored", {
+          reason,
+          message: this.getErrorMessage(error),
+          signalingState: pc.signalingState,
+        }, true, "warn");
+        return;
+      }
+      this.logRtc("renegotiation-failed", {
+        reason,
+        message: this.getErrorMessage(error),
+      }, true, "warn");
     }
   }
 
