@@ -7519,15 +7519,13 @@ export default function DirectMessageChatView({
 
   useEffect(() => {
     const hasActiveOrPendingCall = callPhase !== "idle";
-    const shouldExposeCallToSidebar = hasActiveOrPendingCall && callPhase !== "incoming";
     const canShowRejoinCall =
       !hasActiveOrPendingCall &&
       Boolean(rejoinAvailableCall?.conversationId) &&
       rejoinAvailableCall?.conversationId === conversationId;
+    const shouldExposeCallToSidebar = (hasActiveOrPendingCall && callPhase !== "incoming") || canShowRejoinCall;
 
     dispatchSidebarCallState({
-      // Sidebar strip should reflect only the current live call state.
-      // Rejoin actions stay in the DM view itself.
       active: shouldExposeCallToSidebar,
       conversationId: (canShowRejoinCall ? rejoinAvailableCall?.conversationId : conversationId) ?? null,
       partnerName: safeTargetDisplayName,
@@ -7556,6 +7554,10 @@ export default function DirectMessageChatView({
   ]);
 
   useEffect(() => () => {
+    const snapshot = unmountCallCleanupRef.current;
+    if (snapshot.callPhase !== "idle" || snapshot.hasRejoinAvailable) {
+      return;
+    }
     dispatchSidebarCallState({
       active: false,
       conversationId: null,

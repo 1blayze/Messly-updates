@@ -212,6 +212,8 @@ const friendPresenceCache = new Map<string, PresenceState>();
 const FRIENDS_CACHE_PREFIX = "messly:friends:";
 const FRIENDS_CACHE_VERSION = 3;
 const CURRENT_USER_ID_CACHE_PREFIX = "messly:current-user-id:";
+const SIDEBAR_CALL_PERSIST_KEY = "messly:sidebar-call-state:v2";
+const SIDEBAR_CALL_RESTORE_MAX_AGE_MS = 15 * 60_000;
 
 const PROFILE_SAFE_COLUMNS =
   "id,username,display_name,email,firebase_uid:id,avatar_url,avatar_key,avatar_hash,banner_url,banner_key,banner_hash,banner_color,profile_theme_primary_color,profile_theme_accent_color,bio,about:bio,created_at,updated_at";
@@ -858,6 +860,45 @@ function clearConversationIdFromLocation(): void {
   window.history.replaceState(null, document.title, nextPath);
 }
 
+function readPersistedSidebarCallStateDetail(): SidebarCallStateDetail | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  try {
+    const raw = window.localStorage.getItem(SIDEBAR_CALL_PERSIST_KEY);
+    if (!raw) {
+      return null;
+    }
+
+    const parsed = JSON.parse(raw) as { detail?: SidebarCallStateDetail } | null;
+    const detail = parsed?.detail ?? null;
+    if (!detail || !detail.active) {
+      return null;
+    }
+
+    const conversationId = String(detail.conversationId ?? "").trim();
+    if (!conversationId) {
+      return null;
+    }
+
+    const updatedAtMs = Date.parse(String(detail.updatedAt ?? ""));
+    if (!Number.isFinite(updatedAtMs) || Date.now() - updatedAtMs > SIDEBAR_CALL_RESTORE_MAX_AGE_MS) {
+      return null;
+    }
+
+    return {
+      ...detail,
+      conversationId,
+      micEnabled: detail.micEnabled ?? true,
+      soundEnabled: detail.soundEnabled ?? true,
+      isPopoutOpen: detail.isPopoutOpen ?? false,
+    };
+  } catch {
+    return null;
+  }
+}
+
 function readFriendsCache(userId: string | null | undefined): FriendListItem[] | null {
   if (!userId || typeof window === "undefined") {
     return null;
@@ -1146,6 +1187,7 @@ export default function AppShell() {
   });
   const [callHostDirectMessage, setCallHostDirectMessage] = useState<SidebarDirectMessageSelection | null>(null);
   const [isSidebarCallActive, setIsSidebarCallActive] = useState(false);
+  const [sidebarCallConversationId, setSidebarCallConversationId] = useState<string | null>(null);
   const [currentUserChatProfile, setCurrentUserChatProfile] = useState<DirectMessageChatParticipant | null>(null);
   const [currentUserChatProfileRefreshToken, setCurrentUserChatProfileRefreshToken] = useState(0);
   const [listenAlongSessionsByFriendId, setListenAlongSessionsByFriendId] = useState<Record<string, SpotifyListenAlongSession>>(
@@ -1162,6 +1204,7 @@ export default function AppShell() {
   const pendingRefreshInFlightRef = useRef(false);
   const pendingRefreshQueuedRef = useRef(false);
   const pendingProfileRequestCursorRef = useRef(0);
+  const sidebarCallBootstrapDoneRef = useRef(false);
   const networkReconnectTimerRef = useRef<number | null>(null);
   const networkBannerHideTimerRef = useRef<number | null>(null);
   const networkOnlineRef = useRef<boolean>(typeof navigator === "undefined" ? true : navigator.onLine);
@@ -1562,6 +1605,34 @@ export default function AppShell() {
   }, [activeDirectMessage]);
 
   useEffect(() => {
+    sidebarCallBootstrapDoneRef.current = false;
+  }, [currentUserId]);
+
+  useEffect(() => {
+    if (sidebarCallBootstrapDoneRef.current) {
+      return;
+    }
+    sidebarCallBootstrapDoneRef.current = true;
+
+    const persistedCall = readPersistedSidebarCallStateDetail();
+    if (!persistedCall?.active) {
+      return;
+    }
+
+    const persistedConversationId = String(persistedCall.conversationId ?? "").trim();
+    if (!persistedConversationId) {
+      return;
+    }
+
+    setIsSidebarCallActive(true);
+    setSidebarCallConversationId(persistedConversationId);
+    const cachedSelection = sidebarDirectMessagesByConversationId.get(persistedConversationId) ?? null;
+    if (cachedSelection) {
+      setCallHostDirectMessage(cachedSelection);
+    }
+  }, [sidebarDirectMessagesByConversationId]);
+
+  useEffect(() => {
     const handleSidebarCallState = (event: Event): void => {
       const detail = (event as CustomEvent<SidebarCallStateDetail>).detail;
       if (!detail) {
@@ -1571,6 +1642,7 @@ export default function AppShell() {
       const callActive = Boolean(detail.active);
       setIsSidebarCallActive(callActive);
       if (!callActive) {
+        setSidebarCallConversationId(null);
         return;
       }
 
@@ -1578,9 +1650,16 @@ export default function AppShell() {
       if (!callConversationId) {
         return;
       }
+      setSidebarCallConversationId(callConversationId);
 
       if (activeDirectMessage && activeDirectMessage.conversationId === callConversationId) {
         setCallHostDirectMessage(activeDirectMessage);
+        return;
+      }
+
+      const cachedSelection = sidebarDirectMessagesByConversationId.get(callConversationId);
+      if (cachedSelection) {
+        setCallHostDirectMessage(cachedSelection);
       }
     };
 
@@ -1588,7 +1667,7 @@ export default function AppShell() {
     return () => {
       window.removeEventListener(SIDEBAR_CALL_STATE_EVENT, handleSidebarCallState as EventListener);
     };
-  }, [activeDirectMessage]);
+  }, [activeDirectMessage, sidebarDirectMessagesByConversationId]);
 
   useEffect(() => {
     return presenceController.subscribe(setPresenceState);
@@ -2043,6 +2122,46 @@ export default function AppShell() {
     },
     [currentUserId, resolveDirectMessageByConversationId],
   );
+
+  useEffect(() => {
+    if (!isSidebarCallActive) {
+      return;
+    }
+
+    const callConversationId = String(sidebarCallConversationId ?? "").trim();
+    if (!callConversationId || !currentUserId) {
+      return;
+    }
+
+    if (callHostDirectMessage?.conversationId === callConversationId) {
+      return;
+    }
+
+    const cachedSelection = sidebarDirectMessagesByConversationId.get(callConversationId);
+    if (cachedSelection) {
+      setCallHostDirectMessage(cachedSelection);
+      return;
+    }
+
+    let cancelled = false;
+    void resolveDirectMessageByConversationId(callConversationId).then((resolved) => {
+      if (cancelled || !resolved) {
+        return;
+      }
+      setCallHostDirectMessage(resolved);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    callHostDirectMessage?.conversationId,
+    currentUserId,
+    isSidebarCallActive,
+    resolveDirectMessageByConversationId,
+    sidebarCallConversationId,
+    sidebarDirectMessagesByConversationId,
+  ]);
 
   useEffect(() => {
     const consumeLocationConversation = (): void => {

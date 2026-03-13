@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { getNameAvatarUrl, isDefaultAvatarUrl } from "../../services/cdn/mediaUrls";
 import { PRESENCE_LABELS, type PresenceState } from "../../services/presence/presenceTypes";
@@ -228,6 +228,15 @@ export default function UserCard({
   const lastPingLabel = sidebarCallState.lastPingMs == null ? "-- ms" : `${Math.max(0, Math.round(sidebarCallState.lastPingMs))} ms`;
   const packetLossLabel = sidebarCallState.packetLossPercent == null ? "--%" : `${sidebarCallState.packetLossPercent.toFixed(1)}%`;
   const shouldShowCallStrip = sidebarCallState.active && sidebarCallState.phase !== "incoming";
+  const canFocusCallConversation = Boolean(onOpenConversation && String(sidebarCallState.conversationId ?? "").trim());
+
+  const handleFocusCallConversation = useCallback((): void => {
+    const conversationId = String(sidebarCallState.conversationId ?? "").trim();
+    if (!conversationId || !onOpenConversation) {
+      return;
+    }
+    onOpenConversation(conversationId);
+  }, [onOpenConversation, sidebarCallState.conversationId]);
 
   useEffect(() => {
     setProfileThemeState(readProfilePlusThemeState(authUser?.uid ?? currentUserId));
@@ -609,7 +618,17 @@ export default function UserCard({
                 ) : null}
                 <div className={styles.voiceHeaderMeta}>
                   <p className={styles.voiceHeaderTitle}>{voiceStatusTitle}</p>
-                  <p className={styles.voiceHeaderSubtitle}>{voiceStatusTarget}</p>
+                  {sidebarCallState.phase === "disconnected" && canFocusCallConversation ? (
+                    <button
+                      type="button"
+                      className={styles.voiceHeaderSubtitleButton}
+                      onClick={handleFocusCallConversation}
+                    >
+                      Voltar para chamada • {voiceStatusTarget}
+                    </button>
+                  ) : (
+                    <p className={styles.voiceHeaderSubtitle}>{voiceStatusTarget}</p>
+                  )}
                 </div>
                 <div className={styles.voiceHeaderIcons}>
                   {sidebarCallState.phase !== "disconnected" ? (
@@ -623,6 +642,16 @@ export default function UserCard({
                       }}
                     >
                       <MaterialSymbolIcon name="call_end" size={22} />
+                    </button>
+                  ) : canFocusCallConversation ? (
+                    <button
+                      type="button"
+                      className={styles.voiceActionButton}
+                      aria-label="Voltar para chamada"
+                      title="Voltar para chamada"
+                      onClick={handleFocusCallConversation}
+                    >
+                      <MaterialSymbolIcon name="call" size={18} />
                     </button>
                   ) : null}
                 </div>
