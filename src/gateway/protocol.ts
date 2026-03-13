@@ -36,21 +36,13 @@ export type GatewayDispatchEventType =
   | "FRIEND_REQUEST_CREATE"
   | "FRIEND_REQUEST_ACCEPT"
   | "USER_UPDATE"
-  | "SPOTIFY_UPDATE"
-  | "CALL_OFFER"
-  | "CALL_ANSWER"
-  | "CALL_ICE"
-  | "CALL_END";
+  | "SPOTIFY_UPDATE";
 
 export type GatewayPublishEventType =
   | "PRESENCE_UPDATE"
   | "TYPING_START"
   | "TYPING_STOP"
-  | "SPOTIFY_UPDATE"
-  | "CALL_OFFER"
-  | "CALL_ANSWER"
-  | "CALL_ICE"
-  | "CALL_END";
+  | "SPOTIFY_UPDATE";
 
 export type GatewaySubscriptionTopicType = "conversation" | "user" | "friends" | "notifications" | "voice" | "room";
 
@@ -182,17 +174,6 @@ export interface GatewaySpotifyDispatchPayload {
   updatedAt: string;
 }
 
-export interface GatewayCallDispatchPayload {
-  type: "CALL_OFFER" | "CALL_ANSWER" | "CALL_ICE" | "CALL_END";
-  callId: string;
-  scopeType: "voice" | "dm" | "room";
-  scopeId: string;
-  fromUserId: string;
-  targetUserId: string;
-  signal: Record<string, unknown> | null;
-  updatedAt: string;
-}
-
 export interface GatewayPublishPresencePayload {
   presence: {
     status: UserPresenceEntity["status"];
@@ -211,14 +192,6 @@ export interface GatewayPublishSpotifyPayload {
   activity: SpotifyActivityEntity | null;
 }
 
-export interface GatewayPublishCallPayload {
-  callId: string;
-  scopeType: "voice" | "dm" | "room";
-  scopeId: string;
-  targetUserId: string;
-  signal: Record<string, unknown> | null;
-}
-
 export interface GatewayDispatchPayloadMap {
   READY: GatewayReadyPayload;
   RESUMED: GatewayReadyPayload;
@@ -233,10 +206,6 @@ export interface GatewayDispatchPayloadMap {
   FRIEND_REQUEST_ACCEPT: GatewayFriendRequestDispatchPayload;
   USER_UPDATE: GatewayUserUpdateDispatchPayload;
   SPOTIFY_UPDATE: GatewaySpotifyDispatchPayload;
-  CALL_OFFER: GatewayCallDispatchPayload;
-  CALL_ANSWER: GatewayCallDispatchPayload;
-  CALL_ICE: GatewayCallDispatchPayload;
-  CALL_END: GatewayCallDispatchPayload;
 }
 
 export interface GatewayPublishPayloadMap {
@@ -244,10 +213,6 @@ export interface GatewayPublishPayloadMap {
   TYPING_START: GatewayPublishTypingPayload;
   TYPING_STOP: GatewayPublishTypingPayload;
   SPOTIFY_UPDATE: GatewayPublishSpotifyPayload;
-  CALL_OFFER: GatewayPublishCallPayload;
-  CALL_ANSWER: GatewayPublishCallPayload;
-  CALL_ICE: GatewayPublishCallPayload;
-  CALL_END: GatewayPublishCallPayload;
 }
 
 export function isGatewayDispatchEventType(value: unknown): value is GatewayDispatchEventType {
@@ -265,10 +230,6 @@ export function isGatewayDispatchEventType(value: unknown): value is GatewayDisp
     case "FRIEND_REQUEST_ACCEPT":
     case "USER_UPDATE":
     case "SPOTIFY_UPDATE":
-    case "CALL_OFFER":
-    case "CALL_ANSWER":
-    case "CALL_ICE":
-    case "CALL_END":
       return true;
     default:
       return false;

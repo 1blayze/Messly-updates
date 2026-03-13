@@ -90,16 +90,6 @@ export const gatewaySpotifyPublishPayloadSchema = z
   })
   .strict();
 
-export const gatewayCallPublishPayloadSchema = z
-  .object({
-    callId: z.string().trim().min(1).max(128),
-    scopeType: z.enum(["voice", "dm", "room"]),
-    scopeId: z.string().trim().min(1).max(128),
-    targetUserId: z.string().trim().uuid(),
-    signal: z.record(z.string(), z.unknown()).nullable(),
-  })
-  .strict();
-
 const baseFrameSchema = z
   .object({
     op: gatewayOpcodeSchema,
@@ -194,11 +184,6 @@ export function resolvePublishSchema(eventType: GatewayPublishEvent) {
       return gatewayTypingPublishPayloadSchema;
     case "SPOTIFY_UPDATE":
       return gatewaySpotifyPublishPayloadSchema;
-    case "CALL_OFFER":
-    case "CALL_ANSWER":
-    case "CALL_ICE":
-    case "CALL_END":
-      return gatewayCallPublishPayloadSchema;
   }
 }
 

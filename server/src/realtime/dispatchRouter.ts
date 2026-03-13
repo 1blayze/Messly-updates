@@ -1,5 +1,4 @@
 import type {
-  CallSignalPayload,
   DomainEvent,
   MessageDeletePayload,
   MessageDispatchPayload,
@@ -33,21 +32,6 @@ export interface RoutingDecision {
 
 export function resolveDispatchTargets(event: DomainEvent<GatewayDomainEventType>): RoutingDecision {
   const routingKey = event.routingKey ? parseRoutingKey(event.routingKey) : null;
-
-  if (event.event === "CALL_OFFER" || event.event === "CALL_ANSWER" || event.event === "CALL_ICE" || event.event === "CALL_END" || event.event === "CALL_SIGNAL") {
-    const payload = event.payload as CallSignalPayload | undefined;
-    const targetUser = String(payload?.targetUserId ?? "").trim();
-    const fromUser = String(payload?.fromUserId ?? "").trim();
-    const subscriptions: GatewaySubscription[] = [];
-    if (targetUser) {
-      subscriptions.push({ type: "user", id: targetUser });
-      subscriptions.push({ type: "notifications", id: targetUser });
-    }
-    if (fromUser) {
-      subscriptions.push({ type: "user", id: fromUser });
-    }
-    return { subscriptions };
-  }
 
   if (event.event === "FRIEND_REQUEST_CREATE" || event.event === "FRIEND_REQUEST_ACCEPT") {
     const payload = event.payload as FriendRequestDispatchPayload | undefined;

@@ -235,6 +235,11 @@ function parsePostPayload(payload: unknown): PostPayload {
     return parsed.data;
   }
 
+  const legacyEndAllOther = normalizeLegacyEndAllOtherPayload(payload);
+  if (legacyEndAllOther) {
+    return legacyEndAllOther;
+  }
+
   throw new HttpError(400, "INVALID_PAYLOAD", "Payload de sessao invalido.", {
     issues: parsed.error.issues.map((issue: { path: string[]; code: string; message: string }) => ({
       path: issue.path.join("."),
@@ -242,6 +247,69 @@ function parsePostPayload(payload: unknown): PostPayload {
       message: issue.message,
     })),
   });
+}
+
+function toPayloadRecord(payload: unknown): Record<string, unknown> | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+  return payload as Record<string, unknown>;
+}
+
+function resolveLegacySessionIdentity(payload: Record<string, unknown>): string | null {
+  const candidates = [
+    payload.sessionId,
+    payload.session_id,
+    payload.sessionToken,
+    payload.session_token,
+    payload.currentSessionId,
+    payload.current_session_id,
+  ];
+
+  for (const candidate of candidates) {
+    const normalized = toNullableText(candidate, 128);
+    if (normalized) {
+      return normalized;
+    }
+  }
+
+  return null;
+}
+
+function normalizeLegacyEndAllOtherPayload(payload: unknown): Extract<PostPayload, { action: "endAllOther" }> | null {
+  const input = toPayloadRecord(payload);
+  if (!input) {
+    return null;
+  }
+
+  const action = String(input.action ?? "").trim().toLowerCase();
+  const acceptedLegacyActions = new Set([
+    "endallother",
+    "endallothers",
+    "endallothersessions",
+    "end_all_other",
+    "end_all_others",
+    "end_all_other_sessions",
+  ]);
+
+  if (!acceptedLegacyActions.has(action)) {
+    return null;
+  }
+
+  const sessionIdentity = resolveLegacySessionIdentity(input);
+  if (sessionIdentity) {
+    return {
+      action: "endAllOther",
+      sessionId: sessionIdentity,
+      sessionToken: sessionIdentity,
+    };
+  }
+
+  return {
+    action: "endAllOther",
+    sessionId: null,
+    sessionToken: null,
+  };
 }
 
 function toNullableText(value: unknown, maxLength: number): string | null {

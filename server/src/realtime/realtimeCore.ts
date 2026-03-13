@@ -1,6 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
-  type CallSignalPayload,
   type DomainConversationSummary,
   type DomainEvent,
   type DomainEventPayloadMap,
@@ -13,7 +12,6 @@ import type { EventBus } from "../events/eventBus";
 import { FanoutService } from "../fanout/fanoutService";
 import { PresenceService, type PresenceSnapshot } from "../presence/presenceService";
 import { TypingService } from "../typing/typingService";
-import { WebRtcSignalingService } from "../signaling/webrtcSignaling";
 
 function safeString(value: unknown): string {
   return String(value ?? "").trim();
@@ -49,7 +47,6 @@ interface RealtimePostgresPayload {
 
 export class RealtimeCore {
   readonly typing: TypingService;
-  readonly signaling: WebRtcSignalingService;
   private unsubscribeBus: (() => void) | null = null;
   private unsubscribeDb: (() => void) | null = null;
   private readonly profileCache = new Map<string, ReturnType<typeof toDomainProfile>>();
@@ -62,7 +59,6 @@ export class RealtimeCore {
     typingTtlMs = 5_000,
   ) {
     this.typing = new TypingService(eventBus, typingTtlMs);
-    this.signaling = new WebRtcSignalingService(eventBus);
   }
 
   start(): void {
@@ -114,10 +110,6 @@ export class RealtimeCore {
       },
       occurredAt: identity.occurredAt,
     });
-  }
-
-  async publishCallSignal(payload: CallSignalPayload): Promise<void> {
-    await this.signaling.dispatch(payload);
   }
 
   private subscribeDbChannels(supabase: SupabaseClient): void {

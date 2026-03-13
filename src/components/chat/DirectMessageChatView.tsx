@@ -2718,6 +2718,14 @@ export default function DirectMessageChatView({
     });
 
     const resolvedAccent = harmonizedTheme.tokens["--profile-accent"] ?? effectiveAccent ?? fallbackThemeColor;
+    const currentPresenceColor =
+      targetPresenceState === "online"
+        ? "var(--dm-chat-profile-presence-online, #35be81)"
+        : targetPresenceState === "idle"
+          ? "var(--dm-chat-profile-presence-idle, #d6a44f)"
+          : targetPresenceState === "dnd"
+            ? "var(--dm-chat-profile-presence-dnd, #db6262)"
+            : "var(--dm-chat-profile-presence-invisible, #8b93a2)";
     const softPanelBase = mixHexThemeColors(resolvedAccent, "#ffffff", 0.82) ?? (effectiveAccent ?? "#262626");
     const softPanelTop = mixHexThemeColors(resolvedAccent, "#ffffff", 0.9) ?? softPanelBase;
     const softPanelMid = mixHexThemeColors(resolvedAccent, "#ffffff", 0.86) ?? softPanelBase;
@@ -2764,6 +2772,7 @@ export default function DirectMessageChatView({
       ["--dm-chat-profile-avatar-ring-color" as const]: ringColor,
       ["--dm-chat-profile-presence-ring" as const]: ringColor,
       ["--dm-chat-profile-presence-ring-color" as const]: ringColor,
+      ["--dm-chat-profile-presence-current-color" as const]: currentPresenceColor,
       ["--dm-chat-profile-text" as const]: textColor,
       ["--dm-chat-profile-muted" as const]: mutedTextColor,
       ["--dm-chat-profile-link" as const]: subtleTextColor,
@@ -2788,7 +2797,7 @@ export default function DirectMessageChatView({
       ["--profile-transition-fast" as const]: harmonizedTheme.tokens["--profile-transition-fast"],
       ["--profile-transition-standard" as const]: harmonizedTheme.tokens["--profile-transition-standard"],
     } as CSSProperties;
-  }, [isTargetProfileResolved, targetThemeAccentColor, targetThemePrimaryColor]);
+  }, [isTargetProfileResolved, targetPresenceState, targetThemeAccentColor, targetThemePrimaryColor]);
   const targetHasCustomBannerImage = useMemo(() => {
     const trimmed = String(targetBannerSrc ?? "").trim();
     if (!trimmed) {
@@ -5937,6 +5946,7 @@ export default function DirectMessageChatView({
     pushToTalkBindRef.current = normalizePushToTalkBind(persistedAudioSettings?.pushToTalkBind);
     const service = new CallService({
       mode,
+      conversationId,
       audioSettings: persistedAudioSettings,
       onSignal: async (signal) => {
         const callId = activeCallIdRef.current;
@@ -6038,6 +6048,7 @@ export default function DirectMessageChatView({
     return service;
   }, [
     clearRemotePeerDisconnectFinalizeTimeout,
+    conversationId,
     currentFirebaseUid,
     currentUserId,
     sendCallRealtimeEvent,
@@ -6188,6 +6199,8 @@ export default function DirectMessageChatView({
     setCallErrorText(null);
     setRejoinAvailableCall(null);
     isLocalCallDisconnectedRef.current = false;
+    setCallLocalStream(null);
+    setCallRemoteStream(null);
     try {
       const callId = createClientMessageId();
       const nowIso = new Date().toISOString();
@@ -7118,6 +7131,8 @@ export default function DirectMessageChatView({
                 }
                 isLocalCallDisconnectedRef.current = false;
                 setCallErrorText(null);
+                setCallLocalStream(null);
+                setCallRemoteStream(null);
                 setRejoinAvailableCall((current) =>
                   current?.conversationId === event.conversationId ? null : current,
                 );
@@ -7675,11 +7690,13 @@ export default function DirectMessageChatView({
     (callPhase !== "idle" && callPhase !== "incoming")
     || isCallParticipantConnected(effectiveCallSession, currentFirebaseUid)
     || Boolean(callLocalStream);
+  const hasRemoteStreamInConnectedPhases =
+    (callPhase === "connecting" || callPhase === "active" || callPhase === "reconnecting")
+    && Boolean(callRemoteStream);
   const shouldKeepRemoteParticipantVisible =
-    callPhase === "reconnecting" ||
-    ((callPhase === "connecting" || callPhase === "active") && Boolean(activeCallIdRef.current));
+    callPhase === "reconnecting";
   const isRemoteParticipantInCall = isCallParticipantConnected(effectiveCallSession, remoteParticipantUidForPresence)
-    || Boolean(callRemoteStream)
+    || hasRemoteStreamInConnectedPhases
     || shouldKeepRemoteParticipantVisible;
   useEffect(() => {
     const shouldPlayRingingTone =

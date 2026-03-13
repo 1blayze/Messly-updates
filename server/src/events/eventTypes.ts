@@ -4,8 +4,6 @@ export type ScopeType = "dm" | "guild" | "channel" | "voice";
 
 export type PresenceStatus = "online" | "idle" | "dnd" | "offline" | "invisible";
 
-export type CallSignalType = "CALL_OFFER" | "CALL_ANSWER" | "CALL_ICE" | "CALL_END";
-
 export type GatewayDomainEventType =
   | "MESSAGE_CREATE"
   | "MESSAGE_UPDATE"
@@ -17,9 +15,7 @@ export type GatewayDomainEventType =
   | "FRIEND_REQUEST_CREATE"
   | "FRIEND_REQUEST_ACCEPT"
   | "USER_UPDATE"
-  | "SPOTIFY_UPDATE"
-  | CallSignalType
-  | "CALL_SIGNAL";
+  | "SPOTIFY_UPDATE";
 
 export type GatewayEventPriority = "high" | "medium" | "low";
 
@@ -76,17 +72,6 @@ export interface DomainFriendRequest {
   addresseeId: string;
   status: "pending" | "accepted" | "rejected" | string;
   createdAt: string;
-}
-
-export interface CallSignalPayload {
-  type: CallSignalType;
-  callId: string;
-  scopeType: ScopeType;
-  scopeId: string;
-  fromUserId: string;
-  targetUserId: string;
-  signal: Record<string, unknown> | null;
-  updatedAt: string;
 }
 
 export interface MessageDispatchPayload {
@@ -147,11 +132,6 @@ export interface DomainEventPayloadMap {
   FRIEND_REQUEST_ACCEPT: FriendRequestDispatchPayload;
   USER_UPDATE: UserUpdateDispatchPayload;
   SPOTIFY_UPDATE: SpotifyDispatchPayload;
-  CALL_OFFER: CallSignalPayload;
-  CALL_ANSWER: CallSignalPayload;
-  CALL_ICE: CallSignalPayload;
-  CALL_END: CallSignalPayload;
-  CALL_SIGNAL: CallSignalPayload;
 }
 
 export type DomainEventPayload<T extends GatewayDomainEventType> = T extends keyof DomainEventPayloadMap
@@ -163,7 +143,7 @@ function asPriority(value: GatewayEventPriority): GatewayEventPriority {
 }
 
 export function resolveDomainEventPriority(eventType: GatewayDomainEventType): GatewayEventPriority {
-  if (eventType === "MESSAGE_CREATE" || eventType === "MESSAGE_DELETE" || eventType === "CALL_SIGNAL") {
+  if (eventType === "MESSAGE_CREATE" || eventType === "MESSAGE_DELETE") {
     return asPriority("high");
   }
 

@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import type {
-  GatewayCallDispatchPayload,
   GatewayDispatchPayloadMap,
   GatewayPresenceSnapshot,
   GatewaySubscription,
@@ -86,19 +85,6 @@ export class DispatchPublisher {
         expiresAt,
       },
       targets: [{ type: "conversation", id: conversationId }],
-    });
-  }
-
-  async publishCall(payload: GatewayCallDispatchPayload): Promise<void> {
-    await this.publishDispatch({
-      event: payload.type,
-      payload,
-      targets: [
-        { type: "user", id: payload.targetUserId },
-        { type: "notifications", id: payload.targetUserId },
-        { type: "user", id: payload.fromUserId },
-      ],
-      occurredAt: payload.updatedAt,
     });
   }
 }

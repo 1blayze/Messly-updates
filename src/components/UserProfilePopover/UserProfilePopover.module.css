@@ -169,6 +169,116 @@
   z-index: 1;
 }
 
+.panelPureBlack {
+  --profile-card-text-primary: var(--profile-text);
+  --profile-card-text-secondary: var(--profile-muted);
+  --profile-card-text-body: var(--profile-text);
+  --profile-card-text-hint: var(--profile-muted);
+  --profile-card-actions-bg: linear-gradient(180deg, var(--profile-surface-2) 0%, var(--profile-surface-3) 100%);
+  --profile-card-actions-border: var(--profile-border);
+  --profile-card-action-text: var(--profile-text);
+  --profile-card-action-icon: var(--profile-text);
+  --profile-card-action-hover: var(--profile-hover-surface);
+  --profile-card-action-active: color-mix(in srgb, var(--profile-hover-surface) 78%, var(--profile-surface-3) 22%);
+  --profile-card-action-pressed: var(--profile-surface-3);
+  --profile-card-presence-menu-bg: linear-gradient(180deg, var(--profile-surface-2) 0%, var(--profile-surface-3) 100%);
+  --profile-card-presence-menu-shadow: var(--profile-menu-shadow);
+  --profile-card-presence-menu-hover: var(--profile-hover-surface);
+  --profile-card-presence-menu-description: var(--profile-muted);
+  --profile-card-presence-menu-item: var(--profile-text);
+  --profile-card-avatar-ring-color: var(--profile-accent);
+  --profile-card-presence-ring-color: var(--profile-accent);
+  --profile-full-shell-bg: var(--profile-shell-bg, var(--profile-surface));
+  --profile-full-shell-border: var(--profile-border);
+  --profile-full-sidebar-bg: var(--profile-full-shell-bg);
+  --profile-full-sidebar-border: var(--profile-border);
+  --profile-full-content-bg: var(--profile-bg, var(--profile-surface));
+  --profile-full-pane-divider: var(--profile-divider);
+  --profile-full-status-bg: linear-gradient(180deg, var(--profile-surface-2) 0%, var(--profile-surface-3) 100%);
+  --profile-full-status-border: var(--profile-border);
+  --profile-full-status-fg: var(--profile-muted);
+  --profile-full-title: var(--profile-text);
+  --profile-full-username: var(--profile-muted);
+  --profile-full-text: var(--profile-text);
+  --profile-full-muted: var(--profile-muted);
+  --profile-full-faint: var(--profile-muted);
+  --profile-full-divider: var(--profile-divider);
+  --profile-full-tab-text: var(--profile-muted);
+  --profile-full-tab-active: var(--profile-text);
+  --profile-full-tab-active-border: var(--profile-accent-strong);
+  --profile-full-secondary-btn-bg: linear-gradient(180deg, var(--profile-surface-2) 0%, var(--profile-surface-3) 100%);
+  --profile-full-secondary-btn-bg-hover: var(--profile-hover-surface);
+  --profile-full-secondary-btn-fg: var(--profile-text);
+  --profile-full-primary-btn-bg: var(--profile-button-bg);
+  --profile-full-primary-btn-bg-hover: var(--profile-button-bg-hover);
+  --profile-full-primary-btn-bg-active: var(--profile-button-bg-active);
+  --profile-full-primary-btn-fg: var(--profile-button-text);
+  --profile-full-menu-bg: linear-gradient(180deg, var(--profile-surface-2) 0%, var(--profile-surface-3) 100%);
+  --profile-full-menu-border: var(--profile-border);
+  --profile-full-menu-shadow: var(--profile-menu-shadow);
+  --profile-full-menu-item: var(--profile-text);
+  --profile-full-menu-item-hover: var(--profile-hover-surface);
+  --profile-full-activity-card-bg: linear-gradient(180deg, var(--profile-surface-2) 0%, var(--profile-surface-3) 100%);
+  --profile-full-activity-card-border: var(--profile-border);
+  --profile-full-activity-cover-bg: var(--profile-surface-3);
+  --profile-full-activity-menu-fg: var(--profile-muted);
+  --profile-full-activity-menu-hover: var(--profile-hover-surface);
+  --profile-full-activity-time: var(--profile-muted);
+  --profile-full-connection-icon-bg: var(--profile-surface-3);
+  --profile-full-connection-icon-fg: var(--profile-text);
+  --profile-full-pending-clock-bg: var(--profile-surface-3);
+  --profile-full-avatar-ring-color: var(--profile-accent);
+  --profile-full-presence-ring-color: var(--profile-accent);
+  --profile-full-banner-separator: var(--profile-divider);
+  --profile-card-presence-menu-border: var(--profile-border);
+}
+
+.panelPureBlack::before {
+  background: linear-gradient(
+    180deg,
+    var(--profile-banner-bg, var(--profile-primary)) 0%,
+    var(--profile-shell-bg, var(--profile-surface)) 100%
+  );
+}
+
+.panelPureBlack .header {
+  background: var(--profile-banner-bg, var(--profile-primary));
+}
+
+.panel.panelFull.panelPureBlack {
+  --profile-full-shell-bg: var(--profile-shell-bg, var(--profile-surface)) !important;
+  --profile-full-sidebar-border: var(--profile-border);
+}
+
+.panel.panelFull.panelPureBlack::before {
+  background: linear-gradient(
+    180deg,
+    var(--profile-banner-bg, var(--profile-primary)) 0%,
+    var(--profile-shell-bg, var(--profile-surface)) 100%
+  ) !important;
+}
+
+.panel.panelFull.panelPureBlack .fullSidebar {
+  --full-sidebar-edge-color: var(--profile-full-sidebar-border, var(--profile-border));
+  background: var(--profile-full-sidebar-bg);
+  border: var(--profile-full-shell-border-width) solid var(--full-sidebar-edge-color);
+  border-top-color: var(--full-sidebar-edge-color);
+  border-left-color: var(--full-sidebar-edge-color);
+  border-right-color: var(--full-sidebar-edge-color);
+}
+
+.panel.panelFull.panelPureBlack .fullHeader {
+  background: var(--profile-banner-bg, var(--profile-primary));
+}
+
+.panel.panelFull.panelPureBlack .fullContent {
+  background: var(--profile-full-content-bg);
+}
+
+.panel.panelFull.panelPureBlack .fullSecondaryActionButton:active {
+  background: var(--profile-button-bg-active);
+}
+
 .panelFull {
   --profile-shell-border-width: 0px;
   --profile-full-shell-border-width: 1px;
@@ -1790,7 +1900,25 @@
 }
 
 .bannerNoImage.bannerSeparatorVisible::before {
-  display: none;
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    var(--profile-card-banner-separator) 0,
+    var(--profile-card-banner-separator) var(--profile-card-banner-divider-left),
+    transparent var(--profile-card-banner-divider-left),
+    transparent var(--profile-card-banner-divider-gap-start),
+    var(--profile-card-banner-separator) var(--profile-card-banner-divider-gap-start),
+    var(--profile-card-banner-separator) calc(100% - var(--profile-card-banner-divider-right)),
+    transparent calc(100% - var(--profile-card-banner-divider-right)),
+    transparent 100%
+  );
+  pointer-events: none;
+  z-index: 3;
 }
 
 .bannerImage {

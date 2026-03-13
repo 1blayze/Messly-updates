@@ -31,10 +31,6 @@ export const gatewayDispatchEvents = [
   "FRIEND_REQUEST_ACCEPT",
   "USER_UPDATE",
   "SPOTIFY_UPDATE",
-  "CALL_OFFER",
-  "CALL_ANSWER",
-  "CALL_ICE",
-  "CALL_END",
 ] as const;
 
 export type GatewayDispatchEvent = (typeof gatewayDispatchEvents)[number];
@@ -58,10 +54,6 @@ export const gatewayPublishEvents = [
   "TYPING_START",
   "TYPING_STOP",
   "SPOTIFY_UPDATE",
-  "CALL_OFFER",
-  "CALL_ANSWER",
-  "CALL_ICE",
-  "CALL_END",
 ] as const;
 
 export type GatewayPublishEvent = (typeof gatewayPublishEvents)[number];

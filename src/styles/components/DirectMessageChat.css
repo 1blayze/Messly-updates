@@ -16,6 +16,7 @@
   );
   --dm-chat-profile-presence-ring-size: 3px;
   --dm-chat-profile-presence-ring-color: var(--dm-chat-profile-panel-bg, var(--dm-chat-profile-bg));
+  --dm-chat-profile-presence-current-color: var(--dm-chat-profile-presence-invisible, #8b93a2);
   --dm-chat-sk-bg: #2b2d31;
   --dm-chat-sk-fill: rgba(255, 255, 255, 0.06);
   --dm-chat-sk-shine: rgba(255, 255, 255, 0.12);
@@ -185,8 +186,7 @@
   transform: translateY(-50%);
   box-sizing: border-box;
   border-radius: 999px;
-  border: 2px solid
-    color-mix(in srgb, var(--dm-chat-profile-avatar-border-color, var(--dm-chat-profile-accent, #ff3b3b)) 72%, #ffffff 28%);
+  border: var(--dm-chat-profile-avatar-ring-size) solid var(--dm-chat-profile-avatar-ring-color, var(--dm-chat-profile-bg));
   background: var(--dm-chat-profile-avatar-ring-color, var(--dm-chat-profile-bg));
   box-shadow: 0 0 0 var(--dm-chat-profile-avatar-ring-size) var(--dm-chat-profile-avatar-ring-color, var(--dm-chat-profile-bg));
   overflow: visible;
@@ -194,7 +194,8 @@
 }
 
 .dm-chat__profile-avatar-button {
-  border: 0;
+  -webkit-appearance: none;
+  appearance: none;
   background: transparent;
   display: block;
   padding: 0;

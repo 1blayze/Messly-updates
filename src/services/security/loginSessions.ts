@@ -755,47 +755,79 @@ export async function endAllOtherLoginSessions(): Promise<number> {
 
   const uid = getCurrentAuthUid();
   const currentSessionId = normalizeSessionUuid(getCurrentAuthSessionId() ?? decodeSupabaseSessionId(accessToken));
-  const payload: {
-    action: "endAllOther";
-    sessionId?: string;
-  } = {
-    action: "endAllOther",
-  };
+  const payloadVariants: Array<Record<string, string>> = [];
   if (currentSessionId) {
-    payload.sessionId = currentSessionId;
+    payloadVariants.push({ action: "endAllOther", sessionId: currentSessionId });
+    payloadVariants.push({ action: "endAllOther", sessionToken: currentSessionId });
+    payloadVariants.push({ action: "endAllOther", currentSessionId });
+    payloadVariants.push({ action: "endAllOtherSessions", sessionId: currentSessionId });
+    payloadVariants.push({ action: "end_all_other", sessionId: currentSessionId });
+  } else {
+    payloadVariants.push({ action: "endAllOther" });
+    payloadVariants.push({ action: "endAllOtherSessions" });
+    payloadVariants.push({ action: "end_all_other" });
   }
 
-  try {
-    const response = await invokeEdgeJson<
-      {
-        action: "endAllOther";
-        sessionId?: string;
-      },
-      unknown
-    >("sessions", payload, {
-      requireAuth: true,
-      retries: 0,
-      timeoutMs: 12_000,
-    });
+  const isInvalidPayloadError = (error: unknown): boolean => {
+    if (!(error instanceof EdgeFunctionError)) {
+      return false;
+    }
 
-    const parsed = endAllOtherSessionsResponseSchema.parse(response);
-    clearSessionsEdgeUnauthorizedCooldown();
-    invalidateListSessionsCache(uid);
-    return parsed.endedCount;
-  } catch (error) {
-    if (isUnauthorizedSessionsEdgeError(error)) {
-      sessionsMutationApiTemporarilyDisabled = true;
-      activateSessionsEdgeUnauthorizedCooldown();
-      clearLocalSessionIfInvalid(error, uid);
-      return 0;
+    if (Number(error.status ?? 0) !== 400) {
+      return false;
     }
-    if (shouldDisableSessionsMutationApiForError(error)) {
-      sessionsMutationApiTemporarilyDisabled = true;
-      clearLocalSessionIfInvalid(error, uid);
-      return 0;
+
+    const code = String(error.code ?? "").trim().toUpperCase();
+    if (code === "INVALID_PAYLOAD" || code === "HTTP_400") {
+      return true;
     }
-    throw error;
+
+    const message = String(error.message ?? "").trim().toLowerCase();
+    return message.includes("payload") && message.includes("sessao");
+  };
+
+  let lastError: unknown = null;
+  for (let index = 0; index < payloadVariants.length; index += 1) {
+    const payload = payloadVariants[index];
+
+    try {
+      const response = await invokeEdgeJson<Record<string, string>, unknown>("sessions", payload, {
+        requireAuth: true,
+        retries: 0,
+        timeoutMs: 12_000,
+      });
+
+      const parsed = endAllOtherSessionsResponseSchema.parse(response);
+      clearSessionsEdgeUnauthorizedCooldown();
+      invalidateListSessionsCache(uid);
+      return parsed.endedCount;
+    } catch (error) {
+      lastError = error;
+
+      if (isInvalidPayloadError(error) && index < payloadVariants.length - 1) {
+        continue;
+      }
+
+      if (isUnauthorizedSessionsEdgeError(error)) {
+        sessionsMutationApiTemporarilyDisabled = true;
+        activateSessionsEdgeUnauthorizedCooldown();
+        clearLocalSessionIfInvalid(error, uid);
+        return 0;
+      }
+      if (shouldDisableSessionsMutationApiForError(error)) {
+        sessionsMutationApiTemporarilyDisabled = true;
+        clearLocalSessionIfInvalid(error, uid);
+        return 0;
+      }
+      throw error;
+    }
   }
+
+  if (lastError) {
+    throw lastError;
+  }
+
+  return 0;
 }
 
 async function listActiveLoginSessionsDetailed(): Promise<ListActiveLoginSessionsResult> {

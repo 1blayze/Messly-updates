@@ -76,15 +76,6 @@ interface PublishTypingPayload {
   conversationId: string;
 }
 
-interface PublishCallPayload {
-  type: "CALL_OFFER" | "CALL_ANSWER" | "CALL_ICE" | "CALL_END";
-  callId: string;
-  scopeType: "voice" | "dm";
-  scopeId: string;
-  targetUserId: string;
-  signal: Record<string, unknown> | null;
-}
-
 function parseFrame(raw: unknown): GatewayFrame<unknown> | null {
   try {
     if (raw instanceof ArrayBuffer) {
@@ -555,15 +546,6 @@ export class GatewayServer {
         }
         await this.publishTyping(context, payload as PublishTypingPayload, "TYPING_STOP");
         return;
-      case "CALL_OFFER":
-      case "CALL_ANSWER":
-      case "CALL_ICE":
-      case "CALL_END":
-        if (!(await this.assertEventRateLimit(context.userId, `call:${eventType}`, 40, 5_000))) {
-          return;
-        }
-        await this.publishCall(context, payload as PublishCallPayload, eventType);
-        return;
       default:
         if (eventType) {
           this.options.logger?.warn("Evento de publicacao nao suportado", { eventType });
@@ -614,24 +596,6 @@ export class GatewayServer {
     } else {
       await this.options.realtime.typing.stopTyping(conversationId, context.userId);
     }
-  }
-
-  private async publishCall(context: SocketContext, payload: PublishCallPayload, eventType: string): Promise<void> {
-    const targetUserId = String(payload?.targetUserId ?? "").trim();
-    const callId = String(payload?.callId ?? "").trim();
-    if (!targetUserId || !callId) {
-      return;
-    }
-    await this.options.realtime.publishCallSignal({
-      type: eventType as "CALL_OFFER" | "CALL_ANSWER" | "CALL_ICE" | "CALL_END",
-      callId,
-      scopeType: "voice",
-      scopeId: String(payload.scopeId ?? ""),
-      fromUserId: context.userId,
-      targetUserId,
-      signal: payload.signal ?? null,
-      updatedAt: nowIso(),
-    });
   }
 
   private async normalizeSubscriptions(

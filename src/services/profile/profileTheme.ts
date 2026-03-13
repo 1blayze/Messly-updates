@@ -798,6 +798,8 @@ export function buildProfileTheme(
 
   const fallbackAccentHex = rgb255ToHex(primaryRgb);
   const resolvedAccentHex = resolveThemeInputHex(accentHex, fallbackAccentHex);
+  const shouldPreserveAccentExtreme =
+    resolvedAccentHex === "#000000" || resolvedAccentHex === "#ffffff";
   const accentRgbInput = parseHex(resolvedAccentHex) ?? primaryRgb;
 
   const rawPrimaryHsl = rgbToHsl(primaryRgb);
@@ -816,7 +818,9 @@ export function buildProfileTheme(
 
   const finalPrimaryHex = shouldPreservePrimaryExtreme ? resolvedPrimaryHex : rgb255ToHex(bannerRgb);
   const finalAccentRgb = hslToRgb(accentHsl);
-  const finalAccentHex = rgb255ToHex(finalAccentRgb);
+  const finalAccentHex = shouldPreserveAccentExtreme
+    ? resolvedAccentHex
+    : rgb255ToHex(finalAccentRgb);
 
   const primaryOklch = normalizeInputColor(finalPrimaryHex, DEFAULT_PRIMARY);
   const accentOklch = normalizeInputColor(finalAccentHex, DEFAULT_ACCENT);

@@ -1,4 +1,4 @@
-import type { GatewayDispatchEvent, GatewayPresenceStatus, GatewayPublishEvent, GatewaySubscriptionType } from "./opcodes";
+import type { GatewayDispatchEvent, GatewayPresenceStatus, GatewaySubscriptionType } from "./opcodes";
 
 export interface GatewaySubscription {
   type: GatewaySubscriptionType;
@@ -153,25 +153,6 @@ export interface GatewayPublishSpotifyPayload {
   activity: Record<string, unknown> | null;
 }
 
-export interface GatewayCallDispatchPayload {
-  type: Extract<GatewayPublishEvent, "CALL_OFFER" | "CALL_ANSWER" | "CALL_ICE" | "CALL_END">;
-  callId: string;
-  scopeType: "voice" | "dm" | "room";
-  scopeId: string;
-  fromUserId: string;
-  targetUserId: string;
-  signal: Record<string, unknown> | null;
-  updatedAt: string;
-}
-
-export interface GatewayCallPublishPayload {
-  callId: string;
-  scopeType: "voice" | "dm" | "room";
-  scopeId: string;
-  targetUserId: string;
-  signal: Record<string, unknown> | null;
-}
-
 export interface GatewayDispatchPayloadMap {
   READY: GatewayReadyPayload;
   RESUMED: GatewayReadyPayload;
@@ -190,10 +171,6 @@ export interface GatewayDispatchPayloadMap {
   FRIEND_REQUEST_ACCEPT: GatewayFriendRequestDispatchPayload;
   USER_UPDATE: GatewayUserUpdateDispatchPayload;
   SPOTIFY_UPDATE: GatewaySpotifyDispatchPayload;
-  CALL_OFFER: GatewayCallDispatchPayload;
-  CALL_ANSWER: GatewayCallDispatchPayload;
-  CALL_ICE: GatewayCallDispatchPayload;
-  CALL_END: GatewayCallDispatchPayload;
 }
 
 export interface GatewayPublishPayloadMap {
@@ -201,10 +178,6 @@ export interface GatewayPublishPayloadMap {
   TYPING_START: GatewayPublishTypingPayload;
   TYPING_STOP: GatewayPublishTypingPayload;
   SPOTIFY_UPDATE: GatewayPublishSpotifyPayload;
-  CALL_OFFER: GatewayCallPublishPayload;
-  CALL_ANSWER: GatewayCallPublishPayload;
-  CALL_ICE: GatewayCallPublishPayload;
-  CALL_END: GatewayCallPublishPayload;
 }
 
 export type GatewayDispatchEnvelope<TEvent extends GatewayDispatchEvent = GatewayDispatchEvent> = GatewayFrame<

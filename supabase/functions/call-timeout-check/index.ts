@@ -106,7 +106,6 @@ async function closeRingingCalls(cutoffIso: string): Promise<number> {
       reason: "no_answer",
       durationSec: null,
     });
-    await supabase.from("call_signals").delete().eq("call_id", ended.id);
     updatedCount += 1;
   }
 
@@ -171,7 +170,6 @@ async function closeTimedOutActiveCalls(cutoffIso: string): Promise<number> {
       reason: "timeout",
       durationSec: computeDurationSeconds(ended.started_at, nowIso),
     });
-    await supabase.from("call_signals").delete().eq("call_id", ended.id);
     updatedCount += 1;
   }
 

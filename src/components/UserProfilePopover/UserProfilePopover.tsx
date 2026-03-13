@@ -539,6 +539,10 @@ export default function UserProfilePopover({
     () => profileTheme.style,
     [profileTheme.style],
   );
+  const isPureBlackProfileTheme = useMemo(
+    () => profileTheme.normalizedPrimary === "#000000" && profileTheme.normalizedAccent === "#000000",
+    [profileTheme.normalizedAccent, profileTheme.normalizedPrimary],
+  );
   const bannerInlineStyle = undefined;
   const compactPanelInlineStyle = panelInlineStyle;
   const fullPanelInlineStyle = panelInlineStyle;
@@ -996,7 +1000,7 @@ export default function UserProfilePopover({
   if (viewMode === "full") {
     return (
       <article
-        className={`${styles.panel} ${styles.panelFull}`}
+        className={`${styles.panel} ${styles.panelFull}${isPureBlackProfileTheme ? ` ${styles.panelPureBlack}` : ""}`}
         style={fullPanelInlineStyle}
         role="dialog"
         aria-label="Perfil completo do usuário"
@@ -1335,7 +1339,7 @@ export default function UserProfilePopover({
 
   return (
     <article
-      className={`${styles.panel}${!showActions ? ` ${styles.panelNoActions}` : ""}`}
+      className={`${styles.panel}${!showActions ? ` ${styles.panelNoActions}` : ""}${isPureBlackProfileTheme ? ` ${styles.panelPureBlack}` : ""}`}
       style={compactPanelInlineStyle}
       role="dialog"
       aria-label="Perfil do usuário"

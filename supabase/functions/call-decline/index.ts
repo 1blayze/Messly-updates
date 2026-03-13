@@ -21,7 +21,6 @@ import {
   responseJson,
   responseNoContent,
 } from "../_shared/http.ts";
-import { getSupabaseAdminClient } from "../_shared/supabaseAdmin.ts";
 
 const ROUTE = "call-decline";
 
@@ -107,9 +106,6 @@ Deno.serve(async (request: Request) => {
       reason: "declined",
       durationSec: null,
     });
-
-    const supabase = getSupabaseAdminClient();
-    await supabase.from("call_signals").delete().eq("call_id", updated.id);
 
     logStructured("info", "call_decline_success", context, {
       status: 200,

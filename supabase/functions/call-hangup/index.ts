@@ -24,7 +24,6 @@ import {
   responseJson,
   responseNoContent,
 } from "../_shared/http.ts";
-import { getSupabaseAdminClient } from "../_shared/supabaseAdmin.ts";
 
 const ROUTE = "call-hangup";
 
@@ -107,9 +106,6 @@ Deno.serve(async (request: Request) => {
         durationSec: computeDurationSeconds(ended.started_at, nowIso),
       });
 
-      const supabase = getSupabaseAdminClient();
-      await supabase.from("call_signals").delete().eq("call_id", ended.id);
-
       return responseJson(request, {
         ok: true,
         call: serializeCall(ended),
@@ -138,9 +134,6 @@ Deno.serve(async (request: Request) => {
         reason: "hangup",
         durationSec: computeDurationSeconds(ended.started_at, nowIso),
       });
-
-      const supabase = getSupabaseAdminClient();
-      await supabase.from("call_signals").delete().eq("call_id", ended.id);
 
       logStructured("info", "call_hangup_success", context, {
         status: 200,

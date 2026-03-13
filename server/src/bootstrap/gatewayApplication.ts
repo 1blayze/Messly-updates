@@ -41,6 +41,8 @@ import { AuthRouter } from "../auth/router";
 import { MediaRouter } from "../media/router";
 import { AuthSessionManager, type SessionClientInfo } from "../sessions/sessionManager";
 import { extractClientIpFromHeaders } from "../sessions/loginLocation";
+import type { RtpCodecCapability } from "mediasoup/types";
+import { VoiceServer } from "../voice/voiceServer";
 
 function getInstanceId(): string {
   return String(process.env.K_REVISION ?? process.env.HOSTNAME ?? randomUUID()).trim() || randomUUID();
@@ -103,6 +105,37 @@ function resolveSequence(frame: GatewayFrame): number | null {
   return typeof frame.s === "number" && Number.isFinite(frame.s) ? frame.s : null;
 }
 
+const DEFAULT_SFU_MEDIA_CODECS: RtpCodecCapability[] = [
+  {
+    kind: "audio",
+    mimeType: "audio/opus",
+    preferredPayloadType: 111,
+    clockRate: 48_000,
+    channels: 2,
+  },
+  {
+    kind: "video",
+    mimeType: "video/VP8",
+    preferredPayloadType: 96,
+    clockRate: 90_000,
+    parameters: {
+      "x-google-start-bitrate": 1_000,
+    },
+  },
+  {
+    kind: "video",
+    mimeType: "video/H264",
+    preferredPayloadType: 102,
+    clockRate: 90_000,
+    parameters: {
+      "packetization-mode": 1,
+      "level-asymmetry-allowed": 1,
+      "profile-level-id": "42e01f",
+      "x-google-start-bitrate": 1_000,
+    },
+  },
+];
+
 export class GatewayApplication {
   private readonly env: GatewayEnv;
   private readonly instanceId: string;
@@ -120,6 +153,7 @@ export class GatewayApplication {
   private readonly bridge: SupabaseRealtimeBridge;
   private readonly sessions: RedisSessionStore;
   private readonly presence: RedisPresenceService;
+  private readonly voice: VoiceServer;
   private readonly registry = new ConnectionRegistry();
   private readonly typing: TypingCoordinator;
   private readonly server = http.createServer();
@@ -200,6 +234,25 @@ export class GatewayApplication {
       this.redis,
       Math.max(env.resumeTtlSeconds, Math.ceil(env.clientTimeoutMs / 1_000) * 2),
     );
+    this.voice = new VoiceServer({
+      supabase: this.adminSupabase,
+      logger: this.logger.child({ subsystem: "voice" }),
+      maxPayloadBytes: env.maxPayloadBytes,
+      participantResumeTtlMs: env.voiceParticipantResumeTtlMs,
+      emptyCallTtlMs: env.voiceEmptyCallTtlMs,
+      sfuConfig: {
+        listenIp: env.sfuListenIp,
+        announcedIp: env.sfuAnnouncedIp,
+        rtcMinPort: env.sfuRtcMinPort,
+        rtcMaxPort: env.sfuRtcMaxPort,
+        enableUdp: env.sfuEnableUdp,
+        enableTcp: env.sfuEnableTcp,
+        preferUdp: env.sfuPreferUdp,
+        initialAvailableOutgoingBitrate: env.sfuInitialOutgoingBitrate,
+        maxIncomingBitrate: env.sfuMaxIncomingBitrate,
+        mediaCodecs: DEFAULT_SFU_MEDIA_CODECS,
+      },
+    });
     this.typing = new TypingCoordinator(this.publisher, env.typingTtlMs);
     this.backpressureBytes = env.maxPayloadBytes * 4;
     this.wss = new WebSocketServer({
@@ -228,6 +281,7 @@ export class GatewayApplication {
     await this.bus.start();
     this.bus.subscribe((message) => this.handleBusMessage(message));
     this.bridge.start();
+    await this.voice.start();
     this.startHeartbeatSweep();
     await this.writeInstanceHeartbeat("startup");
     this.startInstanceHeartbeat();
@@ -286,6 +340,7 @@ export class GatewayApplication {
       this.heartbeatSweepTimer && clearInterval(this.heartbeatSweepTimer);
       this.instanceHeartbeatTimer && clearInterval(this.instanceHeartbeatTimer);
       this.wss.close();
+      await this.voice.stop();
       await this.bridge.stop();
       await this.bus.stop();
       await this.redis.command.del(gatewayRedisKeys.instance(this.instanceId)).catch(() => undefined);
@@ -299,7 +354,7 @@ export class GatewayApplication {
 
   private async handleUpgrade(request: IncomingMessage, socket: UpgradeSocket, head: Buffer): Promise<void> {
     const requestUrl = new URL(request.url ?? "/", "http://messly.local");
-    if (requestUrl.pathname !== "/gateway") {
+    if (requestUrl.pathname !== "/gateway" && requestUrl.pathname !== "/voice") {
       rejectUpgrade(socket, 404, {
         error: "not_found",
       });
@@ -322,10 +377,16 @@ export class GatewayApplication {
     }
 
     const ipAddress = extractClientIpFromHeaders(request.headers, String(request.socket.remoteAddress ?? ""));
-    if (!(await this.assertRateLimit(`upgrade:${ipAddress}`, 30, 60_000))) {
+    const rateLimitBucket = requestUrl.pathname === "/voice" ? "upgrade:voice" : "upgrade:gateway";
+    if (!(await this.assertRateLimit(`${rateLimitBucket}:${ipAddress}`, 30, 60_000))) {
       rejectUpgrade(socket, 429, {
         error: "rate_limited",
       });
+      return;
+    }
+
+    if (requestUrl.pathname === "/voice") {
+      this.voice.handleUpgrade(request, socket, head);
       return;
     }
 
@@ -387,6 +448,22 @@ export class GatewayApplication {
         JSON.stringify({
           error: "upgrade_required",
           message: "Use WebSocket upgrade for /gateway.",
+        }),
+      );
+      return;
+    }
+
+    if (url.pathname === "/voice" || url.pathname === "/voice/") {
+      response.writeHead(426, {
+        "content-type": "application/json",
+        "cache-control": "no-store",
+        connection: "Upgrade",
+        upgrade: "websocket",
+      });
+      response.end(
+        JSON.stringify({
+          error: "upgrade_required",
+          message: "Use WebSocket upgrade for /voice.",
         }),
       );
       return;
@@ -1031,25 +1108,6 @@ export class GatewayApplication {
         }
         await this.typing.stopTyping(typingPayload.conversationId, connection.userId);
         return;
-      }
-      case "CALL_OFFER":
-      case "CALL_ANSWER":
-      case "CALL_ICE":
-      case "CALL_END": {
-        const callPayload = payload as GatewayPublishPayloadMap["CALL_OFFER"];
-        if (!(await this.assertRateLimit(`call:${eventType}:${connection.userId}`, 40, 5_000))) {
-          return;
-        }
-        await this.publisher.publishCall({
-          type: eventType,
-          callId: callPayload.callId,
-          scopeType: callPayload.scopeType,
-          scopeId: callPayload.scopeId,
-          fromUserId: connection.userId,
-          targetUserId: callPayload.targetUserId,
-          signal: callPayload.signal,
-          updatedAt: new Date().toISOString(),
-        });
       }
     }
   }
