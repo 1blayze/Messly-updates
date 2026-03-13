@@ -38,13 +38,14 @@ const clientTypeSchema = z.enum(["desktop", "web", "mobile", "unknown"]);
 const platformSchema = z.string().trim().min(1).max(32);
 const deviceIdSchema = z.string().trim().min(1).max(128);
 const clientNameSchema = z.string().trim().min(1).max(80).optional().nullable();
+const sessionIdentitySchema = z.string().trim().max(128).optional().nullable();
 
 const postPayloadSchema = z.discriminatedUnion("action", [
   z
     .object({
       action: z.literal("upsert"),
-      sessionId: z.string().uuid().optional().nullable(),
-      sessionToken: z.string().uuid().optional().nullable(),
+      sessionId: sessionIdentitySchema,
+      sessionToken: sessionIdentitySchema,
       deviceId: deviceIdSchema,
       clientType: clientTypeSchema,
       platform: platformSchema,
@@ -55,8 +56,8 @@ const postPayloadSchema = z.discriminatedUnion("action", [
   z
     .object({
       action: z.literal("end"),
-      sessionId: z.string().uuid().optional().nullable(),
-      sessionToken: z.string().uuid().optional().nullable(),
+      sessionId: sessionIdentitySchema,
+      sessionToken: sessionIdentitySchema,
     })
     .strict(),
   z
@@ -68,8 +69,8 @@ const postPayloadSchema = z.discriminatedUnion("action", [
   z
     .object({
       action: z.literal("endAllOther"),
-      sessionId: z.string().uuid().optional().nullable(),
-      sessionToken: z.string().uuid().optional().nullable(),
+      sessionId: sessionIdentitySchema,
+      sessionToken: sessionIdentitySchema,
     })
     .strict(),
 ]);
@@ -222,7 +223,7 @@ function decodeSupabaseSessionId(tokenRaw: string): string | null {
     const payloadText = atob(paddedPayload);
     const payload = JSON.parse(payloadText) as { session_id?: unknown; sessionId?: unknown };
     const sessionId = String(payload.session_id ?? payload.sessionId ?? "").trim();
-    return sessionId || null;
+    return isUuidLike(sessionId) ? sessionId : null;
   } catch {
     return null;
   }
@@ -253,7 +254,19 @@ function toNullableText(value: unknown, maxLength: number): string | null {
 
 function resolveRequestedSessionId(payload: PostPayload, accessToken: string): string {
   const authSessionId = decodeSupabaseSessionId(accessToken);
-  return authSessionId ?? "";
+  if (authSessionId) {
+    return authSessionId;
+  }
+
+  if ("sessionId" in payload && isUuidLike(String(payload.sessionId ?? "").trim())) {
+    return String(payload.sessionId ?? "").trim();
+  }
+
+  if ("sessionToken" in payload && isUuidLike(String(payload.sessionToken ?? "").trim())) {
+    return String(payload.sessionToken ?? "").trim();
+  }
+
+  return "";
 }
 
 function buildLocationLabel(city: string | null, region: string | null, country: string | null): string | null {

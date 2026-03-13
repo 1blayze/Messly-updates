@@ -2558,49 +2558,14 @@
 .devicesIntro,
 .devicesGroup,
 .devicesState,
-.devicesEmptyState {
+.devicesEmptyState,
+.devicesEndAllSection {
   width: min(var(--settings-section-width), 100%);
 }
 
 .devicesIntro {
   display: grid;
   gap: 10px;
-}
-
-.devicesActionsBar {
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-}
-
-.devicesEndAllButton {
-  min-height: 34px;
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.04);
-  color: #eef3fa;
-  padding: 0 14px;
-  font-size: 12px;
-  line-height: 1;
-  font-weight: 600;
-  cursor: pointer;
-  transition: var(--button-transition);
-}
-
-.devicesEndAllButton:hover,
-.devicesEndAllButton:focus-visible {
-  border-color: rgba(255, 255, 255, 0.26);
-  background: rgba(255, 255, 255, 0.08);
-}
-
-.devicesEndAllButton:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 2px var(--button-focus-ring);
-}
-
-.devicesEndAllButton:disabled {
-  opacity: 0.58;
-  cursor: not-allowed;
 }
 
 .devicesIntroText {
@@ -2716,15 +2681,6 @@
   gap: 4px;
 }
 
-.deviceTypeLabel {
-  margin: 0;
-  color: rgba(213, 221, 231, 0.78);
-  font-size: 12px;
-  line-height: 1.2;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-}
-
 .deviceClientOs {
   margin: 0;
   color: #edf1f8;
@@ -2736,17 +2692,12 @@
   text-overflow: ellipsis;
 }
 
-.deviceMetaLine,
-.deviceMetaLineMuted {
+.deviceMetaLine {
   margin: 0;
   color: rgba(220, 228, 238, 0.74);
   font-size: 12px;
   line-height: 1.35;
   font-weight: 500;
-}
-
-.deviceMetaLineMuted {
-  color: rgba(194, 204, 218, 0.64);
 }
 
 .deviceSessionSummaryCard {
@@ -2808,6 +2759,61 @@
   opacity: 0.62;
   cursor: default;
   transform: none;
+}
+
+.devicesEndAllSection {
+  margin-top: 6px;
+  padding-top: 16px;
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.devicesEndAllTitle {
+  margin: 0;
+  color: #f4f7fb;
+  font-size: 17px;
+  line-height: 1.2;
+  font-weight: 600;
+}
+
+.devicesEndAllText {
+  margin: 0;
+  color: rgba(197, 208, 224, 0.74);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.devicesEndAllDangerButton {
+  min-height: 34px;
+  width: fit-content;
+  border: 1px solid rgba(255, 124, 124, 0.3);
+  border-radius: 10px;
+  background: rgba(255, 105, 105, 0.1);
+  color: #ff9393;
+  padding: 0 14px;
+  font-size: 12px;
+  line-height: 1;
+  font-weight: 600;
+  cursor: pointer;
+  transition: var(--button-transition);
+}
+
+.devicesEndAllDangerButton:hover,
+.devicesEndAllDangerButton:focus-visible {
+  border-color: rgba(255, 124, 124, 0.42);
+  background: rgba(255, 105, 105, 0.16);
+  color: #ffb0b0;
+}
+
+.devicesEndAllDangerButton:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(255, 124, 124, 0.3);
+}
+
+.devicesEndAllDangerButton:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .friendRequestCard {

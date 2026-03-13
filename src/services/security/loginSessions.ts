@@ -116,7 +116,7 @@ function decodeSupabaseSessionId(tokenRaw: string | null | undefined): string | 
     const payloadText = window.atob(paddedPayload);
     const payload = JSON.parse(payloadText) as { session_id?: unknown; sessionId?: unknown };
     const sessionId = String(payload.session_id ?? payload.sessionId ?? "").trim();
-    return sessionId || null;
+    return z.string().uuid().safeParse(sessionId).success ? sessionId : null;
   } catch {
     return null;
   }
@@ -135,6 +135,11 @@ function updateCachedAuthState(): void {
 
 function normalizeSessionIdentity(valueRaw: string | null | undefined): string {
   return String(valueRaw ?? "").trim();
+}
+
+function normalizeSessionUuid(valueRaw: string | null | undefined): string | null {
+  const value = String(valueRaw ?? "").trim();
+  return value && z.string().uuid().safeParse(value).success ? value : null;
 }
 
 function markSessionAsConfirmed(uidRaw: string | null | undefined, sessionIdRaw: string | null | undefined): void {
@@ -522,10 +527,11 @@ function clearStoredSessionId(uid: string): void {
 }
 
 function getCurrentAuthSessionId(): string | null {
-  const directCached = String(cachedAuthSessionId ?? "").trim();
+  const directCached = normalizeSessionUuid(cachedAuthSessionId);
   if (directCached) {
     return directCached;
   }
+  cachedAuthSessionId = null;
 
   const session = getInMemorySession();
   const decoded = decodeSupabaseSessionId(session?.access_token ?? null);
@@ -554,7 +560,7 @@ export async function recordLoginSession(): Promise<LoginSessionView | null> {
 
   const uid = getCurrentAuthUid();
   const accessToken = await resolveSessionsAccessToken();
-  const sessionId = getCurrentAuthSessionId() ?? decodeSupabaseSessionId(accessToken);
+  const sessionId = normalizeSessionUuid(getCurrentAuthSessionId() ?? decodeSupabaseSessionId(accessToken));
   if (!uid || !sessionId || sessionsMutationApiTemporarilyDisabled) {
     return null;
   }
@@ -621,7 +627,7 @@ export async function endCurrentLoginSession(): Promise<void> {
 
   const uid = getCurrentAuthUid();
   const accessToken = await resolveSessionsAccessToken();
-  const sessionId = getCurrentAuthSessionId() ?? decodeSupabaseSessionId(accessToken);
+  const sessionId = normalizeSessionUuid(getCurrentAuthSessionId() ?? decodeSupabaseSessionId(accessToken));
   if (!uid) {
     return;
   }
@@ -748,19 +754,25 @@ export async function endAllOtherLoginSessions(): Promise<number> {
   }
 
   const uid = getCurrentAuthUid();
-  const currentSessionId = getCurrentAuthSessionId() ?? decodeSupabaseSessionId(accessToken);
+  const currentSessionId = normalizeSessionUuid(getCurrentAuthSessionId() ?? decodeSupabaseSessionId(accessToken));
+  const payload: {
+    action: "endAllOther";
+    sessionId?: string;
+  } = {
+    action: "endAllOther",
+  };
+  if (currentSessionId) {
+    payload.sessionId = currentSessionId;
+  }
 
   try {
     const response = await invokeEdgeJson<
       {
         action: "endAllOther";
-        sessionId?: string | null;
+        sessionId?: string;
       },
       unknown
-    >("sessions", {
-      action: "endAllOther",
-      sessionId: currentSessionId,
-    }, {
+    >("sessions", payload, {
       requireAuth: true,
       retries: 0,
       timeoutMs: 12_000,

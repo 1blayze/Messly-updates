@@ -1253,17 +1253,6 @@ function normalizePresencePlatform(value: unknown): PresencePlatform {
   return "browser";
 }
 
-function getDevicePlatformLabel(platform: PresencePlatform): string {
-  switch (platform) {
-    case "desktop":
-      return "Desktop";
-    case "mobile":
-      return "Mobile";
-    default:
-      return "Browser";
-  }
-}
-
 function getDevicePlatformIcon(platform: PresencePlatform): string {
   switch (platform) {
     case "desktop":
@@ -1272,17 +1261,6 @@ function getDevicePlatformIcon(platform: PresencePlatform): string {
       return "smartphone";
     default:
       return "language";
-  }
-}
-
-function getDevicePlatformEmoji(platform: PresencePlatform): string {
-  switch (platform) {
-    case "desktop":
-      return "🖥";
-    case "mobile":
-      return "📱";
-    default:
-      return "🌐";
   }
 }
 
@@ -6559,18 +6537,6 @@ export default function AppSettingsView({
                     <p className={styles.devicesIntroText}>
                       Veja os acessos recentes da sua conta neste dispositivo e nos outros clientes conectados.
                     </p>
-                    <div className={styles.devicesActionsBar}>
-                      <button
-                        type="button"
-                        className={styles.devicesEndAllButton}
-                        onClick={openEndAllOtherSessionsModal}
-                        disabled={!hasOtherDeviceSessions || Boolean(endingDeviceSessionId) || isEndingAllOtherDeviceSessions}
-                      >
-                        {isEndingAllOtherDeviceSessions
-                          ? "Encerrando sessões..."
-                          : "Encerrar todas as outras sessões"}
-                      </button>
-                    </div>
                   </section>
                   {deviceSessionsFeedback ? (
                     <p
@@ -6607,10 +6573,6 @@ export default function AppSettingsView({
                           <h4 className={styles.devicesGroupTitle}>Dispositivo atual</h4>
 
                           {(() => {
-                            const currentSessionAgeLabel = formatSessionActiveForLabel(
-                              currentDeviceSession.createdAt,
-                              currentDeviceSession.lastActive ?? currentDeviceSession.updatedAt,
-                            );
                             const currentLocationLabel = formatDeviceLocationLabel(currentDeviceSession.locationLabel);
                             const currentIpLabel = formatMaskedIpLabel(currentDeviceSession.ipAddressMasked);
 
@@ -6626,17 +6588,13 @@ export default function AppSettingsView({
                                 </div>
 
                                 <div className={styles.deviceMeta}>
-                                  <p className={styles.deviceTypeLabel}>
-                                    {`${getDevicePlatformEmoji(currentDeviceSession.platform)} ${getDevicePlatformLabel(currentDeviceSession.platform)}`}
-                                  </p>
                                   <p className={styles.deviceClientOs}>
-                                    {`${currentDeviceSession.clientName} • ${currentDeviceSession.osName}`}
+                                    {`${currentDeviceSession.osName} • ${currentDeviceSession.clientName}`}
                                   </p>
                                   <p className={styles.deviceMetaLine}>
                                     {currentLocationLabel ?? "Localização não disponível"}
                                   </p>
                                   <p className={styles.deviceMetaLine}>{currentIpLabel}</p>
-                                  <p className={styles.deviceMetaLineMuted}>{currentSessionAgeLabel}</p>
                                 </div>
                               </article>
                             );
@@ -6654,6 +6612,7 @@ export default function AppSettingsView({
                                 session.createdAt,
                                 session.lastActive ?? session.updatedAt,
                               );
+                              const sessionRelativeLabel = sessionAgeLabel.replace(/^Ativo\s+/i, "");
                               const locationLabel = formatDeviceLocationLabel(session.locationLabel);
                               const ipLabel = formatMaskedIpLabel(session.ipAddressMasked);
                               const canEndSession = !session.isCurrent && isUuidLike(String(session.sessionId ?? ""));
@@ -6671,13 +6630,11 @@ export default function AppSettingsView({
                                   </div>
 
                                   <div className={styles.deviceMeta}>
-                                    <p className={styles.deviceTypeLabel}>
-                                      {`${getDevicePlatformEmoji(session.platform)} ${getDevicePlatformLabel(session.platform)}`}
+                                    <p className={styles.deviceClientOs}>{`${session.osName} • ${session.clientName}`}</p>
+                                    <p className={styles.deviceMetaLine}>
+                                      {`${locationLabel ?? "Localização não disponível"} - ${sessionRelativeLabel}`}
                                     </p>
-                                    <p className={styles.deviceClientOs}>{`${session.clientName} • ${session.osName}`}</p>
-                                    <p className={styles.deviceMetaLine}>{locationLabel ?? "Localização não disponível"}</p>
                                     <p className={styles.deviceMetaLine}>{ipLabel}</p>
-                                    <p className={styles.deviceMetaLineMuted}>{sessionAgeLabel}</p>
                                   </div>
 
                                   {canEndSession ? (
@@ -6704,6 +6661,21 @@ export default function AppSettingsView({
                       ) : null}
                     </>
                   )}
+
+                  <section className={styles.devicesEndAllSection} aria-label="Sair de todos os dispositivos conhecidos">
+                    <h4 className={styles.devicesEndAllTitle}>Sair de todos os dispositivos conhecidos</h4>
+                    <p className={styles.devicesEndAllText}>
+                      Você terá que entrar novamente em todos os dispositivos de que sair.
+                    </p>
+                    <button
+                      type="button"
+                      className={styles.devicesEndAllDangerButton}
+                      onClick={openEndAllOtherSessionsModal}
+                      disabled={!hasOtherDeviceSessions || Boolean(endingDeviceSessionId) || isEndingAllOtherDeviceSessions}
+                    >
+                      {isEndingAllOtherDeviceSessions ? "Encerrando sessões..." : "Sair de todos os dispositivos conhecidos"}
+                    </button>
+                  </section>
                 </div>
               </section>
             ) : (
@@ -6906,12 +6878,8 @@ export default function AppSettingsView({
 
           {pendingDeviceSession ? (
             <div className={styles.deviceSessionSummaryCard}>
-              <div className={styles.accountModalStepBadge}>
-                <MaterialSymbolIcon name={getDevicePlatformIcon(pendingDeviceSession.platform)} size={14} filled={false} />
-                <span>{`${getDevicePlatformEmoji(pendingDeviceSession.platform)} ${getDevicePlatformLabel(pendingDeviceSession.platform)}`}</span>
-              </div>
               <p className={styles.deviceSessionSummaryPrimary}>
-                {`${pendingDeviceSession.clientName} • ${pendingDeviceSession.osName}`}
+                {`${pendingDeviceSession.osName} • ${pendingDeviceSession.clientName}`}
               </p>
               <p className={styles.deviceSessionSummaryLine}>
                 {formatDeviceLocationLabel(pendingDeviceSession.locationLabel) ?? "Localização não disponível"}

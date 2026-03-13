@@ -170,6 +170,7 @@ const AUTH_SESSION_HINT_TIMEOUT_MS = 4_000;
 const AUTH_APPLY_SESSION_TIMEOUT_MS = 15_000;
 const AUTH_PROFILE_FETCH_TIMEOUT_MS = 10_000;
 const AUTH_HARD_LOADING_TIMEOUT_MS = 20_000;
+const AUTH_BACKGROUND_RECOVERY_TIMEOUT_MS = 15_000;
 
 async function withTimeout<T>(task: Promise<T>, timeoutMs: number, message: string): Promise<T> {
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
@@ -287,6 +288,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const requiresSignupSecurityVerification = authService.requiresSignupSecurityVerification();
   const subscriptionRef = useRef<ReturnType<typeof supabase.auth.onAuthStateChange>["data"]["subscription"] | null>(null);
   const lastSessionAccessTokenRef = useRef<string | null>(null);
+  const backgroundRecoveryAttemptedRef = useRef(false);
 
   const refreshKnownAccounts = useCallback((): void => {
     setStoredKnownAccounts(readKnownAccounts());
@@ -397,6 +399,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setSession(null);
           setUser(null);
           setProfile(null);
+          setHasSessionHint(false);
+          setSessionHintResolved(true);
           setError("Sua conta nao existe mais. Faca login novamente.");
           dispatch(authActions.authSignedOut());
           setAuthReady(true);
@@ -435,6 +439,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                 setSession(null);
                 setUser(null);
                 setProfile(null);
+                setHasSessionHint(false);
+                setSessionHintResolved(true);
                 setError("Sua conta nao existe mais. Faca login novamente.");
                 dispatch(authActions.authSignedOut());
                 return;
@@ -469,6 +475,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setSession(null);
           setUser(null);
           setProfile(null);
+          setHasSessionHint(false);
+          setSessionHintResolved(true);
           setError("Sessao invalida ou expirada. Faca login novamente.");
           dispatch(authActions.authErrorChanged("Sessao invalida ou expirada. Faca login novamente."));
           dispatch(authActions.authSignedOut());
@@ -713,6 +721,61 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       window.removeEventListener("focus", handleFocus);
     };
   }, [session?.access_token, session?.user?.id]);
+
+  useEffect(() => {
+    if (user || !hasSessionHint) {
+      backgroundRecoveryAttemptedRef.current = false;
+    }
+  }, [hasSessionHint, user?.uid]);
+
+  useEffect(() => {
+    if (user || isLoading || !authReady || !sessionHintResolved || !hasSessionHint) {
+      return;
+    }
+    if (backgroundRecoveryAttemptedRef.current) {
+      return;
+    }
+    backgroundRecoveryAttemptedRef.current = true;
+
+    let cancelled = false;
+    setIsLoading(true);
+
+    void withTimeout(
+      authService.getCurrentSession(),
+      AUTH_BACKGROUND_RECOVERY_TIMEOUT_MS,
+      "Tempo limite ao recuperar sessao em segundo plano.",
+    )
+      .then(async (recoveredSession) => {
+        if (cancelled) {
+          return;
+        }
+        if (!recoveredSession?.user) {
+          setHasSessionHint(false);
+          return;
+        }
+        await withTimeout(
+          applySessionAndProfile(recoveredSession),
+          AUTH_APPLY_SESSION_TIMEOUT_MS,
+          "Tempo limite ao aplicar sessao recuperada.",
+        );
+      })
+      .catch((recoveryError) => {
+        if (import.meta.env.DEV) {
+          console.warn("[auth:background-recovery]", recoveryError);
+        }
+      })
+      .finally(() => {
+        if (cancelled) {
+          return;
+        }
+        setIsLoading(false);
+        setAuthReady(true);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [applySessionAndProfile, authReady, hasSessionHint, isLoading, sessionHintResolved, user]);
 
   const signIn = useCallback(
     async (email: string, password: string): Promise<{ user: AuthUser; profile: ProfileRow | null }> => {
