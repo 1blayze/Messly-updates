@@ -22,6 +22,8 @@ interface ImportMetaEnv {
   readonly VITE_CHAT_KEEP_ORIGINAL_UPLOADS?: string;
   readonly VITE_CHAT_E2EE_ENABLED?: string;
   readonly VITE_WEBRTC_ICE_SERVERS_JSON?: string;
+  readonly VITE_WEBRTC_TURN_USERNAME?: string;
+  readonly VITE_WEBRTC_TURN_CREDENTIAL?: string;
 }
 
 interface ImportMeta {

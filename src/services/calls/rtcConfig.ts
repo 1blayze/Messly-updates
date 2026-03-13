@@ -40,7 +40,36 @@ interface IceCandidateStatShape {
   candidateType?: string;
 }
 
-const DEFAULT_ICE_SERVERS: RTCIceServer[] = [{ urls: ["stun:stun.l.google.com:19302"] }];
+function buildDefaultIceServers(): RTCIceServer[] {
+  const turnUsername = String(import.meta.env.VITE_WEBRTC_TURN_USERNAME ?? "").trim();
+  const turnCredential = String(import.meta.env.VITE_WEBRTC_TURN_CREDENTIAL ?? "").trim();
+
+  const turnServer: RTCIceServer = {
+    urls: [
+      "turn:turn.messly.site?transport=udp",
+      "turn:turn.messly.site?transport=tcp",
+    ],
+  };
+
+  if (turnUsername) {
+    turnServer.username = turnUsername;
+  }
+  if (turnCredential) {
+    turnServer.credential = turnCredential;
+  }
+
+  return [
+    {
+      urls: [
+        "stun:stun.l.google.com:19302",
+        "stun:stun1.l.google.com:19302",
+      ],
+    },
+    turnServer,
+  ];
+}
+
+const DEFAULT_ICE_SERVERS: RTCIceServer[] = buildDefaultIceServers();
 const DEFAULT_ICE_TRANSPORT_POLICY: RTCIceTransportPolicy = "all";
 const DEFAULT_BUNDLE_POLICY: RTCBundlePolicy = "balanced";
 const DEFAULT_RTCP_MUX_POLICY: RtcpMuxPolicyValue = "require";

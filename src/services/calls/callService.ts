@@ -8,6 +8,7 @@ import {
   getIceCandidateKind,
   getSelectedCandidatePairSummary,
   sanitizeIceServersForLogs,
+  type IceCandidateKind,
   type RtcRuntimeConfig,
 } from "./rtcConfig";
 
@@ -20,6 +21,14 @@ export interface CallVoiceDiagnostics {
   averagePingMs: number | null;
   lastPingMs: number | null;
   packetLossPercent: number | null;
+  connectionType: IceCandidateKind | null;
+  localCandidateType: IceCandidateKind | null;
+  remoteCandidateType: IceCandidateKind | null;
+  usingRelay: boolean | null;
+  outboundBitrateKbps: number | null;
+  inboundBitrateKbps: number | null;
+  connectionState: RTCPeerConnectionState | null;
+  iceConnectionState: RTCIceConnectionState | null;
   updatedAt: string;
 }
 
@@ -465,6 +474,10 @@ export class CallService {
   private pendingRemoteCandidates: RTCIceCandidateInit[] = [];
   private relayFallbackActivated = false;
   private selectedCandidatePairLogged = false;
+  private previousBitrateSample: { timestampMs: number; outboundBytes: number; inboundBytes: number } | null = null;
+  private lastIceRestartAt = 0;
+  private iceRestartInFlight = false;
+  private connectionInterruptedAtMs: number | null = null;
   private iceGatheringTimeoutId: number | null = null;
   private connectionTimeoutId: number | null = null;
   private micManuallyEnabled = true;
@@ -515,6 +528,8 @@ export class CallService {
     let lastPingMs: number | null = null;
     let packetsSentTotal = 0;
     let packetsLostTotal = 0;
+    let outboundBytesTotal = 0;
+    let inboundBytesTotal = 0;
 
     const report = await pc.getStats();
     report.forEach((entry) => {
@@ -529,6 +544,8 @@ export class CallService {
         nominated?: boolean;
         packetsSent?: number;
         packetsLost?: number;
+        bytesSent?: number;
+        bytesReceived?: number;
       };
 
       const type = String(stat.type ?? "");
@@ -561,9 +578,15 @@ export class CallService {
       if (type === "outbound-rtp" && typeof stat.packetsSent === "number" && Number.isFinite(stat.packetsSent)) {
         packetsSentTotal += Math.max(0, stat.packetsSent);
       }
+      if (type === "outbound-rtp" && typeof stat.bytesSent === "number" && Number.isFinite(stat.bytesSent)) {
+        outboundBytesTotal += Math.max(0, stat.bytesSent);
+      }
 
       if ((type === "remote-inbound-rtp" || type === "inbound-rtp") && typeof stat.packetsLost === "number" && Number.isFinite(stat.packetsLost)) {
         packetsLostTotal += Math.max(0, stat.packetsLost);
+      }
+      if (type === "inbound-rtp" && typeof stat.bytesReceived === "number" && Number.isFinite(stat.bytesReceived)) {
+        inboundBytesTotal += Math.max(0, stat.bytesReceived);
       }
     });
 
@@ -576,12 +599,122 @@ export class CallService {
       ? (packetsLostTotal / denominator) * 100
       : null;
 
+    let outboundBitrateKbps: number | null = null;
+    let inboundBitrateKbps: number | null = null;
+    const nowMs = Date.now();
+    const previousBitrateSample = this.previousBitrateSample;
+    if (previousBitrateSample) {
+      const elapsedMs = nowMs - previousBitrateSample.timestampMs;
+      if (elapsedMs > 0) {
+        const outboundBytesDelta = outboundBytesTotal - previousBitrateSample.outboundBytes;
+        const inboundBytesDelta = inboundBytesTotal - previousBitrateSample.inboundBytes;
+        if (outboundBytesDelta >= 0) {
+          outboundBitrateKbps = (outboundBytesDelta * 8) / elapsedMs;
+        }
+        if (inboundBytesDelta >= 0) {
+          inboundBitrateKbps = (inboundBytesDelta * 8) / elapsedMs;
+        }
+      }
+    }
+    this.previousBitrateSample = {
+      timestampMs: nowMs,
+      outboundBytes: outboundBytesTotal,
+      inboundBytes: inboundBytesTotal,
+    };
+
+    let localCandidateType: IceCandidateKind | null = null;
+    let remoteCandidateType: IceCandidateKind | null = null;
+    let usingRelay: boolean | null = null;
+    let connectionType: IceCandidateKind | null = null;
+    try {
+      const selectedPair = await getSelectedCandidatePairSummary(pc);
+      if (selectedPair) {
+        localCandidateType = selectedPair.localCandidateType;
+        remoteCandidateType = selectedPair.remoteCandidateType;
+        usingRelay = selectedPair.usesRelay;
+        connectionType = selectedPair.usesRelay
+          ? "relay"
+          : (selectedPair.remoteCandidateType !== "unknown"
+            ? selectedPair.remoteCandidateType
+            : selectedPair.localCandidateType);
+      }
+    } catch {
+      // ignore stats sampling edge-cases
+    }
+
     return {
       averagePingMs: averagePingMs ?? null,
       lastPingMs,
       packetLossPercent,
+      connectionType,
+      localCandidateType,
+      remoteCandidateType,
+      usingRelay,
+      outboundBitrateKbps,
+      inboundBitrateKbps,
+      connectionState: pc.connectionState,
+      iceConnectionState: pc.iceConnectionState,
       updatedAt: new Date().toISOString(),
     };
+  }
+
+  async restartIce(reason = "manual"): Promise<boolean> {
+    const pc = this.peerConnection;
+    if (!pc || this.disposed) {
+      return false;
+    }
+    if (pc.signalingState === "closed") {
+      return false;
+    }
+
+    const now = Date.now();
+    if (this.iceRestartInFlight) {
+      return false;
+    }
+    if (now - this.lastIceRestartAt < 2_500) {
+      return false;
+    }
+    if (pc.signalingState !== "stable") {
+      this.logRtc("ice-restart-skipped", {
+        reason,
+        signalingState: pc.signalingState,
+      }, true);
+      return false;
+    }
+
+    this.iceRestartInFlight = true;
+    this.lastIceRestartAt = now;
+    this.logRtc("ice-restart-started", {
+      reason,
+      connectionState: pc.connectionState,
+      iceConnectionState: pc.iceConnectionState,
+    }, false);
+    console.info("[call] ice restart", {
+      reason,
+      connectionState: pc.connectionState,
+      iceConnectionState: pc.iceConnectionState,
+    });
+
+    try {
+      const offer = await pc.createOffer({ iceRestart: true });
+      await pc.setLocalDescription(offer);
+      await this.options.onSignal({
+        type: "offer",
+        payload: {
+          type: "offer",
+          sdp: offer.sdp ?? "",
+        },
+      });
+      return true;
+    } catch (error) {
+      this.logRtc("ice-restart-failed", {
+        reason,
+        message: this.getErrorMessage(error),
+      }, false, "warn");
+      return false;
+    } finally {
+      this.iceRestartInFlight = false;
+    }
   }
 
   async startAsCaller(): Promise<Record<string, unknown>> {
@@ -814,6 +947,10 @@ export class CallService {
     this.pendingRemoteCandidates = [];
     this.relayFallbackActivated = false;
     this.selectedCandidatePairLogged = false;
+    this.previousBitrateSample = null;
+    this.lastIceRestartAt = 0;
+    this.iceRestartInFlight = false;
+    this.connectionInterruptedAtMs = null;
     this.clearRtcTimers();
     this.audioSender = null;
     this.cameraTrack = null;
@@ -994,8 +1131,26 @@ export class CallService {
       if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
         this.clearConnectionTimeout();
         void this.logSelectedCandidatePair(pc, "ice-connected");
+        if (this.connectionInterruptedAtMs != null) {
+          const recoveredInMs = Math.max(0, Date.now() - this.connectionInterruptedAtMs);
+          this.connectionInterruptedAtMs = null;
+          console.info("[call] connection recovered", {
+            source: "ice-connection-state",
+            recoveredInMs,
+          });
+        }
+      }
+      if (pc.iceConnectionState === "disconnected") {
+        if (this.connectionInterruptedAtMs == null) {
+          this.connectionInterruptedAtMs = Date.now();
+        }
+        void this.restartIce("ice-connection-disconnected");
       }
       if (pc.iceConnectionState === "failed") {
+        if (this.connectionInterruptedAtMs == null) {
+          this.connectionInterruptedAtMs = Date.now();
+        }
+        void this.restartIce("ice-connection-failed");
         void this.activateRelayFallback(pc, "ice-connection-failed");
       }
     };
@@ -1036,8 +1191,30 @@ export class CallService {
       if (pc.connectionState === "connected") {
         this.clearConnectionTimeout();
         void this.logSelectedCandidatePair(pc, "connection-connected");
+        console.info("[call] peer connected", {
+          connectionState: pc.connectionState,
+          iceConnectionState: pc.iceConnectionState,
+        });
+        if (this.connectionInterruptedAtMs != null) {
+          const recoveredInMs = Math.max(0, Date.now() - this.connectionInterruptedAtMs);
+          this.connectionInterruptedAtMs = null;
+          console.info("[call] connection recovered", {
+            source: "peer-connection-state",
+            recoveredInMs,
+          });
+        }
+      }
+      if (pc.connectionState === "disconnected") {
+        if (this.connectionInterruptedAtMs == null) {
+          this.connectionInterruptedAtMs = Date.now();
+        }
+        void this.restartIce("peer-connection-disconnected");
       }
       if (pc.connectionState === "failed") {
+        if (this.connectionInterruptedAtMs == null) {
+          this.connectionInterruptedAtMs = Date.now();
+        }
+        void this.restartIce("peer-connection-failed");
         void this.activateRelayFallback(pc, "peer-connection-failed");
       }
       this.options.onConnectionStateChange?.(pc.connectionState);
@@ -1561,6 +1738,9 @@ export class CallService {
       pc.setConfiguration({
         ...this.rtcRuntimeConfig.peerConnectionConfig,
         iceTransportPolicy: "relay",
+      });
+      console.info("[call] using TURN relay", {
+        reason,
       });
     } catch (error) {
       this.logRtc("relay-fallback-set-configuration-failed", {

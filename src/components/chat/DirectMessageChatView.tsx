@@ -101,6 +101,8 @@ const CALL_SOLO_TIMEOUT_MS = 3 * 60 * 1000;
 const CALL_REALTIME_CHANNEL_NAME = "dm-call";
 const CALL_KEEPALIVE_INTERVAL_MS = 4_000;
 const CALL_DISCONNECT_FINALIZE_TIMEOUT_MS = 8_000;
+const CALL_RESUME_STORAGE_KEY_PREFIX = "messly:call-resume:v1:";
+const CALL_RESUME_MAX_AGE_MS = 15 * 60_000;
 const AUDIO_SETTINGS_STORAGE_KEY_PREFIX = "messly:audio-settings:";
 const CALL_RINGING_SOUND_URL = new URL("../../assets/sounds/call_ringing.mp3", import.meta.url).href;
 const CALL_JOIN_SOUND_URL = new URL("../../assets/sounds/call_join.mp3", import.meta.url).href;
@@ -402,7 +404,13 @@ interface RejoinAvailableCallState {
   session: CallSession | null;
 }
 
-type CallRealtimeEventKind = "ring" | "accept" | "decline" | "hangup" | "signal" | "keepalive";
+interface PersistedCallResumeState {
+  v: 1;
+  updatedAt: string;
+  state: RejoinAvailableCallState;
+}
+
+type CallRealtimeEventKind = "ring" | "accept" | "decline" | "hangup" | "signal" | "keepalive" | "resume";
 
 interface CallRealtimeEvent {
   eventId: string;
@@ -1412,7 +1420,7 @@ function normalizeRealtimeCallEvent(raw: unknown): CallRealtimeEvent | null {
   if (!eventId || !conversationId || !callId || !fromUid || !toUid || !createdAt) {
     return null;
   }
-  if (!["ring", "accept", "decline", "hangup", "signal", "keepalive"].includes(kind)) {
+  if (!["ring", "accept", "decline", "hangup", "signal", "keepalive", "resume"].includes(kind)) {
     return null;
   }
 
@@ -1527,6 +1535,102 @@ function buildCallAudioSettingsStorageKey(userUid: string | null | undefined): s
     return `${AUDIO_SETTINGS_STORAGE_KEY_PREFIX}guest`;
   }
   return `${AUDIO_SETTINGS_STORAGE_KEY_PREFIX}${normalizedUid}`;
+}
+
+function buildCallResumeStorageKey(
+  userUid: string | null | undefined,
+  conversationIdRaw: string | null | undefined,
+): string {
+  const normalizedUid = String(userUid ?? "").trim() || "guest";
+  const normalizedConversationId = String(conversationIdRaw ?? "").trim() || "unknown";
+  return `${CALL_RESUME_STORAGE_KEY_PREFIX}${normalizedUid}:${normalizedConversationId}`;
+}
+
+function readPersistedCallResumeState(
+  userUid: string | null | undefined,
+  conversationIdRaw: string | null | undefined,
+): RejoinAvailableCallState | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  const storageKey = buildCallResumeStorageKey(userUid, conversationIdRaw);
+  try {
+    const raw = window.localStorage.getItem(storageKey);
+    if (!raw) {
+      return null;
+    }
+
+    const parsed = JSON.parse(raw) as PersistedCallResumeState | null;
+    if (!parsed || parsed.v !== 1 || !parsed.state || typeof parsed.state !== "object") {
+      window.localStorage.removeItem(storageKey);
+      return null;
+    }
+
+    const updatedAtMs = Date.parse(String(parsed.updatedAt ?? ""));
+    if (!Number.isFinite(updatedAtMs) || Date.now() - updatedAtMs > CALL_RESUME_MAX_AGE_MS) {
+      window.localStorage.removeItem(storageKey);
+      return null;
+    }
+
+    const persistedState = parsed.state as RejoinAvailableCallState;
+    const conversationId = String(persistedState.conversationId ?? "").trim();
+    const modeRaw = String(persistedState.mode ?? "").trim().toLowerCase();
+    const callIdRaw = String(persistedState.callId ?? "").trim();
+    const targetUidRaw = String(persistedState.targetUid ?? "").trim();
+    const session = normalizeRealtimeCallSession(persistedState.session);
+    const callId = callIdRaw || session?.id || "";
+    if (!conversationId || !callId || (modeRaw !== "audio" && modeRaw !== "video")) {
+      window.localStorage.removeItem(storageKey);
+      return null;
+    }
+
+    return {
+      conversationId,
+      mode: modeRaw as CallMode,
+      callId,
+      targetUid: targetUidRaw || null,
+      session,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function persistCallResumeState(
+  userUid: string | null | undefined,
+  conversationIdRaw: string | null | undefined,
+  state: RejoinAvailableCallState,
+): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const storageKey = buildCallResumeStorageKey(userUid, conversationIdRaw);
+  try {
+    const payload: PersistedCallResumeState = {
+      v: 1,
+      updatedAt: new Date().toISOString(),
+      state,
+    };
+    window.localStorage.setItem(storageKey, JSON.stringify(payload));
+  } catch {
+    // ignore persistence failures
+  }
+}
+
+function clearPersistedCallResumeState(
+  userUid: string | null | undefined,
+  conversationIdRaw: string | null | undefined,
+): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    window.localStorage.removeItem(buildCallResumeStorageKey(userUid, conversationIdRaw));
+  } catch {
+    // ignore persistence failures
+  }
 }
 
 function readPersistedCallAudioSettings(userUid: string | null | undefined): CallAudioSettings | null {
@@ -2164,10 +2268,18 @@ export default function DirectMessageChatView({
     averagePingMs: number | null;
     lastPingMs: number | null;
     packetLossPercent: number | null;
+    connectionType: "host" | "srflx" | "relay" | "prflx" | "unknown" | null;
+    outboundBitrateKbps: number | null;
+    inboundBitrateKbps: number | null;
+    usingRelay: boolean | null;
   }>({
     averagePingMs: null,
     lastPingMs: null,
     packetLossPercent: null,
+    connectionType: null,
+    outboundBitrateKbps: null,
+    inboundBitrateKbps: null,
+    usingRelay: null,
   });
   const [isCallMicEnabled, setIsCallMicEnabled] = useState(true);
   const [isCallSoundEnabled, setIsCallSoundEnabled] = useState(true);
@@ -2238,11 +2350,13 @@ export default function DirectMessageChatView({
   });
   const pendingOfferByCallIdRef = useRef<Map<string, Record<string, unknown>>>(new Map());
   const processedSignalIdsRef = useRef<Set<string>>(new Set());
+  const persistedCallAutoResumeAttemptRef = useRef<Set<string>>(new Set());
   const callPopoutWindowRef = useRef<Window | null>(null);
   const callRingingAudioRef = useRef<HTMLAudioElement | null>(null);
   const callJoinAudioRef = useRef<HTMLAudioElement | null>(null);
   const callLeaveAudioRef = useRef<HTMLAudioElement | null>(null);
   const previousRemoteParticipantInCallRef = useRef(false);
+  const previousCallPhaseRef = useRef<"idle" | "incoming" | "outgoing" | "connecting" | "active" | "reconnecting">("idle");
   const openPerfRef = useRef<{ conversationId: string; openedAt: number; firstPaintLogged: boolean }>({
     conversationId,
     openedAt: performance.now(),
@@ -5419,7 +5533,65 @@ export default function DirectMessageChatView({
     setCallErrorText(null);
   }, [closeCallPopoutWindow, ensureCallPopoutWindow, isCallPopoutOpen]);
 
-  const resetCallUi = useCallback(async (): Promise<void> => {
+  const clearPersistedCallResumeSnapshot = useCallback((): void => {
+    clearPersistedCallResumeState(currentFirebaseUid, conversationId);
+  }, [conversationId, currentFirebaseUid]);
+
+  const persistCurrentCallResumeSnapshot = useCallback((overrideState?: RejoinAvailableCallState | null): void => {
+    const normalizedUid = String(currentFirebaseUid ?? "").trim();
+    const normalizedConversationId = String(conversationId ?? "").trim();
+    if (!normalizedUid || !normalizedConversationId) {
+      return;
+    }
+
+    const liveSession = activeCallSession ?? outgoingCallSession ?? incomingCallSession;
+    const activeCallId = String(activeCallIdRef.current ?? liveSession?.id ?? "").trim();
+    const fallbackTargetUid = targetFirebaseUid || targetUser.userId;
+    const resolvedTargetUid = String(
+      callSignalTargetUidRef.current
+      ?? resolveRemoteCallParticipantUid(liveSession, currentFirebaseUid, fallbackTargetUid)
+      ?? "",
+    ).trim();
+
+    const fallbackState = liveSession && activeCallId
+      ? {
+          conversationId: normalizedConversationId,
+          mode: liveSession.mode,
+          callId: activeCallId,
+          targetUid: resolvedTargetUid || null,
+          session: liveSession,
+        }
+      : null;
+    const fallbackRejoinState =
+      rejoinAvailableCall && rejoinAvailableCall.conversationId === normalizedConversationId
+        ? rejoinAvailableCall
+        : null;
+
+    const nextState = overrideState ?? fallbackState ?? fallbackRejoinState;
+    if (!nextState) {
+      clearPersistedCallResumeState(normalizedUid, normalizedConversationId);
+      return;
+    }
+
+    persistCallResumeState(normalizedUid, normalizedConversationId, nextState);
+  }, [
+    activeCallSession,
+    conversationId,
+    currentFirebaseUid,
+    incomingCallSession,
+    outgoingCallSession,
+    rejoinAvailableCall,
+    targetFirebaseUid,
+    targetUser.userId,
+  ]);
+
+  const resetCallUi = useCallback(async (options?: { preservePersistedResume?: boolean }): Promise<void> => {
+    if (options?.preservePersistedResume) {
+      persistCurrentCallResumeSnapshot();
+    } else {
+      clearPersistedCallResumeSnapshot();
+    }
+
     clearOutgoingCallTimeout();
     clearOutgoingRingRetryLoop();
     clearSoloCallTimeout();
@@ -5448,6 +5620,10 @@ export default function DirectMessageChatView({
       averagePingMs: null,
       lastPingMs: null,
       packetLossPercent: null,
+      connectionType: null,
+      outboundBitrateKbps: null,
+      inboundBitrateKbps: null,
+      usingRelay: null,
     });
     setIsCallMicEnabled(true);
     setIsCallSoundEnabled(true);
@@ -5462,11 +5638,13 @@ export default function DirectMessageChatView({
     setScreenShareTab("window");
     setScreenShareQuality("1080p60");
   }, [
+    clearPersistedCallResumeSnapshot,
     clearOutgoingCallTimeout,
     clearOutgoingRingRetryLoop,
     clearSoloCallTimeout,
     clearRemotePeerDisconnectFinalizeTimeout,
     closeCallPopoutWindow,
+    persistCurrentCallResumeSnapshot,
   ]);
 
   useEffect(() => {
@@ -5477,6 +5655,51 @@ export default function DirectMessageChatView({
       incomingCallSession,
     };
   }, [activeCallSession, callPhase, incomingCallSession, outgoingCallSession]);
+
+  useEffect(() => {
+    if (!currentFirebaseUid) {
+      return;
+    }
+
+    const liveSession = activeCallSession ?? outgoingCallSession ?? incomingCallSession;
+    const activeCallId = String(activeCallIdRef.current ?? liveSession?.id ?? "").trim();
+    const fallbackTargetUid = targetFirebaseUid || targetUser.userId;
+    const resolvedTargetUid = String(
+      callSignalTargetUidRef.current
+      ?? resolveRemoteCallParticipantUid(liveSession, currentFirebaseUid, fallbackTargetUid)
+      ?? "",
+    ).trim();
+
+    if (callPhase !== "idle" && liveSession && activeCallId) {
+      persistCurrentCallResumeSnapshot({
+        conversationId,
+        mode: liveSession.mode,
+        callId: activeCallId,
+        targetUid: resolvedTargetUid || null,
+        session: liveSession,
+      });
+      return;
+    }
+
+    if (rejoinAvailableCall && rejoinAvailableCall.conversationId === conversationId) {
+      persistCurrentCallResumeSnapshot(rejoinAvailableCall);
+      return;
+    }
+
+    clearPersistedCallResumeSnapshot();
+  }, [
+    activeCallSession,
+    callPhase,
+    clearPersistedCallResumeSnapshot,
+    conversationId,
+    currentFirebaseUid,
+    incomingCallSession,
+    outgoingCallSession,
+    persistCurrentCallResumeSnapshot,
+    rejoinAvailableCall,
+    targetFirebaseUid,
+    targetUser.userId,
+  ]);
 
   const flushPendingCallEvents = useCallback(async (): Promise<void> => {
     if (isFlushingPendingCallEventsRef.current) {
@@ -5520,11 +5743,21 @@ export default function DirectMessageChatView({
     if (!currentFirebaseUid) {
       throw new Error("Sessao Firebase ausente para chamada.");
     }
+    const snapshot = latestCallStateSnapshotRef.current;
+    const liveConversationId =
+      snapshot.activeCallSession?.conversationId
+      ?? snapshot.outgoingCallSession?.conversationId
+      ?? snapshot.incomingCallSession?.conversationId
+      ?? null;
+    const resolvedConversationId = String(event.session?.conversationId ?? liveConversationId ?? conversationId).trim();
+    if (!resolvedConversationId) {
+      throw new Error("Conversa da chamada ausente para sinalizacao.");
+    }
 
     const payload: CallRealtimeEvent = {
       eventId: createClientMessageId(),
       kind: event.kind,
-      conversationId,
+      conversationId: resolvedConversationId,
       callId: event.callId,
       fromUid: currentFirebaseUid,
       toUid: event.toUid,
@@ -5604,71 +5837,40 @@ export default function DirectMessageChatView({
           return;
         }
         if (state === "disconnected" || state === "failed" || state === "closed") {
-          const sessionSnapshot =
-            latestCallStateSnapshotRef.current.activeCallSession ??
-            latestCallStateSnapshotRef.current.outgoingCallSession ??
-            latestCallStateSnapshotRef.current.incomingCallSession;
-          const remoteUid = resolveRemoteCallParticipantUid(
-            sessionSnapshot,
-            currentFirebaseUid,
-            targetFirebaseUid || targetUser.userId,
-          );
-          const remoteStillConnected = isCallParticipantConnected(sessionSnapshot, remoteUid);
-
-          if (!remoteStillConnected) {
-            clearRemotePeerDisconnectFinalizeTimeout();
-            setCallRemoteStream(null);
-            setIsRemoteScreenSharing(false);
-            setCallErrorText(null);
-            setCallPhase((current) => (current === "idle" ? current : "active"));
-            return;
-          }
-
-          if (state === "disconnected") {
-            setCallPhase((current) => (current === "active" || current === "reconnecting" ? "reconnecting" : current));
-          } else {
-            setCallPhase((current) => (current === "idle" ? current : "reconnecting"));
-          }
-
+          setCallPhase((current) => (current === "idle" ? current : "reconnecting"));
+          setCallErrorText("Reconectando chamada...");
           clearRemotePeerDisconnectFinalizeTimeout();
+          if (state !== "closed") {
+            void service.restartIce(`peer-state-${state}`).catch((error) => {
+              reportClientError(error, {
+                scope: "call.restartIce.onConnectionStateChange",
+                state,
+                callId: activeCallIdRef.current ?? "",
+              });
+            });
+          }
+
           remotePeerDisconnectFinalizeTimeoutRef.current = window.setTimeout(() => {
             if (callServiceRef.current !== service || isLocalCallDisconnectedRef.current) {
               return;
             }
             const liveState = service.getConnectionState();
-            if (liveState !== "disconnected" && liveState !== "failed" && liveState !== "closed") {
+            if (liveState === "connected") {
+              setCallPhase("active");
+              setCallErrorText(null);
               return;
             }
-
-            const latestSession =
-              latestCallStateSnapshotRef.current.activeCallSession ??
-              latestCallStateSnapshotRef.current.outgoingCallSession ??
-              latestCallStateSnapshotRef.current.incomingCallSession;
-            const latestRemoteUid = resolveRemoteCallParticipantUid(
-              latestSession,
-              currentFirebaseUid,
-              targetFirebaseUid || targetUser.userId,
-            );
-            if (!latestSession || !latestRemoteUid || !isCallParticipantConnected(latestSession, latestRemoteUid)) {
-              return;
+            setCallPhase((current) => (current === "idle" ? current : "reconnecting"));
+            setCallErrorText("Reconectando chamada...");
+            if (liveState === "disconnected" || liveState === "failed") {
+              void service.restartIce(`peer-timeout-${liveState}`).catch((error) => {
+                reportClientError(error, {
+                  scope: "call.restartIce.connectionTimeout",
+                  state: liveState,
+                  callId: activeCallIdRef.current ?? "",
+                });
+              });
             }
-
-            const nowIso = new Date().toISOString();
-            const nextSession = updateCallSessionParticipant(latestSession, latestRemoteUid, {
-              leftAt: nowIso,
-              lastActivityAt: nowIso,
-            });
-            if (!nextSession) {
-              return;
-            }
-
-            setActiveCallSession((current) => (current?.id === nextSession.id ? nextSession : current));
-            setOutgoingCallSession((current) => (current?.id === nextSession.id ? nextSession : current));
-            setIncomingCallSession((current) => (current?.id === nextSession.id ? nextSession : current));
-            setCallRemoteStream(null);
-            setIsRemoteScreenSharing(false);
-            setCallErrorText(null);
-            setCallPhase((current) => (current === "idle" ? current : "active"));
           }, CALL_DISCONNECT_FINALIZE_TIMEOUT_MS);
           return;
         }
@@ -5890,7 +6092,10 @@ export default function DirectMessageChatView({
     }
   }, [currentFirebaseUid, ensureCallService, incomingCallSession, resetCallUi, sendCallRealtimeEvent]);
 
-  const handleDisconnectCall = useCallback(async (): Promise<void> => {
+  const handleDisconnectCall = useCallback(async (
+    options?: { preserveForResume?: boolean; skipRealtimeHangup?: boolean },
+  ): Promise<void> => {
+    const preserveForResume = options?.preserveForResume === true;
     const rejoinConversationId = String(conversationId ?? "").trim();
     const rejoinMode: CallMode = activeCallSession?.mode ?? outgoingCallSession?.mode ?? incomingCallSession?.mode ?? "audio";
     const localUid = String(currentFirebaseUid ?? "").trim();
@@ -5898,7 +6103,7 @@ export default function DirectMessageChatView({
     const toUid = String(callSignalTargetUidRef.current ?? "").trim();
     const sessionSnapshot = activeCallSession ?? outgoingCallSession ?? incomingCallSession ?? null;
     const nowIso = new Date().toISOString();
-    const sessionAfterLocalDisconnect = sessionSnapshot && localUid
+    const sessionAfterLocalDisconnect = !preserveForResume && sessionSnapshot && localUid
       ? {
           ...sessionSnapshot,
           lastActivityAt: nowIso,
@@ -5911,9 +6116,12 @@ export default function DirectMessageChatView({
           },
         }
       : null;
+    const sessionForResume = preserveForResume
+      ? sessionSnapshot
+      : sessionAfterLocalDisconnect;
     const hasAnyOtherParticipantConnected = Boolean(
-      sessionAfterLocalDisconnect &&
-      Object.entries(sessionAfterLocalDisconnect.participants ?? {}).some(([uid, participant]) => {
+      sessionForResume &&
+      Object.entries(sessionForResume.participants ?? {}).some(([uid, participant]) => {
         if (String(uid ?? "").trim() === localUid) {
           return false;
         }
@@ -5951,18 +6159,29 @@ export default function DirectMessageChatView({
       };
     })();
 
-    isLocalCallDisconnectedRef.current = true;
-    await resetCallUi();
+    const rejoinState = rejoinConversationId && inferredRemoteConnected
+      ? {
+          conversationId: rejoinConversationId,
+          mode: rejoinMode,
+          callId,
+          targetUid: toUid || null,
+          session: preserveForResume ? (sessionForResume ?? sessionForHangupPayload) : sessionForHangupPayload,
+        }
+      : null;
+
+    isLocalCallDisconnectedRef.current = !preserveForResume;
+    if (rejoinState) {
+      persistCurrentCallResumeSnapshot(rejoinState);
+    }
+    await resetCallUi({ preservePersistedResume: preserveForResume });
     if (rejoinConversationId && inferredRemoteConnected) {
-      setRejoinAvailableCall({
-        conversationId: rejoinConversationId,
-        mode: rejoinMode,
-        callId,
-        targetUid: toUid || null,
-        session: sessionForHangupPayload,
-      });
+      setRejoinAvailableCall(rejoinState);
     } else {
       setRejoinAvailableCall((current) => (current?.conversationId === rejoinConversationId ? null : current));
+    }
+
+    if (preserveForResume || options?.skipRealtimeHangup) {
+      return;
     }
 
     if (!callId || !toUid) {
@@ -6000,6 +6219,7 @@ export default function DirectMessageChatView({
     outgoingCallSession?.mode,
     outgoingCallSession,
     callRemoteStream,
+    persistCurrentCallResumeSnapshot,
     resetCallUi,
     sendCallRealtimeEvent,
   ]);
@@ -6047,161 +6267,210 @@ export default function DirectMessageChatView({
     void startOutgoingCall("video");
   }, [conversationId, onStartVideoCall, startOutgoingCall, targetUser.userId]);
 
-  const handleRejoinCall = useCallback((withCamera = false): void => {
-    if (callPhase !== "idle" || !rejoinAvailableCall || rejoinAvailableCall.conversationId !== conversationId) {
-      return;
-    }
+  const resumeCallSession = useCallback(async (
+    rejoinState: RejoinAvailableCallState,
+    withCamera = false,
+  ): Promise<void> => {
     if (!currentFirebaseUid) {
       setCallErrorText("Sessao Firebase ausente para entrar na chamada.");
       return;
     }
 
-    const rejoinState = rejoinAvailableCall;
+    const normalizedConversationId = String(conversationId ?? "").trim();
+    if (!normalizedConversationId || rejoinState.conversationId !== normalizedConversationId) {
+      return;
+    }
+
+    const nowIso = new Date().toISOString();
+    const fallbackTargetUid = targetFirebaseUid || targetUser.userId;
+    const targetUid =
+      String(rejoinState.targetUid ?? "").trim() ||
+      resolveRemoteCallParticipantUid(rejoinState.session, currentFirebaseUid, fallbackTargetUid) ||
+      fallbackTargetUid;
+    const callId = String(rejoinState.callId ?? "").trim();
+
+    if (!callId || !targetUid) {
+      setRejoinAvailableCall(rejoinState);
+      setCallErrorText("Nao foi possivel localizar a chamada para reconectar.");
+      return;
+    }
+
+    const baseSession = rejoinState.session ?? createEphemeralCallSession({
+      callId,
+      conversationId: normalizedConversationId,
+      createdBy: currentFirebaseUid,
+      mode: rejoinState.mode ?? "audio",
+      status: "active",
+      createdAt: nowIso,
+      startedAt: nowIso,
+      lastActivityAt: nowIso,
+      participants: {
+        [currentFirebaseUid]: { joinedAt: nowIso, leftAt: null },
+        [targetUid]: { joinedAt: null, leftAt: null },
+      },
+    });
+
+    const rejoinedSession: CallSession = {
+      ...baseSession,
+      status: "active",
+      mode: baseSession.mode,
+      endedAt: null,
+      endedReason: null,
+      graceStartedAt: null,
+      startedAt: baseSession.startedAt ?? nowIso,
+      lastActivityAt: nowIso,
+      participants: {
+        ...(baseSession.participants ?? {}),
+        [currentFirebaseUid]: {
+          ...(baseSession.participants?.[currentFirebaseUid] ?? { joinedAt: nowIso, leftAt: null }),
+          joinedAt: nowIso,
+          leftAt: null,
+        },
+      },
+    };
+
+    activeCallIdRef.current = callId;
+    callSignalTargetUidRef.current = targetUid;
+    setIncomingCallSession(null);
+    setOutgoingCallSession(null);
+    setActiveCallSession(rejoinedSession);
+    setCallPhase("connecting");
     setRejoinAvailableCall(null);
     isLocalCallDisconnectedRef.current = false;
     setCallErrorText(null);
 
-    void (async () => {
-      const nowIso = new Date().toISOString();
-      const fallbackTargetUid = targetFirebaseUid || targetUser.userId;
-      const targetUid =
-        String(rejoinState.targetUid ?? "").trim() ||
-        resolveRemoteCallParticipantUid(rejoinState.session, currentFirebaseUid, fallbackTargetUid) ||
-        fallbackTargetUid;
-      const callId = String(rejoinState.callId ?? "").trim();
+    try {
+      const service = await ensureCallService(rejoinedSession.mode);
 
-      if (!callId || !targetUid) {
-        setRejoinAvailableCall(rejoinState);
-        setCallErrorText("Nao foi possivel localizar a chamada para reconectar.");
-        return;
-      }
-
-      const baseSession = rejoinState.session ?? createEphemeralCallSession({
+      await sendCallRealtimeEvent({
+        kind: "resume",
         callId,
-        conversationId,
-        createdBy: currentFirebaseUid,
-        mode: rejoinState.mode ?? "audio",
-        status: "active",
-        createdAt: nowIso,
-        startedAt: nowIso,
-        lastActivityAt: nowIso,
-        participants: {
-          [currentFirebaseUid]: { joinedAt: nowIso, leftAt: null },
-          [targetUid]: { joinedAt: null, leftAt: null },
-        },
+        toUid: targetUid,
+        mode: rejoinedSession.mode,
+        session: rejoinedSession,
       });
 
-      const rejoinedSession: CallSession = {
-        ...baseSession,
-        status: "active",
-        mode: baseSession.mode,
-        endedAt: null,
-        endedReason: null,
-        graceStartedAt: null,
-        startedAt: baseSession.startedAt ?? nowIso,
-        lastActivityAt: nowIso,
-        participants: {
-          ...(baseSession.participants ?? {}),
-          [currentFirebaseUid]: {
-            ...(baseSession.participants?.[currentFirebaseUid] ?? { joinedAt: nowIso, leftAt: null }),
-            joinedAt: nowIso,
-            leftAt: null,
-          },
-        },
-      };
-
-      activeCallIdRef.current = callId;
-      callSignalTargetUidRef.current = targetUid;
-      setIncomingCallSession(null);
-      setOutgoingCallSession(null);
-      setActiveCallSession(rejoinedSession);
-      setCallPhase("connecting");
-
-      try {
-        const service = await ensureCallService(rejoinedSession.mode);
-
-        if (rejoinedSession.createdBy === currentFirebaseUid) {
-          const offerPayload = await service.startAsCaller();
-          if (rejoinedSession.mode === "video" && !withCamera) {
-            const cameraEnabled = service.toggleCamera();
-            if (typeof cameraEnabled === "boolean") {
-              setIsCallCameraEnabled(cameraEnabled);
-            }
-          }
-          await sendCallRealtimeEvent({
-            kind: "keepalive",
-            callId,
-            toUid: targetUid,
-            signalPayload: {
-              screenSharing: false,
-            },
-            session: rejoinedSession,
-          });
-          await sendCallRealtimeEvent({
-            kind: "signal",
-            callId,
-            toUid: targetUid,
-            signalType: "offer",
-            signalPayload: offerPayload,
-            session: rejoinedSession,
-          });
-          return;
-        }
-
-        await sendCallRealtimeEvent({
-          kind: "accept",
-          callId,
-          toUid: targetUid,
-          mode: rejoinedSession.mode,
-          session: rejoinedSession,
-        });
-        await service.startAsCallee();
+      if (rejoinedSession.createdBy === currentFirebaseUid) {
+        const offerPayload = await service.startAsCaller();
         if (rejoinedSession.mode === "video" && !withCamera) {
           const cameraEnabled = service.toggleCamera();
           if (typeof cameraEnabled === "boolean") {
             setIsCallCameraEnabled(cameraEnabled);
           }
         }
-
-        const pendingOffer = pendingOfferByCallIdRef.current.get(callId);
-        if (pendingOffer) {
-          const responseSignal = await service.handleSignal({
-            type: "offer",
-            payload: pendingOffer,
-          });
-          pendingOfferByCallIdRef.current.delete(callId);
-          if (responseSignal) {
-            await sendCallRealtimeEvent({
-              kind: "signal",
-              callId,
-              toUid: targetUid,
-              signalType: responseSignal.type,
-              signalPayload: responseSignal.payload,
-              session: rejoinedSession,
-            });
-          }
-        }
-      } catch (error) {
-        reportClientError(error, {
-          scope: "call.rejoinExisting",
+        await sendCallRealtimeEvent({
+          kind: "keepalive",
           callId,
-          conversationId,
+          toUid: targetUid,
+          signalPayload: {
+            screenSharing: false,
+          },
+          session: rejoinedSession,
         });
-        setCallErrorText(error instanceof Error ? error.message : "Nao foi possivel reconectar na chamada.");
-        setRejoinAvailableCall(rejoinState);
-        await resetCallUi();
+        await sendCallRealtimeEvent({
+          kind: "signal",
+          callId,
+          toUid: targetUid,
+          signalType: "offer",
+          signalPayload: offerPayload,
+          session: rejoinedSession,
+        });
+        return;
       }
-    })();
+
+      await sendCallRealtimeEvent({
+        kind: "accept",
+        callId,
+        toUid: targetUid,
+        mode: rejoinedSession.mode,
+        session: rejoinedSession,
+      });
+      await service.startAsCallee();
+      if (rejoinedSession.mode === "video" && !withCamera) {
+        const cameraEnabled = service.toggleCamera();
+        if (typeof cameraEnabled === "boolean") {
+          setIsCallCameraEnabled(cameraEnabled);
+        }
+      }
+
+      const pendingOffer = pendingOfferByCallIdRef.current.get(callId);
+      if (pendingOffer) {
+        const responseSignal = await service.handleSignal({
+          type: "offer",
+          payload: pendingOffer,
+        });
+        pendingOfferByCallIdRef.current.delete(callId);
+        if (responseSignal) {
+          await sendCallRealtimeEvent({
+            kind: "signal",
+            callId,
+            toUid: targetUid,
+            signalType: responseSignal.type,
+            signalPayload: responseSignal.payload,
+            session: rejoinedSession,
+          });
+        }
+      }
+    } catch (error) {
+      reportClientError(error, {
+        scope: "call.rejoinExisting",
+        callId,
+        conversationId: normalizedConversationId,
+      });
+      setCallErrorText(error instanceof Error ? error.message : "Nao foi possivel reconectar na chamada.");
+      setRejoinAvailableCall(rejoinState);
+      await resetCallUi();
+    }
   }, [
-    callPhase,
     conversationId,
     currentFirebaseUid,
     ensureCallService,
-    rejoinAvailableCall,
     resetCallUi,
     sendCallRealtimeEvent,
     targetFirebaseUid,
     targetUser.userId,
+  ]);
+
+  const handleRejoinCall = useCallback((withCamera = false): void => {
+    if (callPhase !== "idle" || !rejoinAvailableCall || rejoinAvailableCall.conversationId !== conversationId) {
+      return;
+    }
+    void resumeCallSession(rejoinAvailableCall, withCamera);
+  }, [callPhase, conversationId, rejoinAvailableCall, resumeCallSession]);
+
+  useEffect(() => {
+    if (callPhase !== "idle" || !currentFirebaseUid) {
+      return;
+    }
+    if (rejoinAvailableCall && rejoinAvailableCall.conversationId === conversationId) {
+      return;
+    }
+
+    const persistedState = readPersistedCallResumeState(currentFirebaseUid, conversationId);
+    if (!persistedState) {
+      return;
+    }
+
+    const dedupeKey = `${currentFirebaseUid}:${conversationId}:${persistedState.callId}`;
+    if (persistedCallAutoResumeAttemptRef.current.has(dedupeKey)) {
+      return;
+    }
+    persistedCallAutoResumeAttemptRef.current.add(dedupeKey);
+
+    setRejoinAvailableCall(persistedState);
+    void resumeCallSession(persistedState).catch((error) => {
+      reportClientError(error, {
+        scope: "call.autoResumePersisted",
+        callId: persistedState.callId,
+        conversationId,
+      });
+    });
+  }, [
+    callPhase,
+    conversationId,
+    currentFirebaseUid,
+    rejoinAvailableCall,
+    resumeCallSession,
   ]);
 
   const handleToggleCallMute = useCallback((): void => {
@@ -6256,10 +6525,7 @@ export default function DirectMessageChatView({
         return;
       }
 
-      setRejoinAvailableCall(null);
-      void startOutgoingCall(detail.withCamera ? "video" : (detail.mode ?? rejoinAvailableCall.mode), {
-        suppressRingingUi: true,
-      });
+      void resumeCallSession(rejoinAvailableCall, detail.withCamera ?? false);
     };
 
     window.addEventListener(SIDEBAR_CALL_HANGUP_EVENT, handleSidebarHangup as EventListener);
@@ -6279,7 +6545,7 @@ export default function DirectMessageChatView({
     handleToggleCallMute,
     handleToggleCallSound,
     rejoinAvailableCall,
-    startOutgoingCall,
+    resumeCallSession,
   ]);
 
   useEffect(() => {
@@ -6287,7 +6553,7 @@ export default function DirectMessageChatView({
       if (callPhase === "idle" || isLocalCallDisconnectedRef.current) {
         return;
       }
-      void handleDisconnectCall();
+      persistCurrentCallResumeSnapshot();
     };
 
     window.addEventListener("pagehide", handlePageExit);
@@ -6296,7 +6562,7 @@ export default function DirectMessageChatView({
       window.removeEventListener("pagehide", handlePageExit);
       window.removeEventListener("beforeunload", handlePageExit);
     };
-  }, [callPhase, handleDisconnectCall]);
+  }, [callPhase, persistCurrentCallResumeSnapshot]);
 
   const startCallScreenShare = useCallback(async (sourceId: string | null): Promise<void> => {
     const service = callServiceRef.current;
@@ -6475,35 +6741,42 @@ export default function DirectMessageChatView({
   }, [callPhase, isCallScreenSharing, sendCallRealtimeEvent]);
 
   useEffect(() => {
-    if (callPhase !== "idle") {
+    const previousPhase = previousCallPhaseRef.current;
+    previousCallPhaseRef.current = callPhase;
+
+    if (callPhase !== "idle" || previousPhase === "idle") {
       return;
     }
     void resetCallUi();
-  }, [callPhase, conversationId, resetCallUi]);
+  }, [callPhase, resetCallUi]);
 
   const unmountCallCleanupRef = useRef<{
     callPhase: "idle" | "incoming" | "outgoing" | "connecting" | "active" | "reconnecting";
-    handleDisconnectCall: (() => Promise<void>) | null;
-    resetCallUi: (() => Promise<void>) | null;
+    hasRejoinAvailable: boolean;
+    persistCurrentCallResumeSnapshot: (() => void) | null;
+    resetCallUi: ((options?: { preservePersistedResume?: boolean }) => Promise<void>) | null;
   }>({
     callPhase: "idle",
-    handleDisconnectCall: null,
+    hasRejoinAvailable: false,
+    persistCurrentCallResumeSnapshot: null,
     resetCallUi: null,
   });
 
   useEffect(() => {
     unmountCallCleanupRef.current = {
       callPhase,
-      handleDisconnectCall,
+      hasRejoinAvailable: Boolean(rejoinAvailableCall?.conversationId === conversationId),
+      persistCurrentCallResumeSnapshot,
       resetCallUi,
     };
-  }, [callPhase, handleDisconnectCall, resetCallUi]);
+  }, [callPhase, conversationId, persistCurrentCallResumeSnapshot, rejoinAvailableCall?.conversationId, resetCallUi]);
 
   useEffect(() => {
     return () => {
       const snapshot = unmountCallCleanupRef.current;
-      if (snapshot.callPhase !== "idle" && !isLocalCallDisconnectedRef.current) {
-        void snapshot.handleDisconnectCall?.();
+      if ((snapshot.callPhase !== "idle" || snapshot.hasRejoinAvailable) && !isLocalCallDisconnectedRef.current) {
+        snapshot.persistCurrentCallResumeSnapshot?.();
+        void snapshot.resetCallUi?.({ preservePersistedResume: true });
         return;
       }
       void snapshot.resetCallUi?.();
@@ -6724,6 +6997,70 @@ export default function DirectMessageChatView({
                 return;
               }
 
+              if (event.kind === "resume") {
+                const resumeSession = event.session ?? null;
+                if (activeCallIdRef.current !== event.callId) {
+                  if (resumeSession && resumeSession.conversationId === conversationId) {
+                    const hasOtherConnectedParticipant = countConnectedCallParticipantsExcluding(
+                      resumeSession,
+                      currentFirebaseUid,
+                    ) > 0;
+                    const localStillConnected = isCallParticipantConnected(resumeSession, currentFirebaseUid);
+                    if (hasOtherConnectedParticipant && localStillConnected) {
+                      const resumeState: RejoinAvailableCallState = {
+                        conversationId: resumeSession.conversationId,
+                        mode: resumeSession.mode,
+                        callId: resumeSession.id,
+                        targetUid: event.fromUid,
+                        session: resumeSession,
+                      };
+                      setRejoinAvailableCall(resumeState);
+                      persistCurrentCallResumeSnapshot(resumeState);
+                    }
+                  }
+                  return;
+                }
+
+                if (resumeSession) {
+                  setActiveCallSession((current) => (current?.id === resumeSession.id ? resumeSession : current));
+                  setOutgoingCallSession((current) => (current?.id === resumeSession.id ? resumeSession : current));
+                  setIncomingCallSession((current) => (current?.id === resumeSession.id ? resumeSession : current));
+                }
+
+                callSignalTargetUidRef.current = event.fromUid;
+                setCallPhase((current) => (current === "idle" ? current : "reconnecting"));
+
+                const service = callServiceRef.current;
+                const effectiveSession =
+                  resumeSession
+                  ?? latestCallStateSnapshotRef.current.activeCallSession
+                  ?? latestCallStateSnapshotRef.current.outgoingCallSession
+                  ?? latestCallStateSnapshotRef.current.incomingCallSession
+                  ?? null;
+
+                if (!service || !effectiveSession || effectiveSession.createdBy !== currentFirebaseUid) {
+                  return;
+                }
+
+                try {
+                  const refreshedOffer = await service.startAsCaller();
+                  await sendCallRealtimeEvent({
+                    kind: "signal",
+                    callId: event.callId,
+                    toUid: event.fromUid,
+                    signalType: "offer",
+                    signalPayload: refreshedOffer,
+                    session: effectiveSession,
+                  });
+                } catch (error) {
+                  reportClientError(error, {
+                    scope: "call.resume.refreshOffer",
+                    callId: event.callId,
+                  });
+                }
+                return;
+              }
+
               if (event.kind === "keepalive") {
                 const activeCallId = activeCallIdRef.current;
                 if (!activeCallId || activeCallId !== event.callId) {
@@ -6813,6 +7150,33 @@ export default function DirectMessageChatView({
         .subscribe((status) => {
           if (status === "SUBSCRIBED") {
             isCallRealtimeChannelReadyRef.current = true;
+            const liveSnapshot = latestCallStateSnapshotRef.current;
+            const liveSession =
+              liveSnapshot.activeCallSession
+              ?? liveSnapshot.outgoingCallSession
+              ?? liveSnapshot.incomingCallSession
+              ?? null;
+            const liveCallId = String(activeCallIdRef.current ?? liveSession?.id ?? "").trim();
+            const resolvedTargetUid = String(
+              callSignalTargetUidRef.current
+              ?? resolveRemoteCallParticipantUid(
+                liveSession,
+                currentFirebaseUid,
+                targetFirebaseUid || targetUser.userId,
+              )
+              ?? "",
+            ).trim();
+            if (liveSnapshot.callPhase !== "idle" && liveSession && liveCallId && resolvedTargetUid) {
+              void sendCallRealtimeEvent({
+                kind: "resume",
+                callId: liveCallId,
+                toUid: resolvedTargetUid,
+                mode: liveSession.mode,
+                session: liveSession,
+              }).catch(() => {
+                // Keep reconnection loop alive while signaling resumes.
+              });
+            }
             void flushPendingCallEvents();
             return;
           }
@@ -6834,7 +7198,16 @@ export default function DirectMessageChatView({
         void supabase.removeChannel(channel);
       }
     };
-  }, [conversationId, currentFirebaseUid, flushPendingCallEvents, resetCallUi, sendCallRealtimeEvent]);
+  }, [
+    conversationId,
+    currentFirebaseUid,
+    flushPendingCallEvents,
+    persistCurrentCallResumeSnapshot,
+    resetCallUi,
+    sendCallRealtimeEvent,
+    targetFirebaseUid,
+    targetUser.userId,
+  ]);
 
   useEffect(() => {
     if (callPhase === "idle") {
@@ -6852,10 +7225,20 @@ export default function DirectMessageChatView({
           const roundedAverage = diagnostics.averagePingMs == null ? null : Math.round(diagnostics.averagePingMs);
           const roundedLast = diagnostics.lastPingMs == null ? null : Math.round(diagnostics.lastPingMs);
           const roundedLoss = diagnostics.packetLossPercent == null ? null : Number(diagnostics.packetLossPercent.toFixed(1));
+          const roundedOutboundBitrate =
+            diagnostics.outboundBitrateKbps == null ? null : Number(diagnostics.outboundBitrateKbps.toFixed(1));
+          const roundedInboundBitrate =
+            diagnostics.inboundBitrateKbps == null ? null : Number(diagnostics.inboundBitrateKbps.toFixed(1));
+          const connectionType = diagnostics.connectionType ?? null;
+          const usingRelay = diagnostics.usingRelay ?? null;
           if (
             current.averagePingMs === roundedAverage &&
             current.lastPingMs === roundedLast &&
-            current.packetLossPercent === roundedLoss
+            current.packetLossPercent === roundedLoss &&
+            current.outboundBitrateKbps === roundedOutboundBitrate &&
+            current.inboundBitrateKbps === roundedInboundBitrate &&
+            current.connectionType === connectionType &&
+            current.usingRelay === usingRelay
           ) {
             return current;
           }
@@ -6863,6 +7246,10 @@ export default function DirectMessageChatView({
             averagePingMs: roundedAverage,
             lastPingMs: roundedLast,
             packetLossPercent: roundedLoss,
+            outboundBitrateKbps: roundedOutboundBitrate,
+            inboundBitrateKbps: roundedInboundBitrate,
+            connectionType,
+            usingRelay,
           };
         });
       } catch {
