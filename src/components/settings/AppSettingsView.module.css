@@ -2567,6 +2567,42 @@
   gap: 10px;
 }
 
+.devicesActionsBar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+}
+
+.devicesEndAllButton {
+  min-height: 34px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  color: #eef3fa;
+  padding: 0 14px;
+  font-size: 12px;
+  line-height: 1;
+  font-weight: 600;
+  cursor: pointer;
+  transition: var(--button-transition);
+}
+
+.devicesEndAllButton:hover,
+.devicesEndAllButton:focus-visible {
+  border-color: rgba(255, 255, 255, 0.26);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.devicesEndAllButton:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--button-focus-ring);
+}
+
+.devicesEndAllButton:disabled {
+  opacity: 0.58;
+  cursor: not-allowed;
+}
+
 .devicesIntroText {
   margin: 0;
   max-width: 74ch;
@@ -2584,6 +2620,10 @@
 
 .devicesStateError {
   color: #ffbec8;
+}
+
+.devicesStateSuccess {
+  color: #9ee7bf;
 }
 
 .devicesEmptyState {
@@ -2673,27 +2713,64 @@
 .deviceMeta {
   min-width: 0;
   display: grid;
-  gap: 5px;
+  gap: 4px;
 }
 
-.deviceTitle {
+.deviceTypeLabel {
   margin: 0;
-  color: rgba(232, 238, 246, 0.86);
+  color: rgba(213, 221, 231, 0.78);
   font-size: 12px;
-  line-height: 1.25;
+  line-height: 1.2;
   font-weight: 600;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.02em;
+}
+
+.deviceClientOs {
+  margin: 0;
+  color: #edf1f8;
+  font-size: 14px;
+  line-height: 1.3;
+  font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.deviceLocation {
+.deviceMetaLine,
+.deviceMetaLineMuted {
   margin: 0;
-  color: #edf1f8;
-  font-size: 15px;
+  color: rgba(220, 228, 238, 0.74);
+  font-size: 12px;
+  line-height: 1.35;
+  font-weight: 500;
+}
+
+.deviceMetaLineMuted {
+  color: rgba(194, 204, 218, 0.64);
+}
+
+.deviceSessionSummaryCard {
+  display: grid;
+  gap: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.deviceSessionSummaryPrimary {
+  margin: 0;
+  color: #eef3fa;
+  font-size: 14px;
   line-height: 1.3;
   font-weight: 600;
+}
+
+.deviceSessionSummaryLine {
+  margin: 0;
+  color: rgba(210, 220, 233, 0.78);
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .deviceEndSessionButton {
@@ -3277,11 +3354,11 @@
   }
 
   .devicesIntroText,
-  .deviceLocation {
+  .deviceMetaLine {
     font-size: 13px;
   }
 
-  .deviceTitle {
+  .deviceClientOs {
     white-space: normal;
   }
 

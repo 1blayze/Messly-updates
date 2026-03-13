@@ -65,6 +65,13 @@ const postPayloadSchema = z.discriminatedUnion("action", [
       sessionId: z.string().uuid(),
     })
     .strict(),
+  z
+    .object({
+      action: z.literal("endAllOther"),
+      sessionId: z.string().uuid().optional().nullable(),
+      sessionToken: z.string().uuid().optional().nullable(),
+    })
+    .strict(),
 ]);
 
 interface UserSessionRow {
@@ -643,6 +650,59 @@ async function endLoginSessionById(userId: string, sessionId: string): Promise<U
   return data as UserSessionRow;
 }
 
+async function endAllOtherLoginSessions(
+  userId: string,
+  currentSessionIdRaw: string,
+): Promise<{ endedCount: number }> {
+  const currentSessionId = toNullableText(currentSessionIdRaw, 64);
+  if (!currentSessionId) {
+    throw new HttpError(401, "INVALID_TOKEN", "Sessao atual invalida.");
+  }
+
+  const supabase = getSupabaseAdminClient();
+  const { data: activeSessions, error: activeSessionsError } = await supabase
+    .from("user_sessions")
+    .select("*")
+    .eq("user_id", userId)
+    .is("ended_at", null)
+    .is("revoked_at", null);
+
+  if (activeSessionsError) {
+    throw new HttpError(500, "SESSION_LIST_FAILED", "Falha ao listar sessoes ativas.");
+  }
+
+  const rows = (activeSessions ?? []) as UserSessionRow[];
+  const rowsToEnd = rows.filter((row) => {
+    const authSessionId = toNullableText(row.auth_session_id, 64);
+    const sessionToken = toNullableText(row.session_token, 64);
+    return authSessionId !== currentSessionId && sessionToken !== currentSessionId;
+  });
+
+  if (rowsToEnd.length === 0) {
+    return { endedCount: 0 };
+  }
+
+  const nowIso = new Date().toISOString();
+  const idsToEnd = rowsToEnd.map((row) => row.id);
+  const { data: updatedRows, error: updateError } = await supabase
+    .from("user_sessions")
+    .update({
+      ended_at: nowIso,
+      revoked_at: nowIso,
+      last_seen_at: nowIso,
+    })
+    .in("id", idsToEnd)
+    .select("id");
+
+  if (updateError) {
+    throw new HttpError(500, "SESSION_END_FAILED", "Falha ao encerrar as outras sessoes.");
+  }
+
+  return {
+    endedCount: Array.isArray(updatedRows) ? updatedRows.length : 0,
+  };
+}
+
 async function listActiveSessions(accessToken: string): Promise<SessionView[]> {
   const supabase = createSupabaseRlsClient(accessToken);
   const { data, error } = await supabase
@@ -759,6 +819,26 @@ Deno.serve(async (request: Request) => {
         {
           ended: Boolean(session?.ended_at),
           session: session ? toSessionView(session) : null,
+        },
+        200,
+      );
+    }
+
+    if (payload.action === "endAllOther") {
+      const currentSessionId = resolveRequestedSessionId(payload, auth.token);
+      const result = await endAllOtherLoginSessions(userId, currentSessionId);
+      logStructured("warn", "session_end_all_other_success", context, {
+        status: 200,
+        uidHash,
+        currentSessionId,
+        endedCount: result.endedCount,
+      });
+
+      return responseJson(
+        request,
+        {
+          ended: true,
+          endedCount: result.endedCount,
         },
         200,
       );

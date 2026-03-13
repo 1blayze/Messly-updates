@@ -112,8 +112,9 @@ function shouldRenderLoginImmediately(params: {
   }
 
   // Prevent login flicker: wait until session hint sources (preload/local store) settle.
+  // If auth bootstrap already settled, never keep startup splash blocked.
   if (!params.sessionHintResolved) {
-    return false;
+    return params.authReady || !params.isLoading;
   }
 
   if (!params.hasSessionHint) {

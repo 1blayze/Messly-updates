@@ -46,6 +46,7 @@ import {
   type FriendRequestPrivacySettings,
 } from "../../services/friends/friendRequestPrivacy";
 import {
+  endAllOtherLoginSessions,
   endCurrentLoginSession,
   endLoginSessionById,
   getCurrentLoginSessionId,
@@ -279,6 +280,13 @@ const SETTINGS_SIDEBAR_ITEMS: ReadonlyArray<{
   { key: "audio", label: "Voz e vídeo", icon: "graphic_eq" },
   { key: "windows", label: "Config. Windows", icon: "desktop_windows" },
 ];
+
+function resolveVisibleSettingsSection(section: SettingsSection, isElectron: boolean): SettingsSection {
+  if (section === "windows" && !isElectron) {
+    return "account";
+  }
+  return section;
+}
 
 const ACCOUNT_DELETE_CONFIRM_TEXT = "EXCLUIR";
 const ACCOUNT_DEACTIVATE_CONFIRM_TEXT = "DESATIVAR";
@@ -811,6 +819,15 @@ function getAccountActionErrorMessage(error: unknown): string {
   if (typeof error === "object" && error !== null && "message" in error) {
     const message = String((error as { message?: string }).message ?? "").trim();
     if (message) {
+      const normalized = message.toLocaleLowerCase("pt-BR");
+      if (
+        normalized.includes("invalid login credentials") ||
+        normalized.includes("invalid credentials") ||
+        normalized.includes("wrong password") ||
+        normalized.includes("senha incorreta")
+      ) {
+        return "Senha incorreta. Tente novamente.";
+      }
       return message;
     }
   }
@@ -1243,7 +1260,7 @@ function getDevicePlatformLabel(platform: PresencePlatform): string {
     case "mobile":
       return "Mobile";
     default:
-      return "Navegador";
+      return "Browser";
   }
 }
 
@@ -1255,6 +1272,17 @@ function getDevicePlatformIcon(platform: PresencePlatform): string {
       return "smartphone";
     default:
       return "language";
+  }
+}
+
+function getDevicePlatformEmoji(platform: PresencePlatform): string {
+  switch (platform) {
+    case "desktop":
+      return "🖥";
+    case "mobile":
+      return "📱";
+    default:
+      return "🌐";
   }
 }
 
@@ -1288,6 +1316,23 @@ function formatRelativeLastSeen(timestamp: number | null): string | null {
   return days === 1 ? "há 1 dia" : `há ${days} dias`;
 }
 
+function formatSessionActiveForLabel(createdAt: number | null, lastSeenAt: number | null): string {
+  const baseTimestamp = Number.isFinite(createdAt ?? NaN) ? (createdAt as number) : lastSeenAt;
+  const relative = formatRelativeLastSeen(baseTimestamp);
+  if (!relative) {
+    return "Ativo recentemente";
+  }
+  if (relative === "agora mesmo") {
+    return "Ativo agora mesmo";
+  }
+  return `Ativo ${relative}`;
+}
+
+function formatMaskedIpLabel(ipAddressMaskedRaw: string | null | undefined): string {
+  const ipAddressMasked = String(ipAddressMaskedRaw ?? "").trim();
+  return ipAddressMasked ? `IP: ${ipAddressMasked}` : "IP: indisponível";
+}
+
 function formatDeviceLocationLabel(locationLabelRaw: string | null | undefined): string | null {
   const raw = String(locationLabelRaw ?? "").trim();
   if (!raw) {
@@ -1305,16 +1350,16 @@ function formatDeviceLocationLabel(locationLabelRaw: string | null | undefined):
       case "br":
       case "bra":
       case "brasil":
-        return "Brazil";
+        return "Brasil";
       case "us":
       case "usa":
       case "estados unidos":
       case "eua":
-        return "United States";
+        return "Estados Unidos";
       case "uk":
       case "gb":
       case "reino unido":
-        return "United Kingdom";
+        return "Reino Unido";
       default:
         return toTitleCase(value.trim());
     }
@@ -1653,10 +1698,19 @@ export default function AppSettingsView({
   initialSection = "account",
 }: AppSettingsViewProps) {
   const { user, signOutCurrent, updateCurrentAccountProfile } = useAuthSession();
-  const [activeSection, setActiveSection] = useState<SettingsSection>(initialSection);
+  const isElectron =
+    typeof window !== "undefined" &&
+    Boolean(window?.navigator?.userAgent?.toLowerCase().includes("electron"));
+  const [activeSection, setActiveSection] = useState<SettingsSection>(() =>
+    resolveVisibleSettingsSection(initialSection, isElectron),
+  );
+  const visibleSettingsSidebarItems = useMemo(
+    () => SETTINGS_SIDEBAR_ITEMS.filter((item) => isElectron || item.key !== "windows"),
+    [isElectron],
+  );
   useEffect(() => {
-    setActiveSection(initialSection);
-  }, [initialSection]);
+    setActiveSection(resolveVisibleSettingsSection(initialSection, isElectron));
+  }, [initialSection, isElectron]);
   useEffect(() => {
     if (activeSection !== "account") {
       return;
@@ -1755,10 +1809,15 @@ export default function AppSettingsView({
   const [deviceSessions, setDeviceSessions] = useState<DeviceSessionItem[]>([]);
   const [isDeviceSessionsLoading, setIsDeviceSessionsLoading] = useState(false);
   const [deviceSessionsError, setDeviceSessionsError] = useState<string | null>(null);
+  const [deviceSessionsFeedback, setDeviceSessionsFeedback] = useState<UploadFeedbackState | null>(null);
   const [endingDeviceSessionId, setEndingDeviceSessionId] = useState<string | null>(null);
+  const [isEndingAllOtherDeviceSessions, setIsEndingAllOtherDeviceSessions] = useState(false);
   const [pendingDeviceSession, setPendingDeviceSession] = useState<DeviceSessionItem | null>(null);
   const [pendingDeviceSessionPasswordInput, setPendingDeviceSessionPasswordInput] = useState("");
   const [pendingDeviceSessionFeedback, setPendingDeviceSessionFeedback] = useState<UploadFeedbackState | null>(null);
+  const [isEndAllOtherSessionsModalOpen, setIsEndAllOtherSessionsModalOpen] = useState(false);
+  const [endAllOtherSessionsPasswordInput, setEndAllOtherSessionsPasswordInput] = useState("");
+  const [endAllOtherSessionsFeedback, setEndAllOtherSessionsFeedback] = useState<UploadFeedbackState | null>(null);
   const recentlyEndedDeviceSessionsRef = useRef<Map<string, number>>(new Map());
   const dismissedLoginSessionsRef = useRef<Map<string, number>>(new Map());
   const [currentPresenceDeviceMetadata, setCurrentPresenceDeviceMetadata] = useState(() =>
@@ -1911,6 +1970,19 @@ export default function AppSettingsView({
   useEffect(() => {
     dismissedLoginSessionsRef.current = readDismissedLoginSessions(dismissedLoginSessionsStorageScope);
   }, [dismissedLoginSessionsStorageScope]);
+  useEffect(() => {
+    if (!deviceSessionsFeedback) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setDeviceSessionsFeedback(null);
+    }, 5_000);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [deviceSessionsFeedback]);
   useEffect(() => {
     if (activeSection !== "devices") {
       return;
@@ -3509,6 +3581,30 @@ export default function AppSettingsView({
     },
     [dismissedLoginSessionsStorageScope],
   );
+  const refreshDeviceSessionsFromServer = useCallback(async (): Promise<void> => {
+    const currentLoginSessionId = getCurrentLoginSessionId();
+    const fetchedSessions = await listActiveLoginSessions();
+    const visibleSessions = fetchedSessions.filter((session) => {
+      const sessionId = String(session.id ?? "").trim();
+      if (!sessionId) {
+        return false;
+      }
+      if (isRecentlyEndedDeviceSession(sessionId)) {
+        return false;
+      }
+      return !dismissedLoginSessionsRef.current.has(sessionId);
+    });
+
+    writeCachedLoginSessions(loginSessionsCacheStorageScope, visibleSessions);
+    setDeviceSessions(
+      mapLoginSessionsToDeviceItems(
+        visibleSessions,
+        currentLoginSessionId,
+        currentPresenceDeviceMetadata,
+      ),
+    );
+    setDeviceSessionsError(null);
+  }, [currentPresenceDeviceMetadata, isRecentlyEndedDeviceSession, loginSessionsCacheStorageScope]);
   const currentDeviceSession = useMemo(
     () => deviceSessions.find((session) => session.isCurrent) ?? null,
     [deviceSessions],
@@ -3517,32 +3613,59 @@ export default function AppSettingsView({
     () => deviceSessions.filter((session) => !session.isCurrent),
     [deviceSessions],
   );
+  const hasOtherDeviceSessions = otherDeviceSessions.length > 0;
   const openEndDeviceSessionModal = useCallback(
     (session: DeviceSessionItem): void => {
-      if (endingDeviceSessionId || !isUuidLike(String(session.sessionId ?? ""))) {
+      if (
+        endingDeviceSessionId ||
+        isEndingAllOtherDeviceSessions ||
+        session.isCurrent ||
+        !isUuidLike(String(session.sessionId ?? ""))
+      ) {
         return;
       }
 
       setPendingDeviceSession(session);
       setPendingDeviceSessionPasswordInput("");
       setPendingDeviceSessionFeedback(null);
+      setDeviceSessionsFeedback(null);
       setDeviceSessionsError(null);
     },
-    [endingDeviceSessionId],
+    [endingDeviceSessionId, isEndingAllOtherDeviceSessions],
   );
   const closeEndDeviceSessionModal = useCallback((): void => {
-    if (endingDeviceSessionId) {
+    if (endingDeviceSessionId || isEndingAllOtherDeviceSessions) {
       return;
     }
 
     setPendingDeviceSession(null);
     setPendingDeviceSessionPasswordInput("");
     setPendingDeviceSessionFeedback(null);
-  }, [endingDeviceSessionId]);
+  }, [endingDeviceSessionId, isEndingAllOtherDeviceSessions]);
+  const openEndAllOtherSessionsModal = useCallback((): void => {
+    if (!hasOtherDeviceSessions || endingDeviceSessionId || isEndingAllOtherDeviceSessions) {
+      return;
+    }
+
+    setIsEndAllOtherSessionsModalOpen(true);
+    setEndAllOtherSessionsPasswordInput("");
+    setEndAllOtherSessionsFeedback(null);
+    setDeviceSessionsFeedback(null);
+    setDeviceSessionsError(null);
+  }, [endingDeviceSessionId, hasOtherDeviceSessions, isEndingAllOtherDeviceSessions]);
+  const closeEndAllOtherSessionsModal = useCallback((): void => {
+    if (isEndingAllOtherDeviceSessions || endingDeviceSessionId) {
+      return;
+    }
+
+    setIsEndAllOtherSessionsModalOpen(false);
+    setEndAllOtherSessionsPasswordInput("");
+    setEndAllOtherSessionsFeedback(null);
+  }, [endingDeviceSessionId, isEndingAllOtherDeviceSessions]);
   const handleEndDeviceSession = useCallback(
     async (session: DeviceSessionItem, password: string): Promise<boolean> => {
       const sessionId = String(session.sessionId ?? "").trim();
-      if (endingDeviceSessionId || !isUuidLike(sessionId)) {
+      if (endingDeviceSessionId || isEndingAllOtherDeviceSessions || session.isCurrent || !isUuidLike(sessionId)) {
         return false;
       }
 
@@ -3553,6 +3676,7 @@ export default function AppSettingsView({
 
       setEndingDeviceSessionId(sessionId);
       setDeviceSessionsError(null);
+      setDeviceSessionsFeedback(null);
       setPendingDeviceSessionFeedback(null);
 
       try {
@@ -3574,6 +3698,8 @@ export default function AppSettingsView({
           markDeviceSessionRecentlyEnded(sessionId);
         }
         setDeviceSessions((current) => current.filter((entry) => entry.id !== sessionId));
+        setDeviceSessionsFeedback({ tone: "success", message: "Sessão encerrada com sucesso." });
+        void refreshDeviceSessionsFromServer().catch(() => undefined);
         return true;
       } catch (error) {
         console.error("[devices:end-session]", error);
@@ -3586,8 +3712,10 @@ export default function AppSettingsView({
     },
     [
       endingDeviceSessionId,
+      isEndingAllOtherDeviceSessions,
       markDeviceSessionRecentlyEnded,
       loginSessionsCacheStorageScope,
+      refreshDeviceSessionsFromServer,
       reauthenticateCurrentEmailSession,
       rememberDismissedLoginSession,
       user?.uid,
@@ -3607,6 +3735,59 @@ export default function AppSettingsView({
     setPendingDeviceSessionPasswordInput("");
     setPendingDeviceSessionFeedback(null);
   }, [handleEndDeviceSession, pendingDeviceSession, pendingDeviceSessionPasswordInput]);
+  const handleConfirmEndAllOtherSessions = useCallback(async (): Promise<void> => {
+    if (!hasOtherDeviceSessions) {
+      setIsEndAllOtherSessionsModalOpen(false);
+      return;
+    }
+
+    if (!String(endAllOtherSessionsPasswordInput ?? "").trim()) {
+      setEndAllOtherSessionsFeedback({ tone: "error", message: "Digite sua senha atual para continuar." });
+      return;
+    }
+
+    setIsEndingAllOtherDeviceSessions(true);
+    setDeviceSessionsError(null);
+    setDeviceSessionsFeedback(null);
+    setEndAllOtherSessionsFeedback(null);
+
+    try {
+      await reauthenticateCurrentEmailSession(endAllOtherSessionsPasswordInput);
+      await endAllOtherLoginSessions();
+
+      const signOutWithScope = supabase.auth.signOut as unknown as (
+        options: { scope: "global" | "local" | "others" },
+      ) => Promise<{ error: unknown | null }>;
+      const signOutResult = await signOutWithScope({ scope: "others" }).catch(() => ({ error: null }));
+      if (signOutResult?.error && import.meta.env.DEV) {
+        console.warn("[devices:end-all-other-sessions:signout-others]", signOutResult.error);
+      }
+
+      dismissedLoginSessionsRef.current.clear();
+      writeDismissedLoginSessions(dismissedLoginSessionsStorageScope, dismissedLoginSessionsRef.current);
+      writeCachedLoginSessions(loginSessionsCacheStorageScope, []);
+
+      setDeviceSessions((current) => current.filter((entry) => entry.isCurrent));
+      setDeviceSessionsFeedback({ tone: "success", message: "Todas as sessões foram encerradas." });
+      setIsEndAllOtherSessionsModalOpen(false);
+      setEndAllOtherSessionsPasswordInput("");
+      setEndAllOtherSessionsFeedback(null);
+      void refreshDeviceSessionsFromServer().catch(() => undefined);
+    } catch (error) {
+      console.error("[devices:end-all-other-sessions]", error);
+      setEndAllOtherSessionsFeedback({ tone: "error", message: getAccountActionErrorMessage(error) });
+      setDeviceSessionsError("Não foi possível encerrar as outras sessões agora.");
+    } finally {
+      setIsEndingAllOtherDeviceSessions(false);
+    }
+  }, [
+    dismissedLoginSessionsStorageScope,
+    endAllOtherSessionsPasswordInput,
+    hasOtherDeviceSessions,
+    loginSessionsCacheStorageScope,
+    reauthenticateCurrentEmailSession,
+    refreshDeviceSessionsFromServer,
+  ]);
   const spotifyOAuthEnabled = isSpotifyOAuthConfigured();
   const isSpotifyConnected = spotifyConnection.connected;
   const spotifyDisplayName = useMemo(
@@ -5187,7 +5368,7 @@ export default function AppSettingsView({
             </div>
 
             <div className={styles.menuList}>
-              {SETTINGS_SIDEBAR_ITEMS.map((item) => {
+              {visibleSettingsSidebarItems.map((item) => {
                 const isActive = activeSection === item.key;
                 return (
                   <button
@@ -6280,7 +6461,7 @@ export default function AppSettingsView({
                   </div>
                 </div>
               </section>
-            ) : activeSection === "windows" ? (
+            ) : activeSection === "windows" && isElectron ? (
               <section className={styles.windowsPanel} aria-label="Configurações do Windows">
                 <header className={styles.editorHeader}>
                   <h3 className={styles.editorTitle}>Windows</h3>
@@ -6378,7 +6559,32 @@ export default function AppSettingsView({
                     <p className={styles.devicesIntroText}>
                       Veja os acessos recentes da sua conta neste dispositivo e nos outros clientes conectados.
                     </p>
+                    <div className={styles.devicesActionsBar}>
+                      <button
+                        type="button"
+                        className={styles.devicesEndAllButton}
+                        onClick={openEndAllOtherSessionsModal}
+                        disabled={!hasOtherDeviceSessions || Boolean(endingDeviceSessionId) || isEndingAllOtherDeviceSessions}
+                      >
+                        {isEndingAllOtherDeviceSessions
+                          ? "Encerrando sessões..."
+                          : "Encerrar todas as outras sessões"}
+                      </button>
+                    </div>
                   </section>
+                  {deviceSessionsFeedback ? (
+                    <p
+                      className={`${styles.devicesState}${
+                        deviceSessionsFeedback.tone === "error"
+                          ? ` ${styles.devicesStateError}`
+                          : ` ${styles.devicesStateSuccess}`
+                      }`}
+                      role="status"
+                      aria-live="polite"
+                    >
+                      {deviceSessionsFeedback.message}
+                    </p>
+                  ) : null}
 
                   {deviceSessionsError ? (
                     <p className={`${styles.devicesState} ${styles.devicesStateError}`}>{deviceSessionsError}</p>
@@ -6401,21 +6607,12 @@ export default function AppSettingsView({
                           <h4 className={styles.devicesGroupTitle}>Dispositivo atual</h4>
 
                           {(() => {
-                            const currentLastSeenLabel = formatRelativeLastSeen(
+                            const currentSessionAgeLabel = formatSessionActiveForLabel(
+                              currentDeviceSession.createdAt,
                               currentDeviceSession.lastActive ?? currentDeviceSession.updatedAt,
                             );
                             const currentLocationLabel = formatDeviceLocationLabel(currentDeviceSession.locationLabel);
-                            const currentVersionLabel = currentDeviceSession.appVersion
-                              ? `v${currentDeviceSession.appVersion}`
-                              : null;
-                            const currentSubtitle = [
-                              currentLocationLabel,
-                              currentVersionLabel,
-                              currentDeviceSession.ipAddressMasked,
-                              currentLastSeenLabel,
-                            ]
-                              .filter((value): value is string => Boolean(value))
-                              .join(" · ");
+                            const currentIpLabel = formatMaskedIpLabel(currentDeviceSession.ipAddressMasked);
 
                             return (
                               <article className={`${styles.deviceRow} ${styles.deviceRowCurrent}`}>
@@ -6429,10 +6626,17 @@ export default function AppSettingsView({
                                 </div>
 
                                 <div className={styles.deviceMeta}>
-                                  <p className={styles.deviceTitle}>
-                                    {`${getDevicePlatformLabel(currentDeviceSession.platform)} · ${currentDeviceSession.osName} · ${currentDeviceSession.clientName}`.toUpperCase()}
+                                  <p className={styles.deviceTypeLabel}>
+                                    {`${getDevicePlatformEmoji(currentDeviceSession.platform)} ${getDevicePlatformLabel(currentDeviceSession.platform)}`}
                                   </p>
-                                  {currentSubtitle ? <p className={styles.deviceLocation}>{currentSubtitle}</p> : null}
+                                  <p className={styles.deviceClientOs}>
+                                    {`${currentDeviceSession.clientName} • ${currentDeviceSession.osName}`}
+                                  </p>
+                                  <p className={styles.deviceMetaLine}>
+                                    {currentLocationLabel ?? "Localização não disponível"}
+                                  </p>
+                                  <p className={styles.deviceMetaLine}>{currentIpLabel}</p>
+                                  <p className={styles.deviceMetaLineMuted}>{currentSessionAgeLabel}</p>
                                 </div>
                               </article>
                             );
@@ -6446,13 +6650,13 @@ export default function AppSettingsView({
 
                           <div className={styles.devicesList}>
                             {otherDeviceSessions.map((session) => {
-                              const lastSeenLabel = formatRelativeLastSeen(session.lastActive ?? session.updatedAt);
+                              const sessionAgeLabel = formatSessionActiveForLabel(
+                                session.createdAt,
+                                session.lastActive ?? session.updatedAt,
+                              );
                               const locationLabel = formatDeviceLocationLabel(session.locationLabel);
-                              const versionLabel = session.appVersion ? `v${session.appVersion}` : null;
-                              const subtitle = [locationLabel, versionLabel, session.ipAddressMasked, lastSeenLabel]
-                                .filter((value): value is string => Boolean(value))
-                                .join(" · ");
-                              const canEndSession = isUuidLike(String(session.sessionId ?? ""));
+                              const ipLabel = formatMaskedIpLabel(session.ipAddressMasked);
+                              const canEndSession = !session.isCurrent && isUuidLike(String(session.sessionId ?? ""));
                               const isEndingSession = endingDeviceSessionId === session.sessionId;
 
                               return (
@@ -6467,10 +6671,13 @@ export default function AppSettingsView({
                                   </div>
 
                                   <div className={styles.deviceMeta}>
-                                    <p className={styles.deviceTitle}>
-                                      {`${getDevicePlatformLabel(session.platform)} · ${session.osName} · ${session.clientName}`.toUpperCase()}
+                                    <p className={styles.deviceTypeLabel}>
+                                      {`${getDevicePlatformEmoji(session.platform)} ${getDevicePlatformLabel(session.platform)}`}
                                     </p>
-                                    {subtitle ? <p className={styles.deviceLocation}>{subtitle}</p> : null}
+                                    <p className={styles.deviceClientOs}>{`${session.clientName} • ${session.osName}`}</p>
+                                    <p className={styles.deviceMetaLine}>{locationLabel ?? "Localização não disponível"}</p>
+                                    <p className={styles.deviceMetaLine}>{ipLabel}</p>
+                                    <p className={styles.deviceMetaLineMuted}>{sessionAgeLabel}</p>
                                   </div>
 
                                   {canEndSession ? (
@@ -6479,8 +6686,9 @@ export default function AppSettingsView({
                                       className={`${styles.deviceEndSessionButton}${
                                         isEndingSession ? ` ${styles.deviceEndSessionButtonBusy}` : ""
                                       }`}
-                                      aria-label="Encerrar sessão deste dispositivo"
-                                      disabled={isEndingSession}
+                                      aria-label={`Encerrar sessão de ${session.clientName}`}
+                                      title="Encerrar sessão"
+                                      disabled={isEndingSession || isEndingAllOtherDeviceSessions}
                                       onClick={() => {
                                         openEndDeviceSessionModal(session);
                                       }}
@@ -6684,24 +6892,33 @@ export default function AppSettingsView({
               onClick={() => {
                 void handleConfirmEndDeviceSession();
               }}
-              disabled={Boolean(endingDeviceSessionId)}
+              disabled={Boolean(endingDeviceSessionId) || isEndingAllOtherDeviceSessions}
             >
-              {endingDeviceSessionId ? "Encerrando..." : "Confirmar"}
+              {endingDeviceSessionId ? "Encerrando sessão..." : "Encerrar sessão"}
             </button>
           </div>
         }
       >
         <div className={styles.accountModalForm}>
           <p className={styles.accountModalDescription}>
-            Digite sua senha atual para desconectar este dispositivo da sua conta.
+            Este dispositivo será desconectado da sua conta.
           </p>
 
           {pendingDeviceSession ? (
-            <div className={styles.accountModalStepBadge}>
-              <MaterialSymbolIcon name={getDevicePlatformIcon(pendingDeviceSession.platform)} size={14} filled={false} />
-              <span>
-                {`${getDevicePlatformLabel(pendingDeviceSession.platform)} · ${pendingDeviceSession.osName} · ${pendingDeviceSession.clientName}`.toUpperCase()}
-              </span>
+            <div className={styles.deviceSessionSummaryCard}>
+              <div className={styles.accountModalStepBadge}>
+                <MaterialSymbolIcon name={getDevicePlatformIcon(pendingDeviceSession.platform)} size={14} filled={false} />
+                <span>{`${getDevicePlatformEmoji(pendingDeviceSession.platform)} ${getDevicePlatformLabel(pendingDeviceSession.platform)}`}</span>
+              </div>
+              <p className={styles.deviceSessionSummaryPrimary}>
+                {`${pendingDeviceSession.clientName} • ${pendingDeviceSession.osName}`}
+              </p>
+              <p className={styles.deviceSessionSummaryLine}>
+                {formatDeviceLocationLabel(pendingDeviceSession.locationLabel) ?? "Localização não disponível"}
+              </p>
+              <p className={styles.deviceSessionSummaryLine}>
+                {formatMaskedIpLabel(pendingDeviceSession.ipAddressMasked)}
+              </p>
             </div>
           ) : null}
 
@@ -6716,7 +6933,7 @@ export default function AppSettingsView({
             onChange={(event) => setPendingDeviceSessionPasswordInput(event.target.value)}
             placeholder="Digite sua senha"
             autoComplete="current-password"
-            disabled={Boolean(endingDeviceSessionId)}
+            disabled={Boolean(endingDeviceSessionId) || isEndingAllOtherDeviceSessions}
             onKeyDown={(event) => {
               if (event.key === "Enter") {
                 event.preventDefault();
@@ -6736,6 +6953,78 @@ export default function AppSettingsView({
               aria-live="polite"
             >
               {pendingDeviceSessionFeedback.message}
+            </p>
+          ) : null}
+        </div>
+      </Modal>
+
+      <Modal
+        isOpen={isEndAllOtherSessionsModalOpen}
+        title="Encerrar todas as sessões"
+        ariaLabel="Confirmar encerramento de todas as outras sessões"
+        onClose={closeEndAllOtherSessionsModal}
+        panelClassName={styles.accountModalPanel}
+        bodyClassName={styles.accountModalBody}
+        closeOnBackdrop={!isEndingAllOtherDeviceSessions}
+        footer={(
+          <div className={styles.accountModalFooter}>
+            <button
+              className={styles.accountModalButtonGhost}
+              type="button"
+              onClick={closeEndAllOtherSessionsModal}
+              disabled={isEndingAllOtherDeviceSessions}
+            >
+              Cancelar
+            </button>
+            <button
+              className={styles.accountModalButtonPrimary}
+              type="button"
+              onClick={() => {
+                void handleConfirmEndAllOtherSessions();
+              }}
+              disabled={isEndingAllOtherDeviceSessions}
+            >
+              {isEndingAllOtherDeviceSessions ? "Encerrando sessões..." : "Encerrar todas as sessões"}
+            </button>
+          </div>
+        )}
+      >
+        <div className={styles.accountModalForm}>
+          <p className={styles.accountModalDescription}>
+            Isso irá desconectar sua conta de todos os outros dispositivos. Você continuará conectado apenas neste dispositivo.
+          </p>
+
+          <label className={styles.accountModalLabel} htmlFor="device-session-end-all-password-input">
+            Senha atual
+          </label>
+          <input
+            id="device-session-end-all-password-input"
+            className={styles.accountModalInput}
+            type="password"
+            value={endAllOtherSessionsPasswordInput}
+            onChange={(event) => setEndAllOtherSessionsPasswordInput(event.target.value)}
+            placeholder="Digite sua senha"
+            autoComplete="current-password"
+            disabled={isEndingAllOtherDeviceSessions}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                void handleConfirmEndAllOtherSessions();
+              }
+            }}
+          />
+
+          {endAllOtherSessionsFeedback ? (
+            <p
+              className={`${styles.accountModalFeedback}${
+                endAllOtherSessionsFeedback.tone === "error"
+                  ? ` ${styles.accountModalFeedbackError}`
+                  : ` ${styles.accountModalFeedbackSuccess}`
+              }`}
+              role="status"
+              aria-live="polite"
+            >
+              {endAllOtherSessionsFeedback.message}
             </p>
           ) : null}
         </div>

@@ -53,6 +53,11 @@ const endSessionResponseSchema = z.object({
   session: sessionViewSchema.nullable(),
 });
 
+const endAllOtherSessionsResponseSchema = z.object({
+  ended: z.boolean(),
+  endedCount: z.number().int().nonnegative(),
+});
+
 const listSessionsResponseSchema = z.object({
   user: z
     .object({
@@ -723,6 +728,59 @@ export async function endLoginSessionById(sessionId: string): Promise<void> {
       sessionsMutationApiTemporarilyDisabled = true;
       clearLocalSessionIfInvalid(error, uid);
       return;
+    }
+    throw error;
+  }
+}
+
+export async function endAllOtherLoginSessions(): Promise<number> {
+  if (isSessionsEdgeUnauthorizedCooldownActive()) {
+    return 0;
+  }
+
+  if (sessionsMutationApiTemporarilyDisabled) {
+    return 0;
+  }
+
+  const accessToken = await resolveSessionsAccessToken();
+  if (!accessToken) {
+    return 0;
+  }
+
+  const uid = getCurrentAuthUid();
+  const currentSessionId = getCurrentAuthSessionId() ?? decodeSupabaseSessionId(accessToken);
+
+  try {
+    const response = await invokeEdgeJson<
+      {
+        action: "endAllOther";
+        sessionId?: string | null;
+      },
+      unknown
+    >("sessions", {
+      action: "endAllOther",
+      sessionId: currentSessionId,
+    }, {
+      requireAuth: true,
+      retries: 0,
+      timeoutMs: 12_000,
+    });
+
+    const parsed = endAllOtherSessionsResponseSchema.parse(response);
+    clearSessionsEdgeUnauthorizedCooldown();
+    invalidateListSessionsCache(uid);
+    return parsed.endedCount;
+  } catch (error) {
+    if (isUnauthorizedSessionsEdgeError(error)) {
+      sessionsMutationApiTemporarilyDisabled = true;
+      activateSessionsEdgeUnauthorizedCooldown();
+      clearLocalSessionIfInvalid(error, uid);
+      return 0;
+    }
+    if (shouldDisableSessionsMutationApiForError(error)) {
+      sessionsMutationApiTemporarilyDisabled = true;
+      clearLocalSessionIfInvalid(error, uid);
+      return 0;
     }
     throw error;
   }

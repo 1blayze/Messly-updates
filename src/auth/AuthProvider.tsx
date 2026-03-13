@@ -169,6 +169,7 @@ const AUTH_BOOTSTRAP_SESSION_TIMEOUT_MS = 10_000;
 const AUTH_SESSION_HINT_TIMEOUT_MS = 4_000;
 const AUTH_APPLY_SESSION_TIMEOUT_MS = 15_000;
 const AUTH_PROFILE_FETCH_TIMEOUT_MS = 10_000;
+const AUTH_HARD_LOADING_TIMEOUT_MS = 20_000;
 
 async function withTimeout<T>(task: Promise<T>, timeoutMs: number, message: string): Promise<T> {
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
@@ -627,6 +628,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       subscriptionRef.current = null;
     };
   }, [applySessionAndProfile, dispatch]);
+
+  useEffect(() => {
+    // Safety net: never allow auth bootstrap to keep startup UI blocked indefinitely.
+    if (authReady && !isLoading && sessionHintResolved) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setSessionHintResolved(true);
+      setIsLoading(false);
+      setAuthReady(true);
+      setError((currentError) => currentError ?? "Tempo limite ao restaurar sessão. Continue com login manual.");
+    }, AUTH_HARD_LOADING_TIMEOUT_MS);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [authReady, isLoading, sessionHintResolved]);
 
   useEffect(() => {
     const currentAccessToken = String(session?.access_token ?? "").trim();
