@@ -6084,7 +6084,13 @@ export default function DirectMessageChatView({
     const persistedAudioSettings = readPersistedCallAudioSettings(currentFirebaseUid || currentUserId);
     pushToTalkEnabledRef.current = Boolean(persistedAudioSettings?.pushToTalkEnabled);
     pushToTalkBindRef.current = normalizePushToTalkBind(persistedAudioSettings?.pushToTalkBind);
-    const service = new CallService({
+    let serviceInstance: CallService | null = null;
+    const isServiceActive = (): boolean =>
+      Boolean(serviceInstance) &&
+      callServiceRef.current === serviceInstance &&
+      !isLocalCallDisconnectedRef.current;
+
+    serviceInstance = new CallService({
       mode,
       conversationId,
       audioSettings: persistedAudioSettings,
@@ -6103,7 +6109,7 @@ export default function DirectMessageChatView({
         });
       },
       onLocalStream: (stream) => {
-        if (callServiceRef.current !== service || isLocalCallDisconnectedRef.current) {
+        if (!isServiceActive()) {
           return;
         }
         setCallLocalStream(stream);
@@ -6111,13 +6117,13 @@ export default function DirectMessageChatView({
         setIsCallScreenSharing(localScreenSharing);
       },
       onRemoteStream: (stream) => {
-        if (callServiceRef.current !== service || isLocalCallDisconnectedRef.current) {
+        if (!isServiceActive()) {
           return;
         }
         setCallRemoteStream(stream);
       },
       onConnectionStateChange: (state) => {
-        if (callServiceRef.current !== service || isLocalCallDisconnectedRef.current) {
+        if (!isServiceActive() || !serviceInstance) {
           return;
         }
         if (state === "connected") {
@@ -6131,7 +6137,7 @@ export default function DirectMessageChatView({
           setCallErrorText("Reconectando chamada...");
           clearRemotePeerDisconnectFinalizeTimeout();
           if (state !== "closed") {
-            void service.restartIce(`peer-state-${state}`).catch((error) => {
+            void serviceInstance.restartIce(`peer-state-${state}`).catch((error) => {
               reportClientError(error, {
                 scope: "call.restartIce.onConnectionStateChange",
                 state,
@@ -6141,10 +6147,10 @@ export default function DirectMessageChatView({
           }
 
           remotePeerDisconnectFinalizeTimeoutRef.current = window.setTimeout(() => {
-            if (callServiceRef.current !== service || isLocalCallDisconnectedRef.current) {
+            if (!isServiceActive() || !serviceInstance) {
               return;
             }
-            const liveState = service.getConnectionState();
+            const liveState = serviceInstance.getConnectionState();
             if (liveState === "connected") {
               setCallPhase("active");
               setCallErrorText(null);
@@ -6153,7 +6159,7 @@ export default function DirectMessageChatView({
             setCallPhase((current) => (current === "idle" ? current : "reconnecting"));
             setCallErrorText("Reconectando chamada...");
             if (liveState === "disconnected" || liveState === "failed") {
-              void service.restartIce(`peer-timeout-${liveState}`).catch((error) => {
+              void serviceInstance.restartIce(`peer-timeout-${liveState}`).catch((error) => {
                 reportClientError(error, {
                   scope: "call.restartIce.connectionTimeout",
                   state: liveState,
@@ -6167,7 +6173,7 @@ export default function DirectMessageChatView({
         clearRemotePeerDisconnectFinalizeTimeout();
       },
       onError: (error) => {
-        if (callServiceRef.current !== service || isLocalCallDisconnectedRef.current) {
+        if (!isServiceActive()) {
           return;
         }
         setCallErrorText(
@@ -6178,15 +6184,15 @@ export default function DirectMessageChatView({
       },
     });
 
-    callServiceRef.current = service;
-    service.setMicrophoneTestActive(micTestMutedForLoopbackRef.current);
+    callServiceRef.current = serviceInstance;
+    serviceInstance.setMicrophoneTestActive(micTestMutedForLoopbackRef.current);
     setIsCallMicEnabled(true);
     setIsCallSoundEnabled(true);
     setIsCallCameraEnabled(mode === "video");
     setIsCallScreenSharing(false);
     setIsRemoteScreenSharing(false);
     setActiveScreenSharerUid(null);
-    return service;
+    return serviceInstance;
   }, [
     clearRemotePeerDisconnectFinalizeTimeout,
     conversationId,
