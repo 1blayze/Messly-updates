@@ -33,6 +33,7 @@ import {
   evaluateFriendRequestPermission,
   queryFriendRequestTargetById,
 } from "../services/friends/friendRequestPrivacy";
+import { listMutualFriendIdsForCurrentUser } from "../services/friends/mutualFriends";
 import { useFriendRequestsRealtime } from "../hooks/useFriendRequestsRealtime";
 import {
   dispatchSidebarCallHangup,
@@ -305,6 +306,20 @@ function arePendingCardsEqual(current: PendingFriendCard[], next: PendingFriendC
       currentCard.direction !== nextCard.direction ||
       currentCard.createdAt !== nextCard.createdAt
     ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function areStringArraysEqual(current: string[], next: string[]): boolean {
+  if (current.length !== next.length) {
+    return false;
+  }
+
+  for (let index = 0; index < current.length; index += 1) {
+    if (current[index] !== next[index]) {
       return false;
     }
   }
@@ -1177,6 +1192,7 @@ export default function AppShell() {
   const [activeFriendMenuUserId, setActiveFriendMenuUserId] = useState<string | null>(null);
   const [friendSearchTerm, setFriendSearchTerm] = useState("");
   const [activeDirectMessage, setActiveDirectMessage] = useState<SidebarDirectMessageSelection | null>(null);
+  const [activeDirectMessageMutualFriendIds, setActiveDirectMessageMutualFriendIds] = useState<string[]>([]);
   const [sidebarDirectMessages, setSidebarDirectMessages] = useState<SidebarDirectMessageSelection[]>([]);
   const [isSidebarHydrated, setIsSidebarHydrated] = useState(false);
   const [shellStartupTimedOut, setShellStartupTimedOut] = useState(false);
@@ -1206,6 +1222,8 @@ export default function AppShell() {
   const pendingRefreshInFlightRef = useRef(false);
   const pendingRefreshQueuedRef = useRef(false);
   const pendingProfileRequestCursorRef = useRef(0);
+  const activeDirectMessageMutualFetchTokenRef = useRef(0);
+  const activeDirectMessageMutualTargetUserIdRef = useRef("");
   const sidebarCallBootstrapDoneRef = useRef(false);
   const networkReconnectTimerRef = useRef<number | null>(null);
   const networkBannerHideTimerRef = useRef<number | null>(null);
@@ -3225,20 +3243,68 @@ export default function AppShell() {
 
     return friends.find((friend) => friend.userId === chatViewDirectMessage.userId) ?? null;
   }, [chatViewDirectMessage, friends]);
+
+  useEffect(() => {
+    const normalizedCurrentUserId = String(currentUserId ?? "").trim();
+    const normalizedTargetUserId = String(chatViewDirectMessage?.userId ?? "").trim();
+
+    if (!normalizedCurrentUserId || !normalizedTargetUserId || normalizedTargetUserId === normalizedCurrentUserId) {
+      activeDirectMessageMutualTargetUserIdRef.current = "";
+      setActiveDirectMessageMutualFriendIds((current) => (current.length === 0 ? current : []));
+      return;
+    }
+
+    if (activeDirectMessageMutualTargetUserIdRef.current !== normalizedTargetUserId) {
+      activeDirectMessageMutualTargetUserIdRef.current = normalizedTargetUserId;
+      setActiveDirectMessageMutualFriendIds((current) => (current.length === 0 ? current : []));
+    }
+
+    const requestToken = activeDirectMessageMutualFetchTokenRef.current + 1;
+    activeDirectMessageMutualFetchTokenRef.current = requestToken;
+    let isDisposed = false;
+
+    const run = async (): Promise<void> => {
+      try {
+        const nextMutualFriendIds = await listMutualFriendIdsForCurrentUser(normalizedTargetUserId);
+        if (isDisposed || activeDirectMessageMutualFetchTokenRef.current !== requestToken) {
+          return;
+        }
+
+        setActiveDirectMessageMutualFriendIds((current) =>
+          areStringArraysEqual(current, nextMutualFriendIds) ? current : nextMutualFriendIds,
+        );
+      } catch (error) {
+        if (isDisposed || activeDirectMessageMutualFetchTokenRef.current !== requestToken) {
+          return;
+        }
+        console.error("[app:mutual-friends] failed to load mutual friends", error);
+        setActiveDirectMessageMutualFriendIds((current) => (current.length === 0 ? current : []));
+      }
+    };
+
+    void run();
+
+    return () => {
+      isDisposed = true;
+    };
+  }, [chatViewDirectMessage?.userId, currentUserId, friendPresenceUserIdsKey]);
+
   const activeDirectMessageMutualFriends = useMemo(() => {
-    if (!chatViewDirectMessage || !activeDirectMessageFriend) {
+    if (!chatViewDirectMessage || activeDirectMessageMutualFriendIds.length === 0) {
       return [];
     }
 
+    const mutualFriendIdSet = new Set(activeDirectMessageMutualFriendIds);
+
     return allFriends
-      .filter((friend) => friend.userId !== chatViewDirectMessage.userId)
+      .filter((friend) => friend.userId !== chatViewDirectMessage.userId && mutualFriendIdSet.has(friend.userId))
       .map((friend) => ({
         userId: friend.userId,
         displayName: friend.displayName,
         username: friend.username,
         avatarSrc: friend.avatarSrc,
       }));
-  }, [activeDirectMessageFriend, allFriends, chatViewDirectMessage]);
+  }, [activeDirectMessageMutualFriendIds, allFriends, chatViewDirectMessage]);
   const isActiveDirectMessagePendingOutgoingRequest = useMemo(() => {
     if (!chatViewDirectMessage || !isFriendRequestsAvailable) {
       return false;

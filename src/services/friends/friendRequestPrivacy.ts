@@ -1,5 +1,5 @@
 import { supabase } from "../supabase";
-import { listFriendRequests } from "./friendRequestsApi";
+import { listMutualFriendIdsForCurrentUser } from "./mutualFriends";
 
 export interface FriendRequestPrivacySettings {
   allowAll: boolean;
@@ -59,29 +59,6 @@ function normalizeDisplayName(targetUser: Partial<FriendRequestPrivacyUserRow> |
   }
 
   return "Esse perfil";
-}
-
-async function listAcceptedFriendIds(userId: string): Promise<string[]> {
-  const normalizedUserId = String(userId ?? "").trim();
-  if (!normalizedUserId) {
-    return [];
-  }
-
-  const rows = await listFriendRequests("accepted");
-
-  return rows
-    .map((row) => {
-      const requesterId = String((row as { requester_id?: string | null }).requester_id ?? "").trim();
-      const addresseeId = String((row as { addressee_id?: string | null }).addressee_id ?? "").trim();
-      if (requesterId === normalizedUserId) {
-        return addresseeId;
-      }
-      if (addresseeId === normalizedUserId) {
-        return requesterId;
-      }
-      return "";
-    })
-    .filter((value): value is string => value.length > 0);
 }
 
 export function getFriendRequestPrivacySettings(
@@ -168,12 +145,8 @@ export async function evaluateFriendRequestPermission(
     };
   }
 
-  const [requesterFriends, targetFriends] = await Promise.all([
-    listAcceptedFriendIds(normalizedRequesterId),
-    listAcceptedFriendIds(normalizedTargetId),
-  ]);
-  const requesterFriendSet = new Set(requesterFriends);
-  const hasMutualFriend = targetFriends.some((friendId) => requesterFriendSet.has(friendId));
+  const mutualFriendIds = await listMutualFriendIdsForCurrentUser(normalizedTargetId);
+  const hasMutualFriend = mutualFriendIds.length > 0;
 
   return {
     allowed: hasMutualFriend,
