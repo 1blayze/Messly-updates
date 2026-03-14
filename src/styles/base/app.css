@@ -843,6 +843,41 @@ body {
   gap: 16px;
 }
 
+.main-panel__navbar-actions {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+}
+
+.main-panel__navbar-add-friend {
+  height: 30px;
+  border: 1px solid var(--button-primary-border);
+  border-radius: var(--radius-xs);
+  padding: 0 12px;
+  background: var(--button-primary-bg);
+  color: #fff;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.main-panel__navbar-add-friend:hover {
+  background: var(--button-primary-bg-hover);
+  border-color: var(--button-primary-border-hover);
+}
+
+.main-panel__navbar-add-friend:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.45);
+  outline-offset: 2px;
+}
+
+.main-panel__navbar-add-friend:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .main-panel__navbar-title {
   display: inline-flex;
   align-items: center;

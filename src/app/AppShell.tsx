@@ -1916,7 +1916,7 @@ export default function AppShell() {
           {
             event: "UPDATE",
             schema: "public",
-            table: "users",
+            table: "profiles",
             filter: `id=eq.${normalizedCurrentUserId}`,
           },
           (payload) => {
@@ -2861,7 +2861,6 @@ export default function AppShell() {
       if (!isFriendRequestsAvailable) {
         return;
       }
-      setActiveFriendsTab("pending");
       void pendingFriendRequestsQuery.refetch();
       void acceptedFriendRequestsQuery.refetch();
       void queryClient.invalidateQueries({
@@ -2891,6 +2890,11 @@ export default function AppShell() {
       return;
     }
 
+    setPendingError(null);
+    setPendingCards((current) => current.filter((card) => card.requestId !== requestId));
+    setOpenPendingProfile((current) => (current?.userId === targetUserId ? null : current));
+    window.dispatchEvent(new CustomEvent("messly:friend-requests-changed"));
+
     try {
       await ensureDirectConversation(currentUserId, targetUserId);
     } catch (error) {
@@ -2902,22 +2906,36 @@ export default function AppShell() {
     if (!isFriendRequestsAvailable) {
       return;
     }
+    const rejectedCard = pendingCards.find((card) => card.requestId === requestId) ?? null;
     const { error } = await supabase.from("friend_requests").update({ status: "rejected" }).eq("id", requestId);
     if (error) {
       setPendingError("Não foi possível recusar a solicitação.");
       return;
     }
+    setPendingError(null);
+    setPendingCards((current) => current.filter((card) => card.requestId !== requestId));
+    if (rejectedCard?.targetUserId) {
+      setOpenPendingProfile((current) => (current?.userId === rejectedCard.targetUserId ? null : current));
+    }
+    window.dispatchEvent(new CustomEvent("messly:friend-requests-changed"));
   };
 
   const handleCancelRequest = async (requestId: string): Promise<void> => {
     if (!isFriendRequestsAvailable) {
       return;
     }
+    const canceledCard = pendingCards.find((card) => card.requestId === requestId) ?? null;
     const { error } = await supabase.from("friend_requests").delete().eq("id", requestId);
     if (error) {
       setPendingError("Não foi possível cancelar a solicitação.");
       return;
     }
+    setPendingError(null);
+    setPendingCards((current) => current.filter((card) => card.requestId !== requestId));
+    if (canceledCard?.targetUserId) {
+      setOpenPendingProfile((current) => (current?.userId === canceledCard.targetUserId ? null : current));
+    }
+    window.dispatchEvent(new CustomEvent("messly:friend-requests-changed"));
   };
 
   const handleOpenPendingProfileConversation = useCallback(async (): Promise<void> => {
@@ -3128,6 +3146,22 @@ export default function AppShell() {
   };
 
   const pendingCount = isFriendRequestsAvailable ? pendingCards.length : 0;
+  useEffect(() => {
+    if (!isFriendRequestsAvailable) {
+      return;
+    }
+    if (activeFriendsTab !== "pending") {
+      return;
+    }
+    if (isPendingLoading) {
+      return;
+    }
+    if (pendingCards.length > 0) {
+      return;
+    }
+    setActiveFriendsTab("online");
+  }, [activeFriendsTab, isFriendRequestsAvailable, isPendingLoading, pendingCards.length]);
+
   const sortedFriends = useMemo(() => {
     const uniqueById = new Map<string, FriendListItem>();
     friends.forEach((friend) => {
@@ -3480,6 +3514,17 @@ export default function AppShell() {
                   </button>
                 ) : null}
               </div>
+            </div>
+            <div className="main-panel__navbar-actions">
+              <button
+                className="main-panel__navbar-add-friend"
+                type="button"
+                onClick={() => {
+                  window.dispatchEvent(new CustomEvent("messly:open-add-friend-modal"));
+                }}
+              >
+                Adicionar amigo
+              </button>
             </div>
           </header>
         ) : null}

@@ -101,6 +101,7 @@ interface ProfileMediaUpdatedDetail {
   userId: string;
   avatar_key?: string | null;
   avatar_hash?: string | null;
+  avatar_url?: string | null;
   banner_color?: string | null;
   banner_key?: string | null;
   banner_hash?: string | null;
@@ -1623,6 +1624,13 @@ export default function DirectMessagesSidebar({
         return;
       }
 
+      const avatarKeyTouched = Object.prototype.hasOwnProperty.call(detail, "avatar_key");
+      const avatarHashTouched = Object.prototype.hasOwnProperty.call(detail, "avatar_hash");
+      const avatarUrlTouched = Object.prototype.hasOwnProperty.call(detail, "avatar_url");
+      const avatarRemoved =
+        (avatarKeyTouched && detail.avatar_key == null) || (avatarUrlTouched && detail.avatar_url == null);
+      const isIdentityMediaUpdate = String(identity.userId ?? "").trim() === detail.userId;
+
       setIdentity((current) => {
         if (!current.userId || current.userId !== detail.userId) {
           return current;
@@ -1637,7 +1645,10 @@ export default function DirectMessagesSidebar({
         if (Object.prototype.hasOwnProperty.call(detail, "avatar_hash")) {
           next.avatarHash = detail.avatar_hash ?? null;
         }
-        if (Object.prototype.hasOwnProperty.call(detail, "avatar_key") && detail.avatar_key == null) {
+        if (Object.prototype.hasOwnProperty.call(detail, "avatar_url")) {
+          next.avatarUrl = detail.avatar_url ?? null;
+        }
+        if ((avatarKeyTouched && detail.avatar_key == null) || (avatarUrlTouched && detail.avatar_url == null)) {
           next.avatarUrl = null;
         }
 
@@ -1656,6 +1667,90 @@ export default function DirectMessagesSidebar({
         return next;
       });
 
+      if (avatarRemoved && isIdentityMediaUpdate) {
+        setAvatarSrc((current) => {
+          const fallbackAvatar = getDmDisplayAvatar(
+            identity.displayName,
+            identity.username,
+            identity.userId || sessionUid,
+          );
+          return current === fallbackAvatar ? current : fallbackAvatar;
+        });
+      }
+
+      if (avatarKeyTouched || avatarHashTouched || avatarUrlTouched) {
+        setDirectMessages((current) => {
+          let changed = false;
+          const nextItems = current.map((item) => {
+            if (item.userId !== detail.userId) {
+              return item;
+            }
+
+            if (!avatarRemoved) {
+              return item;
+            }
+
+            const fallbackAvatar = getDmDisplayAvatar(item.displayName, item.username, item.userId);
+            if (item.avatarSrc === fallbackAvatar) {
+              return item;
+            }
+
+            changed = true;
+            return {
+              ...item,
+              avatarSrc: fallbackAvatar,
+            };
+          });
+
+          if (!changed) {
+            return current;
+          }
+          if (identity.userId) {
+            writeDirectMessagesCache(identity.userId, nextItems);
+          }
+          return nextItems;
+        });
+
+        if (!avatarRemoved && (avatarKeyTouched || avatarUrlTouched)) {
+          const nextAvatarSource = avatarKeyTouched
+            ? String(detail.avatar_key ?? "").trim() || null
+            : (avatarUrlTouched ? String(detail.avatar_url ?? "").trim() || null : null);
+          const nextAvatarHash = avatarHashTouched ? String(detail.avatar_hash ?? "").trim() || null : null;
+
+          void getAvatarUrl(detail.userId, nextAvatarSource, nextAvatarHash).then((resolvedAvatar) => {
+            const normalizedAvatar = String(resolvedAvatar ?? "").trim();
+            setDirectMessages((current) => {
+              let changed = false;
+              const nextItems = current.map((item) => {
+                if (item.userId !== detail.userId) {
+                  return item;
+                }
+
+                const fallbackAvatar = getDmDisplayAvatar(item.displayName, item.username, item.userId);
+                const targetAvatar = normalizedAvatar || fallbackAvatar;
+                if (item.avatarSrc === targetAvatar) {
+                  return item;
+                }
+
+                changed = true;
+                return {
+                  ...item,
+                  avatarSrc: targetAvatar,
+                };
+              });
+
+              if (!changed) {
+                return current;
+              }
+              if (identity.userId) {
+                writeDirectMessagesCache(identity.userId, nextItems);
+              }
+              return nextItems;
+            });
+          }).catch(() => undefined);
+        }
+      }
+
       const bannerKeyTouched = Object.prototype.hasOwnProperty.call(detail, "banner_key");
       const bannerHashTouched = Object.prototype.hasOwnProperty.call(detail, "banner_hash");
       const bannerRemoved =
@@ -1670,7 +1765,7 @@ export default function DirectMessagesSidebar({
     return () => {
       window.removeEventListener("messly:profile-media-updated", handleProfileMediaUpdated as EventListener);
     };
-  }, []);
+  }, [identity.displayName, identity.userId, identity.username, sessionUid]);
 
   useEffect(() => {
     const handleProfileUpdated = (event: Event): void => {
@@ -2217,7 +2312,7 @@ export default function DirectMessagesSidebar({
         .channel(`realtime:dm-users:${identity.userId ?? "anon"}`)
         .on(
           "postgres_changes",
-          { event: "UPDATE", schema: "public", table: "users" },
+          { event: "UPDATE", schema: "public", table: "profiles" },
           (payload) => {
             const nextRow =
               payload && typeof payload.new === "object" && payload.new !== null
@@ -2275,6 +2370,10 @@ export default function DirectMessagesSidebar({
             }
             if (Object.prototype.hasOwnProperty.call(nextRow, "avatar_hash")) {
               mediaDetail.avatar_hash = toNullableTrimmedString(nextRow.avatar_hash);
+              hasMediaPayload = true;
+            }
+            if (Object.prototype.hasOwnProperty.call(nextRow, "avatar_url")) {
+              mediaDetail.avatar_url = toNullableTrimmedString(nextRow.avatar_url);
               hasMediaPayload = true;
             }
             if (Object.prototype.hasOwnProperty.call(nextRow, "banner_key")) {
@@ -2467,20 +2566,37 @@ export default function DirectMessagesSidebar({
     ? getDmDisplayAvatar(identity.displayName, identity.username, identity.userId)
     : avatarSrc;
 
-  const handleOpenAddFriendModal = (): void => {
+  const handleOpenAddFriendModal = useCallback((): void => {
     setIsAddFriendModalOpen(true);
     setFriendIdentifier("");
     setAddFriendFeedback(null);
-  };
+  }, []);
 
-  const handleCloseAddFriendModal = (): void => {
+  const handleCloseAddFriendModal = useCallback((): void => {
     if (isAddingFriend) {
       return;
     }
     setIsAddFriendModalOpen(false);
     setFriendIdentifier("");
     setAddFriendFeedback(null);
+  }, [isAddingFriend]);
+
+  const closeAddFriendModalAfterSuccess = (): void => {
+    setIsAddFriendModalOpen(false);
+    setFriendIdentifier("");
+    setAddFriendFeedback(null);
   };
+
+  useEffect(() => {
+    const openAddFriendFromNavbar = (): void => {
+      handleOpenAddFriendModal();
+    };
+
+    window.addEventListener("messly:open-add-friend-modal", openAddFriendFromNavbar as EventListener);
+    return () => {
+      window.removeEventListener("messly:open-add-friend-modal", openAddFriendFromNavbar as EventListener);
+    };
+  }, [handleOpenAddFriendModal]);
 
   const handleAddFriend = async (): Promise<void> => {
     const currentUserId = identity.userId;
@@ -2532,12 +2648,7 @@ export default function DirectMessagesSidebar({
 
       if (!isFriendRequestsAvailable) {
         await ensureDirectConversation(currentUserId, targetUser.id);
-        const targetDisplayName = normalizeIdentityDisplayName(targetUser.display_name, targetUser.username, "usuario");
-        setAddFriendFeedback({
-          tone: "success",
-          message: `${targetDisplayName} adicionado com sucesso.`,
-        });
-        setFriendIdentifier("");
+        closeAddFriendModalAfterSuccess();
         return;
       }
 
@@ -2594,7 +2705,7 @@ export default function DirectMessagesSidebar({
         tone: "success",
         message: `Solicitação enviada para ${targetDisplayName}.`,
       });
-      setFriendIdentifier("");
+      closeAddFriendModalAfterSuccess();
     } catch (error) {
       if (isFriendRequestsUnavailableError(error)) {
         setIsFriendRequestsAvailable(false);
@@ -2608,7 +2719,7 @@ export default function DirectMessagesSidebar({
               tone: "success",
               message: `${targetDisplayName} adicionado com sucesso.`,
             });
-            setFriendIdentifier("");
+            closeAddFriendModalAfterSuccess();
             return;
           }
         } catch {
@@ -2684,16 +2795,6 @@ export default function DirectMessagesSidebar({
       <aside className="friends-sidebar">
         <div className="friends-sidebar__header">
           <span className="friends-sidebar__title">Messly</span>
-          <div className="friends-sidebar__header-actions">
-            <button
-              className="friends-sidebar__action-button"
-              type="button"
-              aria-label="Adicionar amigo"
-              onClick={handleOpenAddFriendModal}
-            >
-              <MaterialSymbolIcon name="person_add" size={18} />
-            </button>
-          </div>
         </div>
 
         <div className="friends-sidebar__content">

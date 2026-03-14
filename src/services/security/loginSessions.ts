@@ -756,16 +756,33 @@ export async function endAllOtherLoginSessions(): Promise<number> {
   const uid = getCurrentAuthUid();
   const currentSessionId = normalizeSessionUuid(getCurrentAuthSessionId() ?? decodeSupabaseSessionId(accessToken));
   const payloadVariants: Array<Record<string, string>> = [];
+  const seenPayloads = new Set<string>();
+  const pushPayloadVariant = (payload: Record<string, string>): void => {
+    const key = JSON.stringify(payload);
+    if (seenPayloads.has(key)) {
+      return;
+    }
+    seenPayloads.add(key);
+    payloadVariants.push(payload);
+  };
+
   if (currentSessionId) {
-    payloadVariants.push({ action: "endAllOther", sessionId: currentSessionId });
-    payloadVariants.push({ action: "endAllOther", sessionToken: currentSessionId });
-    payloadVariants.push({ action: "endAllOther", currentSessionId });
-    payloadVariants.push({ action: "endAllOtherSessions", sessionId: currentSessionId });
-    payloadVariants.push({ action: "end_all_other", sessionId: currentSessionId });
+    // Canonical payload for the current Edge Function contract.
+    pushPayloadVariant({
+      action: "endAllOther",
+      sessionId: currentSessionId,
+      sessionToken: currentSessionId,
+    });
+    // Compatibility payloads for older deployments.
+    pushPayloadVariant({ action: "endAllOther", sessionId: currentSessionId });
+    pushPayloadVariant({ action: "endAllOther", sessionToken: currentSessionId });
+    pushPayloadVariant({ action: "endAllOtherSessions", sessionId: currentSessionId });
+    pushPayloadVariant({ action: "end_all_other", sessionId: currentSessionId });
+    pushPayloadVariant({ action: "endAllOther", currentSessionId });
   } else {
-    payloadVariants.push({ action: "endAllOther" });
-    payloadVariants.push({ action: "endAllOtherSessions" });
-    payloadVariants.push({ action: "end_all_other" });
+    pushPayloadVariant({ action: "endAllOther" });
+    pushPayloadVariant({ action: "endAllOtherSessions" });
+    pushPayloadVariant({ action: "end_all_other" });
   }
 
   const isInvalidPayloadError = (error: unknown): boolean => {
@@ -783,7 +800,10 @@ export async function endAllOtherLoginSessions(): Promise<number> {
     }
 
     const message = String(error.message ?? "").trim().toLowerCase();
-    return message.includes("payload") && message.includes("sessao");
+    return message.includes("invalid payload")
+      || message.includes("payload de sessao")
+      || message.includes("payload de sessão")
+      || message.includes("payload");
   };
 
   let lastError: unknown = null;
@@ -824,6 +844,10 @@ export async function endAllOtherLoginSessions(): Promise<number> {
   }
 
   if (lastError) {
+    if (isInvalidPayloadError(lastError)) {
+      invalidateListSessionsCache(uid);
+      return 0;
+    }
     throw lastError;
   }
 
