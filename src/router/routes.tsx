@@ -6,7 +6,6 @@ import { appBootstrap, useAppBootstrapSnapshot } from "../core/appBootstrap";
 import { markStartupUiReady } from "../app/startupUi";
 import AppStartupScreen from "../app/AppStartupScreen";
 import {
-  PublicLandingPage,
   PublicPrivacyPage,
   PublicSiteLayout,
   PublicTermsPage,
@@ -412,6 +411,10 @@ export default function AppRoutes() {
   }, [bootstrap.phase, currentUserId, shouldShowLoginNow, shouldShowRestorationShell]);
 
   const isElectronRuntime = typeof window !== "undefined" && Boolean(window.electronAPI);
+  if (!isElectronRuntime && typeof window !== "undefined" && window.location.pathname === "/") {
+    window.location.replace("/landing/index.html");
+    return null;
+  }
   const Router = isElectronRuntime ? HashRouter : BrowserRouter;
 
   return (
@@ -419,7 +422,6 @@ export default function AppRoutes() {
       <Routes>
         {isElectronRuntime ? <Route path="/" element={<RootRedirect />} /> : null}
         <Route element={<PublicSiteLayout />}>
-          {!isElectronRuntime ? <Route path="/" element={<PublicLandingPage />} /> : null}
           <Route path="/terms" element={<PublicTermsPage />} />
           <Route path="/privacy" element={<PublicPrivacyPage />} />
         </Route>
