@@ -1,149 +1,171 @@
 <!doctype html>
+
 <html lang="pt-BR">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Messly | Mensagens, Voz e Comunidade</title>
-    <meta
-      name="description"
-      content="Messly e uma plataforma moderna de mensagens, voz e comunidade para conversar com amigos, equipes e comunidades em tempo real."
-    />
-    <meta
-      name="keywords"
-      content="Messly, chat, mensagens, voz, comunidade, servidores, chamada de voz, app de conversa"
-    />
-    <meta name="theme-color" content="#0b0d12" />
 
-    <meta property="og:type" content="website" />
-    <meta property="og:title" content="Messly | Mensagens, Voz e Comunidade" />
-    <meta
-      property="og:description"
-      content="Um novo jeito de conversar. Messly une mensagens, voz e comunidade em uma experiencia moderna."
-    />
-    <meta property="og:image" content="https://messly.site/assets/logo.png" />
-    <meta property="og:image:alt" content="Logo do Messly" />
-    <meta property="og:url" content="https://messly.site" />
-    <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="Messly | Mensagens, Voz e Comunidade" />
-    <meta
-      name="twitter:description"
-      content="Um novo jeito de conversar. Messly une mensagens, voz e comunidade em uma experiencia moderna."
-    />
-    <meta name="twitter:image" content="https://messly.site/assets/logo.png" />
+<head>
 
-    <link rel="icon" href="./assets/logo.png" />
-    <link rel="preload" as="image" href="./assets/logo.png" />
-    <link rel="stylesheet" href="./styles.css" />
-  </head>
-  <body>
-    <a class="skip-link" href="#conteudo">Pular para o conteudo</a>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 
-    <header class="topbar" id="topo">
-      <div class="container topbar__inner">
-        <a class="brand" href="#topo" aria-label="Messly">
-          <img src="./assets/logo.png" alt="Logo Messly" class="brand__logo" />
-          <span class="brand__name">Messly</span>
-        </a>
+<title>Messly | Mensagens e chamadas de voz</title>
 
-        <button class="menu-toggle" id="menuToggle" aria-expanded="false" aria-controls="menuNav" aria-label="Abrir menu">
-          <span></span>
-          <span></span>
-          <span></span>
-        </button>
+<meta name="description" content="Messly é uma plataforma moderna de mensagens e chamadas de voz para conversar com amigos e comunidades.">
 
-        <nav class="menu" id="menuNav" aria-label="Navegacao principal">
-          <a href="/auth/login" class="menu__link">Login</a>
-          <a href="/download/windows" class="btn btn--primary">Baixar para Windows</a>
-          <a href="/app" class="btn btn--ghost">Abrir Messly no navegador</a>
-        </nav>
-      </div>
-    </header>
+<meta name="theme-color" content="#0A0A0A">
 
-    <main id="conteudo">
-      <section class="hero section" aria-labelledby="hero-title">
-        <div class="container hero__content" data-reveal>
-          <p class="eyebrow">MESSAGENS, VOZ E COMUNIDADE</p>
-          <h1 id="hero-title">Um novo jeito de conversar</h1>
-          <p class="hero__subtitle">
-            Messly e uma plataforma moderna de mensagens, voz e comunidade para conversar com amigos e equipes.
-          </p>
-          <div class="hero__actions">
-            <a href="/download/windows" class="btn btn--xl btn--primary">Baixar para Windows</a>
-            <a href="/app" class="btn btn--xl btn--ghost">Abrir Messly no navegador</a>
-          </div>
-        </div>
-      </section>
+<meta property="og:type" content="website">
+<meta property="og:title" content="Messly | Mensagens e chamadas de voz">
+<meta property="og:description" content="Um novo jeito de conversar com amigos e comunidades.">
+<meta property="og:image" content="https://messly.site/assets/messly.svg">
 
-      <section class="section features" id="recursos" aria-labelledby="features-title">
-        <div class="container">
-          <h2 id="features-title" class="section__title" data-reveal>Recursos principais</h2>
-          <div class="features__grid">
-            <article class="feature-card" data-reveal>
-              <div class="feature-card__icon" aria-hidden="true">&#128172;</div>
-              <h3>Chat rapido</h3>
-              <p>Envie mensagens instantaneas com fluidez e organizacao para conversas do dia a dia.</p>
-            </article>
-            <article class="feature-card" data-reveal>
-              <div class="feature-card__icon" aria-hidden="true">&#127908;</div>
-              <h3>Chamadas de voz</h3>
-              <p>Entre em chamadas em tempo real para reunir amigos e equipes com baixa latencia.</p>
-            </article>
-            <article class="feature-card" data-reveal>
-              <div class="feature-card__icon" aria-hidden="true">&#127968;</div>
-              <h3>Comunidades</h3>
-              <p>Crie servidores, organize canais e mantenha sua comunidade conectada em um so lugar.</p>
-            </article>
-          </div>
-        </div>
-      </section>
+<link rel="icon" href="./assets/messly.svg" type="image/x-icon">
 
-      <section class="section preview" aria-labelledby="preview-title">
-        <div class="container preview__grid">
-          <div class="preview__text" data-reveal>
-            <h2 id="preview-title">Converse, organize e se conecte com facilidade.</h2>
-            <p>
-              Uma interface limpa e moderna para mensagens, voz e colaboracao, com foco em velocidade e clareza.
-            </p>
-          </div>
-          <div class="app-mockup" role="img" aria-label="Preview da interface do Messly" data-reveal>
-            <div class="app-mockup__topbar"></div>
-            <div class="app-mockup__layout">
-              <div class="app-mockup__sidebar"></div>
-              <div class="app-mockup__chat">
-                <div class="line line--lg"></div>
-                <div class="line"></div>
-                <div class="line"></div>
-                <div class="line line--md"></div>
-                <div class="line"></div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
+<link rel="stylesheet" href="./styles.css">
 
-      <section class="section cta" aria-labelledby="cta-title">
-        <div class="container cta__box" data-reveal>
-          <h2 id="cta-title">Pronto para comecar?</h2>
-          <div class="cta__actions">
-            <a href="/download/windows" class="btn btn--xl btn--primary">Baixar para Windows</a>
-            <a href="/app" class="btn btn--xl btn--ghost">Abrir Messly no navegador</a>
-          </div>
-        </div>
-      </section>
-    </main>
+</head>
 
-    <footer class="footer">
-      <div class="container footer__content">
-        <p class="footer__brand">Messly</p>
-        <nav class="footer__links" aria-label="Links do rodape">
-          <a href="/terms">Termos de uso</a>
-          <a href="/privacy">Politica de privacidade</a>
-          <a href="/support">Suporte</a>
-          <a href="/contact">Contato</a>
-        </nav>
-      </div>
-    </footer>
+<body>
 
-    <script src="./script.js" defer></script>
-  </body>
+<header class="topbar">
+
+<div class="container navbar">
+
+<a class="brand" href="/">
+
+<img src="./assets/messly.svg" class="logo" alt="Logo Messly">
+
+<span>Messly</span>
+
+</a>
+
+<nav>
+
+<a href="/auth/login" class="btn btn-login">
+
+Entrar
+
+</a>
+
+</nav>
+
+</div>
+
+</header>
+
+<main>
+
+<section class="hero">
+
+<div class="container hero-grid">
+
+<div class="hero-text">
+
+<h1>
+
+Converse com qualquer pessoa
+
+</h1>
+
+<p>
+
+Messly é uma plataforma moderna de mensagens e chamadas de voz para conversar com amigos, equipes e comunidades em tempo real.
+
+</p>
+
+<div class="hero-buttons">
+
+<a href="/download/windows" class="btn btn-primary">
+
+Baixar para Windows
+
+</a>
+
+<a href="/app" class="btn btn-outline">
+
+Abrir no navegador
+
+</a>
+
+</div>
+
+</div>
+
+</div>
+
+</section>
+
+</main>
+
+<footer class="footer">
+
+<div class="container footer-grid">
+
+<div class="footer-brand">
+
+<div class="footer-logo">
+
+<img src="./assets/messly.svg" alt="Logo Messly">
+
+<span>Messly</span>
+
+</div>
+
+<p class="footer-description">
+
+Messly é uma plataforma moderna de mensagens e chamadas de voz criada para conectar amigos, equipes e comunidades em um único lugar.
+
+</p>
+
+</div>
+
+<div class="footer-links">
+
+<h4>Produto</h4>
+
+<a href="/download/windows">Baixar para Windows</a>
+
+<a href="/app">Abrir no navegador</a>
+
+<a href="/auth/login">Entrar</a>
+
+</div>
+
+<div class="footer-links">
+
+<h4>Empresa</h4>
+
+<a href="/about">Sobre o Messly</a>
+
+<a href="/support">Suporte</a>
+
+<a href="/contact">Contato</a>
+
+</div>
+
+<div class="footer-links">
+
+<h4>Legal</h4>
+
+<a href="/terms">Termos de uso</a>
+
+<a href="/privacy">Política de privacidade</a>
+
+</div>
+
+</div>
+
+<div class="footer-bottom">
+
+<p>
+
+© 2026 Messly. Todos os direitos reservados.
+
+</p>
+
+</div>
+
+</footer>
+
+</body>
+
 </html>

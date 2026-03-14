@@ -1,4 +1,5 @@
 import { EdgeFunctionError, invokeEdgeJson } from "../edge/edgeClient";
+import { authService } from "../auth";
 
 export interface SpotifyPlaybackState {
   trackTitle: string;
@@ -2269,6 +2270,23 @@ export async function syncSpotifyConnection(
 
   const rateLimitedUntil = readSpotifyRateLimitUntil(scopedUserId);
   const currentConnection = readSpotifyConnection(scopedUserId);
+
+  // Avoid noisy 401 loops when the app no longer has a valid user session.
+  // In this state, we keep Spotify disconnected locally and skip remote sync.
+  const authenticatedUserId = String(await authService.getCurrentUserId() ?? "").trim();
+  const validatedEdgeToken = String(await authService.getValidatedEdgeAccessToken() ?? "").trim();
+  const hasMatchingAuthScope = Boolean(authenticatedUserId) && authenticatedUserId === scopedUserId;
+  if (!hasMatchingAuthScope || !validatedEdgeToken) {
+    const disconnectedConnection = createDefaultSpotifyConnection();
+    return {
+      connection: writeSpotifyConnection(scopedUserId, disconnectedConnection),
+      playbackKey: "idle",
+      playbackStatus: "idle",
+      latencyMs: 0,
+      didConnectionChange: buildSpotifyConnectionFingerprint(currentConnection) !==
+        buildSpotifyConnectionFingerprint(disconnectedConnection),
+    };
+  }
 
   if (rateLimitedUntil > Date.now()) {
     if (

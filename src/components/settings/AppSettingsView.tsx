@@ -246,6 +246,8 @@ const SIDEBAR_IDENTITY_CACHE_PREFIX = "messly:sidebar-identity:";
 const SIDEBAR_RESOLVED_MEDIA_CACHE_PREFIX = "messly:sidebar-media:";
 const AUDIO_SETTINGS_STORAGE_KEY_PREFIX = "messly:audio-settings:";
 const AUDIO_SETTINGS_UPDATED_EVENT = "messly:audio-settings-updated";
+const AUDIO_MIC_TEST_STATE_EVENT = "messly:audio-mic-test-state";
+const AUDIO_MIC_TEST_STATE_STORAGE_KEY = "messly:audio-mic-test-active";
 const PROFILE_PLUS_THEME_STORAGE_KEY_PREFIX = "messly:profile-plus-theme:";
 const PROFILE_PLUS_THEME_UPDATED_EVENT = "messly:profile-plus-theme-updated";
 const USERNAME_CHANGE_STORAGE_KEY_PREFIX = "messly:username-change:";
@@ -438,6 +440,31 @@ function buildAudioSettingsStorageKey(userUid: string | null | undefined): strin
     return `${AUDIO_SETTINGS_STORAGE_KEY_PREFIX}guest`;
   }
   return `${AUDIO_SETTINGS_STORAGE_KEY_PREFIX}${normalizedUid}`;
+}
+
+function publishMicTestState(active: boolean): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const nextActive = Boolean(active);
+  try {
+    if (nextActive) {
+      window.localStorage.setItem(AUDIO_MIC_TEST_STATE_STORAGE_KEY, "1");
+    } else {
+      window.localStorage.removeItem(AUDIO_MIC_TEST_STATE_STORAGE_KEY);
+    }
+  } catch {
+    // Ignore storage failures.
+  }
+
+  window.dispatchEvent(
+    new CustomEvent(AUDIO_MIC_TEST_STATE_EVENT, {
+      detail: {
+        active: nextActive,
+      },
+    }),
+  );
 }
 
 function buildProfilePlusThemeStorageKey(userUid: string | null | undefined): string {
@@ -1857,6 +1884,7 @@ export default function AppSettingsView({
   const micTestAudioContextRef = useRef<AudioContext | null>(null);
   const micTestAnalyserRef = useRef<AnalyserNode | null>(null);
   const micTestAnalyserDataRef = useRef<Float32Array<ArrayBuffer> | null>(null);
+  const micTestFeedbackGainRef = useRef<GainNode | null>(null);
   const inputDeviceSelectRef = useRef<HTMLDivElement | null>(null);
   const outputDeviceSelectRef = useRef<HTMLDivElement | null>(null);
   const inputGainRef = useRef(100);
@@ -2082,6 +2110,7 @@ export default function AppSettingsView({
 
     micTestAnalyserDataRef.current = null;
     micTestAnalyserRef.current = null;
+    micTestFeedbackGainRef.current = null;
 
     if (micTestAudioContextRef.current) {
       void micTestAudioContextRef.current.close().catch(() => undefined);
@@ -2099,6 +2128,7 @@ export default function AppSettingsView({
     setLocalMicClipping(false);
     setMicMeterHasSignal(false);
     setVadState("silence");
+    publishMicTestState(false);
   };
 
   const refreshAudioDevices = async (): Promise<void> => {
@@ -2170,21 +2200,37 @@ export default function AppSettingsView({
         video: false,
       });
 
-      const audioContext = new AudioContext();
+      const audioContext = new AudioContext({ latencyHint: "interactive" });
+      if (audioContext.state === "suspended") {
+        await audioContext.resume().catch(() => undefined);
+      }
       const analyser = audioContext.createAnalyser();
       analyser.fftSize = 2048;
       analyser.smoothingTimeConstant = 0.82;
 
       const source = audioContext.createMediaStreamSource(stream);
       source.connect(analyser);
+      const feedbackGain = audioContext.createGain();
+      feedbackGain.gain.value = clamp(normalizedOutputVolume / 100, 0, 2);
+      source.connect(feedbackGain);
+      feedbackGain.connect(audioContext.destination);
 
-      const analyserData = new Float32Array(new ArrayBuffer(analyser.fftSize * Float32Array.BYTES_PER_ELEMENT));
+      const analyserData = new Float32Array(analyser.fftSize);
+      const audioTrack = stream.getAudioTracks()[0] ?? null;
+      if (audioTrack) {
+        audioTrack.onended = () => {
+          stopMicTest();
+          setMicTestError("O teste de microfone foi interrompido.");
+        };
+      }
 
       micTestStreamRef.current = stream;
       micTestAudioContextRef.current = audioContext;
       micTestAnalyserRef.current = analyser;
       micTestAnalyserDataRef.current = analyserData;
+      micTestFeedbackGainRef.current = feedbackGain;
       setMicTestActive(true);
+      publishMicTestState(true);
 
       let peakHold = 0;
       const tick = (): void => {
@@ -2453,6 +2499,13 @@ export default function AppSettingsView({
   useEffect(() => {
     inputGainRef.current = normalizedInputGain;
   }, [normalizedInputGain]);
+
+  useEffect(() => {
+    if (!micTestFeedbackGainRef.current) {
+      return;
+    }
+    micTestFeedbackGainRef.current.gain.value = clamp(normalizedOutputVolume / 100, 0, 2);
+  }, [normalizedOutputVolume]);
 
   useEffect(() => {
     vadEnabledRef.current = vadEnabled;

@@ -632,6 +632,10 @@ export class CallService {
     return this.mediaManager.toggleMute();
   }
 
+  setMicrophoneTestActive(active: boolean): void {
+    this.mediaManager.setMicTestMuted(active);
+  }
+
   toggleCamera(): boolean {
     const nextEnabled = this.mediaManager.toggleCamera();
     void this.syncProducers("call.toggleCamera").catch((error) => {
