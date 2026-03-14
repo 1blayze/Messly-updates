@@ -471,10 +471,24 @@ function readEdgeRetryAfterMs(error: EdgeFunctionError): number | undefined {
 }
 
 function normalizeSpotifyEdgeError(error: unknown): never {
+  if (isAbortError(error)) {
+    throw createSpotifyApiError("spotify_request_aborted", "Solicitacao Spotify abortada.");
+  }
+
   if (error instanceof EdgeFunctionError) {
     const status = Number(error.status ?? 0);
     const code = String(error.code ?? "").trim().toUpperCase();
     const message = String(error.message ?? "").trim() || "Falha ao sincronizar a conexao Spotify.";
+    const normalizedMessage = message.toLowerCase();
+
+    if (
+      code === "EDGE_NETWORK_ERROR" &&
+      (normalizedMessage.includes("abort") ||
+        normalizedMessage.includes("aborted") ||
+        normalizedMessage.includes("signal is aborted"))
+    ) {
+      throw createSpotifyApiError("spotify_request_aborted", message);
+    }
 
     if (status === 401 || status === 403 || code === "UNAUTHENTICATED" || code === "INVALID_TOKEN") {
       throw createSpotifyApiError("spotify_unauthorized", message);
@@ -503,6 +517,11 @@ async function invokeSpotifyConnectionsEdge<TRequest extends Record<string, unkn
     timeoutMs?: number;
   } = {},
 ): Promise<TResponse> {
+  const validatedEdgeToken = String(await authService.getValidatedEdgeAccessToken() ?? "").trim();
+  if (!validatedEdgeToken) {
+    throw createSpotifyApiError("spotify_unauthorized", "Sessao invalida ou expirada.");
+  }
+
   try {
     return await invokeEdgeJson<TRequest, TResponse>(SPOTIFY_CONNECTIONS_EDGE_FUNCTION, payload, {
       requireAuth: true,

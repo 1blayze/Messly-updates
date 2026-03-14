@@ -5,39 +5,32 @@ const POLICY_UPDATED_AT = "14 de marco de 2026";
 
 export function PublicLandingPage() {
   return (
-    <article className="public-page public-page--landing">
-      <section className="landing-hero">
-        <div className="landing-hero__copy">
-          <div className="landing-brand">
-            <img className="landing-brand__logo" src={messlyLogo} alt="" aria-hidden="true" />
-            <span className="landing-brand__name">Messly</span>
-          </div>
+    <article className="public-page public-page--landing-v2">
+      <header className="landing-v2-topbar" aria-label="Cabecalho da landing page">
+        <Link className="landing-v2-brand" to="/">
+          <img className="landing-v2-brand__logo" src={messlyLogo} alt="" aria-hidden="true" />
+          <span className="landing-v2-brand__name">Messly</span>
+        </Link>
 
-          <h1 className="landing-hero__title">BATE-PAPO EM GRUPO PARA JOGAR, ESTUDAR E CONVERSAR</h1>
-          <p className="landing-hero__text">
-            O Messly e ideal para conversar em tempo real com amigos e comunidades. Crie seu espaco, envie mensagens,
-            participe de chamadas e mantenha sua comunidade conectada em um unico lugar.
-          </p>
+        <Link className="landing-v2-login" to="/auth/login">
+          Entrar
+        </Link>
+      </header>
 
-          <div className="landing-hero__actions">
-            <Link className="public-button public-button--light" to="/app">
-              Abrir Messly no navegador
-            </Link>
-            <button className="public-button public-button--dark" type="button" disabled>
-              Baixar para Windows (em breve)
-            </button>
-          </div>
-        </div>
+      <section className="landing-v2-hero">
+        <h1 className="landing-v2-hero__title">Converse com qualquer pessoa</h1>
+        <p className="landing-v2-hero__text">
+          Messly e uma plataforma moderna de mensagens e chamadas de voz para conversar com amigos, equipes e
+          comunidades em tempo real.
+        </p>
 
-        <div className="landing-hero__visual" aria-hidden="true">
-          <div className="landing-mock">
-            <div className="landing-mock__bar" />
-            <div className="landing-mock__content">
-              <div className="landing-mock__bubble" />
-              <div className="landing-mock__bubble landing-mock__bubble--small" />
-              <div className="landing-mock__bubble" />
-            </div>
-          </div>
+        <div className="landing-v2-hero__actions">
+          <button className="landing-v2-button landing-v2-button--secondary" type="button" disabled>
+            Baixar para Windows (em breve)
+          </button>
+          <Link className="landing-v2-button landing-v2-button--primary" to="/app">
+            Abrir no navegador
+          </Link>
         </div>
       </section>
     </article>
