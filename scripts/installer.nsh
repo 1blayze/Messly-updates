@@ -8,6 +8,7 @@
 !define MESSLY_INSTALL_ROOT "$LOCALAPPDATA\Messly"
 !define MESSLY_EXECUTABLE_NAME "Messly.exe"
 !define MESSLY_PUBLISHER "Mackstony Labs"
+!define MESSLY_START_MENU_DIR "$SMPROGRAMS\Messly"
 
 !macro preInit
   ; Force per-user install path in LocalAppData root.
@@ -18,6 +19,8 @@
 !macro customInit
   ; Keep installer UI visible so users get immediate feedback.
   SetSilent normal
+  SetDetailsPrint both
+  DetailPrint "Inicializando instalador..."
 !macroend
 
 !ifdef BUILD_UNINSTALLER
@@ -42,30 +45,13 @@ FunctionEnd
 !endif
 
 !macro customInstall
-  DetailPrint "Preparando instalacao..."
+  DetailPrint "Instalando Messly..."
+  DetailPrint "Extraindo arquivos..."
 
   ; Ensure stale app processes are closed before file replacement.
   nsExec::Exec '"$SYSDIR\taskkill.exe" /F /T /IM ${MESSLY_EXECUTABLE_NAME}'
   Pop $0
   Sleep 120
-
-  DetailPrint "Instalando Messly..."
-
-  ; Always ensure Start Menu shortcuts exist for current user installs.
-  CreateDirectory "$SMPROGRAMS\Messly"
-  CreateShortcut "$SMPROGRAMS\Messly\Messly.lnk" "$INSTDIR\${MESSLY_EXECUTABLE_NAME}" "" "$INSTDIR\${MESSLY_EXECUTABLE_NAME}" 0
-  ; Legacy root link for compatibility with existing uninstall cleanup.
-  CreateShortcut "$SMPROGRAMS\Messly.lnk" "$INSTDIR\${MESSLY_EXECUTABLE_NAME}" "" "$INSTDIR\${MESSLY_EXECUTABLE_NAME}" 0
-
-  ; Desktop shortcut remains optional (respects no-desktop-shortcut installs).
-  ${IfNot} ${isNoDesktopShortcut}
-    CreateShortcut "$DESKTOP\Messly.lnk" "$INSTDIR\${MESSLY_EXECUTABLE_NAME}" "" "$INSTDIR\${MESSLY_EXECUTABLE_NAME}" 0
-  ${EndIf}
-
-  IfFileExists "$INSTDIR\Uninstall Messly.exe" 0 +2
-    CreateShortcut "$SMPROGRAMS\Messly\Desinstalar Messly.lnk" "$INSTDIR\Uninstall Messly.exe"
-  IfFileExists "$INSTDIR\uninstall.exe" 0 +2
-    CreateShortcut "$SMPROGRAMS\Messly\Desinstalar Messly.lnk" "$INSTDIR\uninstall.exe"
 
   DetailPrint "Finalizando instalacao..."
   DetailPrint "Instalacao concluida."
@@ -84,7 +70,7 @@ FunctionEnd
   ; Clean shortcuts and uninstall registry key.
   Delete "$DESKTOP\Messly.lnk"
   Delete "$SMPROGRAMS\Messly.lnk"
-  RMDir /r "$SMPROGRAMS\Messly"
+  RMDir /r "${MESSLY_START_MENU_DIR}"
 
   Delete "$INSTDIR\Update.exe"
   DeleteRegKey HKCU "${MESSLY_UNINSTALL_REG_KEY}"

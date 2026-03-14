@@ -214,6 +214,7 @@ const FRIENDS_CACHE_VERSION = 3;
 const CURRENT_USER_ID_CACHE_PREFIX = "messly:current-user-id:";
 const SIDEBAR_CALL_PERSIST_KEY = "messly:sidebar-call-state:v2";
 const SIDEBAR_CALL_RESTORE_MAX_AGE_MS = 15 * 60_000;
+const SHELL_STARTUP_MAX_BLOCK_MS = 4_000;
 
 const PROFILE_SAFE_COLUMNS =
   "id,username,display_name,email,firebase_uid:id,avatar_url,avatar_key,avatar_hash,banner_url,banner_key,banner_hash,banner_color,profile_theme_primary_color,profile_theme_accent_color,bio,about:bio,created_at,updated_at";
@@ -1178,6 +1179,7 @@ export default function AppShell() {
   const [activeDirectMessage, setActiveDirectMessage] = useState<SidebarDirectMessageSelection | null>(null);
   const [sidebarDirectMessages, setSidebarDirectMessages] = useState<SidebarDirectMessageSelection[]>([]);
   const [isSidebarHydrated, setIsSidebarHydrated] = useState(false);
+  const [shellStartupTimedOut, setShellStartupTimedOut] = useState(false);
   const [isInitialShellReady, setIsInitialShellReady] = useState(false);
   const [pendingNotificationConversationId, setPendingNotificationConversationId] = useState<string | null>(() => {
     if (typeof window === "undefined") {
@@ -1217,7 +1219,7 @@ export default function AppShell() {
   }, [sidebarDirectMessages]);
   const isFriendsAndPendingReady =
     !isFriendRequestsAvailable || (hasInitializedFriends && !isFriendsLoading && !isPendingLoading);
-  const canRevealShell = isSidebarHydrated && isFriendsAndPendingReady;
+  const canRevealShell = (isSidebarHydrated && isFriendsAndPendingReady) || shellStartupTimedOut;
   const friendPresenceUserIdsKey = useMemo(
     () =>
       Array.from(
@@ -1452,8 +1454,21 @@ export default function AppShell() {
 
   useEffect(() => {
     setIsSidebarHydrated(false);
+    setShellStartupTimedOut(false);
     setIsInitialShellReady(false);
   }, [currentUserId]);
+
+  useEffect(() => {
+    if (isInitialShellReady || canRevealShell) {
+      return;
+    }
+    const timerId = window.setTimeout(() => {
+      setShellStartupTimedOut(true);
+    }, SHELL_STARTUP_MAX_BLOCK_MS);
+    return () => {
+      window.clearTimeout(timerId);
+    };
+  }, [canRevealShell, isInitialShellReady]);
 
   useEffect(() => {
     if (isInitialShellReady || !canRevealShell) {
@@ -3301,11 +3316,13 @@ export default function AppShell() {
     }
     console.error("[app:pending]", pendingError);
   }, [pendingError]);
-  const shellStartupDetailText = !isSidebarHydrated
-    ? "Carregando conversas"
-    : !isFriendsAndPendingReady
-      ? "Carregando amigos e pendencias"
-      : "Abrindo interface";
+  const shellStartupDetailText = shellStartupTimedOut
+    ? "Abrindo interface enquanto sincroniza dados"
+    : !isSidebarHydrated
+      ? "Carregando conversas"
+      : !isFriendsAndPendingReady
+        ? "Carregando amigos e pendencias"
+        : "Abrindo interface";
   const shellStartupProgress = canRevealShell ? 0.99 : isSidebarHydrated ? 0.9 : 0.82;
 
   return (

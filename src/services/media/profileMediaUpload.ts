@@ -352,8 +352,89 @@ function getSupabaseFunctionsBaseUrl(): string | null {
   return `${supabaseUrl.replace(/\/+$/, "")}/functions/v1`;
 }
 
-function getProfileMediaKey(kind: ProfileMediaKind, userId: string): string {
-  return kind === "avatar" ? `avatars/${userId}.webp` : `banners/${userId}.webp`;
+function isGifProfileMediaFile(file: File): boolean {
+  const mimeType = String(file.type ?? "").trim().toLowerCase();
+  if (mimeType === "image/gif") {
+    return true;
+  }
+
+  return String(file.name ?? "").trim().toLowerCase().endsWith(".gif");
+}
+
+function inferProfileMediaMimeType(file: File): string | null {
+  const declaredType = String(file.type ?? "").trim().toLowerCase();
+  if (declaredType) {
+    return declaredType;
+  }
+
+  const fileName = String(file.name ?? "").trim().toLowerCase();
+  if (fileName.endsWith(".gif")) {
+    return "image/gif";
+  }
+  if (fileName.endsWith(".png")) {
+    return "image/png";
+  }
+  if (fileName.endsWith(".jpg") || fileName.endsWith(".jpeg")) {
+    return "image/jpeg";
+  }
+  if (fileName.endsWith(".webp")) {
+    return "image/webp";
+  }
+  return null;
+}
+
+function withResolvedProfileMediaMimeType(file: File): File {
+  const inferredType = inferProfileMediaMimeType(file);
+  if (!inferredType) {
+    return file;
+  }
+
+  const declaredType = String(file.type ?? "").trim().toLowerCase();
+  if (declaredType === inferredType) {
+    return file;
+  }
+
+  return new File([file], file.name, {
+    type: inferredType,
+    lastModified: Number.isFinite(file.lastModified) ? file.lastModified : Date.now(),
+  });
+}
+
+function getProfileMediaExtension(file: File): string {
+  const mimeType = inferProfileMediaMimeType(file) ?? "";
+  if (mimeType === "image/gif") {
+    return "gif";
+  }
+  if (mimeType === "image/png") {
+    return "png";
+  }
+  if (mimeType === "image/jpeg") {
+    return "jpg";
+  }
+  if (mimeType === "image/webp") {
+    return "webp";
+  }
+
+  const fileName = String(file.name ?? "").trim().toLowerCase();
+  if (fileName.endsWith(".gif")) {
+    return "gif";
+  }
+  if (fileName.endsWith(".png")) {
+    return "png";
+  }
+  if (fileName.endsWith(".jpg") || fileName.endsWith(".jpeg")) {
+    return "jpg";
+  }
+  if (fileName.endsWith(".webp")) {
+    return "webp";
+  }
+
+  return "webp";
+}
+
+function getProfileMediaKey(kind: ProfileMediaKind, userId: string, uploadFile: File): string {
+  const extension = getProfileMediaExtension(uploadFile);
+  return kind === "avatar" ? `avatars/${userId}.${extension}` : `banners/${userId}.${extension}`;
 }
 
 function shouldSkipGatewayMediaFallback(): boolean {
@@ -783,7 +864,7 @@ async function uploadProfileMediaViaOfficialProxy(
 async function uploadProfileMediaViaEdgeFunction(
   kind: ProfileMediaKind,
   userId: string,
-  normalizedFile: File,
+  uploadFile: File,
 ): Promise<UploadProfileMediaResponse | null> {
   // If presign endpoint is absent in the current project, avoid hitting
   // the legacy direct-upload function and producing duplicate 404 noise.
@@ -805,7 +886,7 @@ async function uploadProfileMediaViaEdgeFunction(
     throw new Error("Sessao invalida ou expirada para envio de imagem.");
   }
 
-  const mediaKey = getProfileMediaKey(kind, userId);
+  const mediaKey = getProfileMediaKey(kind, userId, uploadFile);
   const endpoint = `${functionBaseUrl}/r2-upload`;
   logProfileMediaUpload("upload endpoint", {
     transport: "supabase-edge-binary",
@@ -820,9 +901,9 @@ async function uploadProfileMediaViaEdgeFunction(
       ...functionHeaders,
       "x-media-key": mediaKey,
       "x-presign-expires": "300",
-      "content-type": normalizedFile.type || "application/octet-stream",
+      "content-type": uploadFile.type || "application/octet-stream",
     },
-    body: normalizedFile,
+    body: uploadFile,
   });
 
   const parsed = (await response.json().catch(() => null)) as EdgeUploadResponse | null;
@@ -845,8 +926,8 @@ async function uploadProfileMediaViaEdgeFunction(
   }
 
   const returnedKey = String(parsed?.key ?? "").trim() || mediaKey;
-  const sha256 = await hashFile(normalizedFile);
-  const uploadedSize = Number(parsed?.size ?? normalizedFile.size);
+  const sha256 = await hashFile(uploadFile);
+  const uploadedSize = Number(parsed?.size ?? uploadFile.size);
   logProfileMediaUpload("upload response", {
     transport: "supabase-edge-binary",
     kind,
@@ -866,7 +947,7 @@ async function uploadProfileMediaViaEdgeFunction(
   return {
     key: returnedKey,
     hash: sha256,
-    size: Number.isFinite(uploadedSize) ? uploadedSize : normalizedFile.size,
+    size: Number.isFinite(uploadedSize) ? uploadedSize : uploadFile.size,
     strategy: "supabase-edge-binary",
   };
 }
@@ -874,13 +955,13 @@ async function uploadProfileMediaViaEdgeFunction(
 async function uploadProfileMediaViaPresign(
   kind: ProfileMediaKind,
   userId: string,
-  normalizedFile: File,
+  uploadFile: File,
 ): Promise<UploadProfileMediaResponse | null> {
   if (r2PresignFunctionUnavailable) {
     return null;
   }
 
-  const mediaKey = getProfileMediaKey(kind, userId);
+  const mediaKey = getProfileMediaKey(kind, userId, uploadFile);
   let presignResponse: EdgePresignUploadResponse;
   const endpoint = `${getSupabaseFunctionsBaseUrl() ?? "unknown"}/r2-presign`;
 
@@ -907,8 +988,8 @@ async function uploadProfileMediaViaPresign(
       {
         action: "put",
         key: mediaKey,
-        contentType: normalizedFile.type || "application/octet-stream",
-        fileSize: normalizedFile.size,
+        contentType: uploadFile.type || "application/octet-stream",
+        fileSize: uploadFile.size,
         expiresSeconds: 300,
       },
       {
@@ -930,7 +1011,7 @@ async function uploadProfileMediaViaPresign(
     throw new Error("Falha ao obter URL de upload de imagem de perfil.");
   }
 
-  const contentType = String(presignResponse?.contentType ?? normalizedFile.type ?? "application/octet-stream").trim()
+  const contentType = String(presignResponse?.contentType ?? uploadFile.type ?? "application/octet-stream").trim()
     || "application/octet-stream";
 
   logProfileMediaUpload("upload start", {
@@ -940,13 +1021,13 @@ async function uploadProfileMediaViaPresign(
     endpoint: uploadUrl,
     method: "PUT",
     contentType,
-    fileSize: normalizedFile.size,
+    fileSize: uploadFile.size,
   });
 
   try {
     await uploadWithRetry({
       url: uploadUrl,
-      file: normalizedFile,
+      file: uploadFile,
       contentType,
       retries: 1,
       timeoutMs: 60_000,
@@ -963,14 +1044,14 @@ async function uploadProfileMediaViaPresign(
   }
 
   const returnedKey = String(presignResponse?.key ?? "").trim() || mediaKey;
-  const sha256 = await hashFile(normalizedFile);
+  const sha256 = await hashFile(uploadFile);
   logProfileMediaUpload("upload response", {
     transport: "supabase-presign",
     kind,
     userId,
     endpoint: uploadUrl,
     key: returnedKey,
-    size: normalizedFile.size,
+    size: uploadFile.size,
   });
   logProfileMediaUpload("upload final strategy", {
     transport: "supabase-presign",
@@ -982,7 +1063,7 @@ async function uploadProfileMediaViaPresign(
   return {
     key: returnedKey,
     hash: sha256,
-    size: normalizedFile.size,
+    size: uploadFile.size,
     strategy: "supabase-presign-direct",
   };
 }
@@ -993,20 +1074,21 @@ export async function uploadProfileMediaAsset(
   file: File,
 ): Promise<UploadProfileMediaResponse> {
   const isDesktopRuntime = typeof window !== "undefined" && Boolean(window.electronAPI);
-  ensureLocalConstraints(kind, file);
+  const resolvedFile = withResolvedProfileMediaMimeType(file);
+  ensureLocalConstraints(kind, resolvedFile);
   logProfileMediaUpload("upload start", {
     transport: isDesktopRuntime ? "desktop" : "web",
     kind,
     userId,
-    fileName: file.name,
-    fileSize: file.size,
-    mimeType: file.type,
+    fileName: resolvedFile.name,
+    fileSize: resolvedFile.size,
+    mimeType: resolvedFile.type,
   });
 
   if (isDesktopRuntime) {
     const electronUploadApi = window.electronAPI?.uploadProfileMedia;
     if (electronUploadApi) {
-      const electronUpload = await uploadProfileMediaViaElectron(kind, userId, file);
+      const electronUpload = await uploadProfileMediaViaElectron(kind, userId, resolvedFile);
       if (electronUpload) {
         return electronUpload;
       }
@@ -1020,13 +1102,16 @@ export async function uploadProfileMediaAsset(
       reason: "electron handler unavailable or returned fallback",
     }, "warn");
 
-    return uploadProfileMediaViaOfficialProxy(kind, userId, file);
+    return uploadProfileMediaViaOfficialProxy(kind, userId, resolvedFile);
   }
 
-  const normalizedFile = await normalizeProfileMedia(kind, file, userId);
+  const uploadFile =
+    isGifProfileMediaFile(resolvedFile)
+      ? resolvedFile
+      : await normalizeProfileMedia(kind, resolvedFile, userId);
 
   try {
-    return await uploadProfileMediaViaOfficialProxy(kind, userId, normalizedFile);
+    return await uploadProfileMediaViaOfficialProxy(kind, userId, uploadFile);
   } catch (proxyError) {
     logProfileMediaUpload("upload fallback selected", {
       transport: "web",
@@ -1039,7 +1124,7 @@ export async function uploadProfileMediaAsset(
   }
 
   try {
-    const presignUpload = await uploadProfileMediaViaPresign(kind, userId, normalizedFile);
+    const presignUpload = await uploadProfileMediaViaPresign(kind, userId, uploadFile);
     if (presignUpload) {
       return presignUpload;
     }
@@ -1063,7 +1148,7 @@ export async function uploadProfileMediaAsset(
     }, "warn");
   }
 
-  const edgeUpload = await uploadProfileMediaViaEdgeFunction(kind, userId, normalizedFile);
+  const edgeUpload = await uploadProfileMediaViaEdgeFunction(kind, userId, uploadFile);
   if (edgeUpload) {
     return edgeUpload;
   }
@@ -1085,7 +1170,7 @@ export async function uploadProfileMediaAsset(
     });
     const uploaded = await uploadMediaAsset({
       kind,
-      file: normalizedFile,
+      file: uploadFile,
     });
 
     logProfileMediaUpload("upload response", {
@@ -1093,7 +1178,7 @@ export async function uploadProfileMediaAsset(
       kind,
       userId,
       key: uploaded.fileKey,
-      size: normalizedFile.size,
+      size: uploadFile.size,
     });
     logProfileMediaUpload("upload final strategy", {
       transport: "managed-media-api",
@@ -1104,7 +1189,7 @@ export async function uploadProfileMediaAsset(
     return {
       key: uploaded.fileKey,
       hash: uploaded.sha256,
-      size: normalizedFile.size,
+      size: uploadFile.size,
       strategy: "managed-media-api",
     };
   }

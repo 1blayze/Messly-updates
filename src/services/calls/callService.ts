@@ -94,6 +94,8 @@ interface VoiceFrame<T = unknown> {
 const SIGNAL_VERSION = 2;
 const DEFAULT_SCREEN_SHARE_QUALITY = "1080p60";
 const VOICE_REQUEST_TIMEOUT_MS = 10_000;
+const VOICE_SOCKET_OPEN_TIMEOUT_MS = 8_000;
+const VOICE_ENDPOINT_PROBE_TIMEOUT_MS = 3_500;
 const RECONNECT_BASE_DELAY_MS = 500;
 const RECONNECT_MAX_DELAY_MS = 8_000;
 const DEFAULT_AUDIO: NormalizedAudioSettings = {
@@ -135,23 +137,108 @@ function toId(value: unknown): string {
   return String(value ?? "").trim();
 }
 
+function normalizeVoiceSocketUrl(valueRaw: string | null | undefined): string | null {
+  const value = String(valueRaw ?? "").trim();
+  if (!value) {
+    return null;
+  }
+
+  const candidate = /^[a-z][a-z0-9+\-.]*:\/\//i.test(value) ? value : `wss://${value}`;
+  try {
+    const parsed = new URL(candidate);
+    if (parsed.protocol === "http:") {
+      parsed.protocol = "ws:";
+    } else if (parsed.protocol === "https:") {
+      parsed.protocol = "wss:";
+    }
+    if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
+      return null;
+    }
+
+    parsed.search = "";
+    parsed.hash = "";
+    const trimmedPath = parsed.pathname.replace(/\/+$/, "");
+    if (!trimmedPath || trimmedPath === "/" || trimmedPath === "/gateway") {
+      parsed.pathname = "/voice";
+    } else {
+      parsed.pathname = trimmedPath.startsWith("/") ? trimmedPath : `/${trimmedPath}`;
+    }
+
+    return parsed.toString().replace(/\/+$/, "");
+  } catch {
+    return null;
+  }
+}
+
 function resolveVoiceUrl(): string | null {
-  const explicit = String(import.meta.env.VITE_MESSLY_VOICE_URL ?? "").trim();
+  const explicit = normalizeVoiceSocketUrl(import.meta.env.VITE_MESSLY_VOICE_URL);
   if (explicit) {
     return explicit;
   }
-  const gateway = String(getGatewayUrl() ?? "").trim();
-  if (!gateway) {
-    return null;
-  }
+  return normalizeVoiceSocketUrl(getGatewayUrl());
+}
+
+function toVoiceProbeHttpUrl(voiceUrlRaw: string): string | null {
   try {
-    const parsed = new URL(gateway);
-    parsed.pathname = "/voice";
+    const parsed = new URL(voiceUrlRaw);
+    parsed.protocol = parsed.protocol === "wss:" ? "https:" : "http:";
     parsed.search = "";
     parsed.hash = "";
     return parsed.toString();
   } catch {
     return null;
+  }
+}
+
+type VoiceEndpointProbeResult = "supported" | "unsupported" | "unknown";
+
+async function probeVoiceEndpoint(voiceUrl: string): Promise<VoiceEndpointProbeResult> {
+  if (typeof window === "undefined" || typeof window.fetch !== "function") {
+    return "unknown";
+  }
+
+  const probeUrl = toVoiceProbeHttpUrl(voiceUrl);
+  if (!probeUrl) {
+    return "unknown";
+  }
+
+  const abortController = typeof AbortController === "function" ? new AbortController() : null;
+  const timeoutId = window.setTimeout(() => {
+    abortController?.abort();
+  }, VOICE_ENDPOINT_PROBE_TIMEOUT_MS);
+
+  try {
+    const response = await window.fetch(probeUrl, {
+      method: "GET",
+      cache: "no-store",
+      signal: abortController?.signal,
+    });
+    if (response.status === 426) {
+      return "supported";
+    }
+    if (response.status === 404 || response.status === 405) {
+      return "unsupported";
+    }
+    if (!response.ok) {
+      return "unknown";
+    }
+
+    const contentType = String(response.headers.get("content-type") ?? "").toLowerCase();
+    if (!contentType.includes("application/json")) {
+      return "unknown";
+    }
+    const payload = (await response.text().catch(() => "")).toLowerCase();
+    if (payload.includes("\"service\":\"messly-gateway\"") || payload.includes("\"service\": \"messly-gateway\"")) {
+      return "unsupported";
+    }
+    if (payload.includes("use websocket upgrade for /voice")) {
+      return "supported";
+    }
+    return "unknown";
+  } catch {
+    return "unknown";
+  } finally {
+    window.clearTimeout(timeoutId);
   }
 }
 
@@ -723,17 +810,32 @@ export class CallService {
     if (!this.voiceUrl) {
       throw new Error("Servidor de voz nao configurado.");
     }
+
+    const endpointSupport = await probeVoiceEndpoint(this.voiceUrl);
+    if (endpointSupport === "unsupported") {
+      throw new Error("Servidor de voz indisponivel no gateway atual. Atualize o backend para habilitar WS /voice.");
+    }
+
     await new Promise<void>((resolve, reject) => {
       const socket = new WebSocket(this.voiceUrl as string);
       this.socket = socket;
       let opened = false;
       let settled = false;
+      const openTimeoutId = setTimeout(() => {
+        try {
+          socket.close(1000, "VOICE_CONNECT_TIMEOUT");
+        } catch {
+          // best effort
+        }
+        settle(() => reject(new Error("Tempo limite ao conectar no servidor de voz.")));
+      }, VOICE_SOCKET_OPEN_TIMEOUT_MS);
 
       const settle = (fn: () => void): void => {
         if (settled) {
           return;
         }
         settled = true;
+        clearTimeout(openTimeoutId);
         fn();
       };
 
@@ -745,7 +847,7 @@ export class CallService {
         settle(() => reject(new Error("Falha ao conectar no servidor de voz.")));
       }, { once: true });
       socket.addEventListener("message", (event) => this.onSocketMessage(String(event.data ?? "")));
-      socket.addEventListener("close", () => {
+      socket.addEventListener("close", (event) => {
         const wasManual = this.manualCloseSockets.has(socket);
         this.manualCloseSockets.delete(socket);
         if (this.socket === socket) {
@@ -753,7 +855,12 @@ export class CallService {
         }
         this.rejectPendingReply(new Error("Socket de voz fechado."));
         if (!opened) {
-          settle(() => reject(new Error("Conexao de voz encerrada antes de abrir.")));
+          const closeCode = Number(event.code);
+          const closeReason = String(event.reason ?? "").trim();
+          const closeLabel = Number.isFinite(closeCode) && closeCode > 0
+            ? `codigo ${closeCode}${closeReason ? `: ${closeReason}` : ""}`
+            : "erro de handshake";
+          settle(() => reject(new Error(`Conexao de voz encerrada antes de abrir (${closeLabel}).`)));
           return;
         }
         if (!this.disposed) {

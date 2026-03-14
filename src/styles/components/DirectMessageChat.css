@@ -107,18 +107,7 @@
 }
 
 .dm-chat__profile-banner-wrap--image::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(
-    180deg,
-    transparent 0%,
-    color-mix(in srgb, var(--dm-chat-profile-panel-bg, var(--dm-chat-profile-bg)) 10%, transparent) 52%,
-    color-mix(in srgb, var(--dm-chat-profile-panel-bg, var(--dm-chat-profile-bg)) 42%, transparent) 76%,
-    var(--dm-chat-profile-panel-bg, var(--dm-chat-profile-bg)) 100%
-  );
-  pointer-events: none;
-  z-index: 2;
+  content: none;
 }
 
 .dm-chat__profile-banner-wrap--separator::before {
@@ -160,21 +149,7 @@
 }
 
 .dm-chat__profile-content--banner-image::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 0;
-  height: 30px;
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--dm-chat-profile-panel-bg, var(--dm-chat-profile-bg)) 96%, transparent) 0%,
-    color-mix(in srgb, var(--dm-chat-profile-panel-bg, var(--dm-chat-profile-bg)) 50%, transparent) 58%,
-    transparent 100%
-  );
-  box-shadow: inset 0 18px 22px -22px color-mix(in srgb, var(--profile-overlay) 52%, transparent);
-  pointer-events: none;
-  z-index: 0;
+  content: none;
 }
 
 .dm-chat__profile-avatar-wrap {
@@ -1435,7 +1410,14 @@
 .dm-chat__message-item:focus-within {
   background: rgba(255, 255, 255, 0.03);
   z-index: 24;
+  content-visibility: visible;
   contain: layout style;
+}
+
+.dm-chat__message-item:has(.dm-chat__message-actions:hover),
+.dm-chat__message-item:has(.dm-chat__message-actions:focus-within) {
+  z-index: 24;
+  content-visibility: visible;
 }
 
 .dm-chat__message-actions {
@@ -1454,7 +1436,7 @@
   pointer-events: none;
   transition: opacity 120ms ease, transform 120ms ease;
   backdrop-filter: blur(6px);
-  z-index: 320;
+  z-index: 340;
   isolation: isolate;
 }
 

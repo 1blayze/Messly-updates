@@ -1,0 +1,29 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.5.2.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "installer", "installer", "{1860D2E4-5C43-71D5-59A5-599A4DE1DF67}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MesslyLauncherHost", "installer\MesslyLauncherHost\MesslyLauncherHost.csproj", "{F9F433F0-5CA9-8E01-F27F-766FED74CEAA}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{F9F433F0-5CA9-8E01-F27F-766FED74CEAA}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F9F433F0-5CA9-8E01-F27F-766FED74CEAA}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F9F433F0-5CA9-8E01-F27F-766FED74CEAA}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F9F433F0-5CA9-8E01-F27F-766FED74CEAA}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{F9F433F0-5CA9-8E01-F27F-766FED74CEAA} = {1860D2E4-5C43-71D5-59A5-599A4DE1DF67}
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {E7AC47C4-8158-4691-A18B-10FCC8A68758}
+	EndGlobalSection
+EndGlobal

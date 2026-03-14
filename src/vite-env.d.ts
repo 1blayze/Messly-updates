@@ -260,6 +260,7 @@ interface AppUpdaterState {
   assetName: string | null;
   downloadedBytes: number;
   totalBytes: number;
+  bytesPerSecond?: number;
   progressPercent: number;
   lastCheckedAt: string | null;
   errorMessage: string | null;

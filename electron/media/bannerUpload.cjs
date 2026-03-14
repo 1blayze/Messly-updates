@@ -2,11 +2,12 @@ const crypto = require("node:crypto");
 const sharp = require("sharp");
 const {
   BANNER_ALLOWED_TYPES,
+  BANNER_GIF_MAX_FRAMES,
   BANNER_MAX_BYTES,
   BANNER_TARGET_HEIGHT,
   BANNER_TARGET_WIDTH,
 } = require("./imageLimits.cjs");
-const { detectImageTypeByMagic } = require("./imageSniff.cjs");
+const { detectImageTypeByMagic, readGifMetadata } = require("./imageSniff.cjs");
 const { createMediaUploadError } = require("./uploadErrors.cjs");
 
 const IMAGE_MAX_INPUT_PIXELS = 48e6;
@@ -23,6 +24,35 @@ function assertBannerByteLimit(buffer) {
   }
 }
 
+function processGifBanner(buffer) {
+  const gifMetadata = readGifMetadata(buffer);
+  if (!gifMetadata) {
+    throw createMediaUploadError("INVALID_IMAGE", {
+      allowedTypes: [...BANNER_ALLOWED_TYPES],
+    });
+  }
+
+  if (gifMetadata.frames < 1) {
+    throw createMediaUploadError("INVALID_IMAGE", {
+      allowedTypes: [...BANNER_ALLOWED_TYPES],
+    });
+  }
+
+  if (gifMetadata.frames > BANNER_GIF_MAX_FRAMES) {
+    throw createMediaUploadError("GIF_TOO_MANY_FRAMES", {
+      maxFrames: BANNER_GIF_MAX_FRAMES,
+    });
+  }
+
+  return {
+    buffer,
+    contentType: "image/gif",
+    ext: "gif",
+    hash: getHash(buffer),
+    size: buffer.length,
+  };
+}
+
 async function processBannerUpload(buffer) {
   assertBannerByteLimit(buffer);
 
@@ -37,6 +67,10 @@ async function processBannerUpload(buffer) {
     throw createMediaUploadError("UNSUPPORTED_TYPE", {
       allowedTypes: [...BANNER_ALLOWED_TYPES],
     });
+  }
+
+  if (detectedType.mime === "image/gif") {
+    return processGifBanner(buffer);
   }
 
   let metadata;

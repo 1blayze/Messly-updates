@@ -7,6 +7,7 @@ interface ImageEditControlsProps {
   max?: number;
   step?: number;
   disabled?: boolean;
+  infoMessage?: string | null;
   errorMessage?: string | null;
   onZoomChange: (value: number) => void;
   onReset: () => void;
@@ -19,6 +20,7 @@ export default function ImageEditControls({
   max = 2.5,
   step = 0.05,
   disabled = false,
+  infoMessage,
   errorMessage,
   onZoomChange,
   onReset,
@@ -50,6 +52,7 @@ export default function ImageEditControls({
         </button>
       </div>
 
+      {infoMessage ? <p className={styles.hint}>{infoMessage}</p> : null}
       {errorMessage ? <p className={styles.error}>{errorMessage}</p> : null}
     </>
   );

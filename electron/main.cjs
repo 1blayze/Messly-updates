@@ -1,6 +1,7 @@
 ﻿const fs = require("node:fs");
 const path = require("node:path");
 const { performance } = require("node:perf_hooks");
+const { pathToFileURL } = require("node:url");
 const dotenv = require("dotenv");
 
 dotenv.config({
@@ -18,7 +19,6 @@ const { app, BrowserWindow, BrowserView, Tray, desktopCapturer, ipcMain, Menu, s
 const { APP_ID, APP_NAME, WINDOWS_APP_USER_MODEL_ID } = require("./config/appIdentity.cjs");
 const { getBackendEnv } = require("./config/env.cjs");
 const { createMediaUploadError, isMediaUploadError } = require("./media/uploadErrors.cjs");
-const { createAppUpdater } = require("./update/appUpdater.cjs");
 const { createElectronUpdaterAdapter } = require("./update/electronUpdaterAdapter.cjs");
 const { createNotificationManager } = require("./notifications/notificationManager.cjs");
 const { NotificationNavigationCoordinator } = require("./notifications/notificationNavigationCoordinator.cjs");
@@ -64,18 +64,15 @@ const APP_STARTUP_BACKGROUND_COLOR = "#111314";
 const SPOTIFY_OAUTH_CALLBACK_CHANNEL = "spotify:oauth-callback";
 const MESSLY_PROTOCOL_SCHEME = "messly";
 const SPOTIFY_CALLBACK_HOST = "callback";
-const APP_ICONS_DIR = path.resolve(__dirname, "..", "src", "assets", "icons", "app");
-const APP_NOTIFICATION_ICON_ICO_PATH = path.resolve(__dirname, "..", "assets", "icons", "messly.ico");
+const ELECTRON_ASSETS_DIR = path.resolve(__dirname, "assets");
+const ELECTRON_ICONS_DIR = path.join(ELECTRON_ASSETS_DIR, "icons");
+const APP_ICONS_DIR = path.join(ELECTRON_ICONS_DIR, "app");
+const APP_NOTIFICATION_ICON_ICO_PATH = path.join(ELECTRON_ICONS_DIR, "messly.ico");
 const APP_NOTIFICATION_ICON_PNG_PATH = path.resolve(
-  __dirname,
-  "..",
-  "src",
-  "assets",
-  "icons",
-  "app",
+  APP_ICONS_DIR,
   "messly-notification.png",
 );
-const STATUS_PANEL_MASCOT_PATH = path.resolve(__dirname, "..", "src", "assets", "icons", "ui", "messly.svg");
+const STATUS_PANEL_MASCOT_PATH = path.join(ELECTRON_ICONS_DIR, "ui", "messly.svg");
 const WINDOWS_BEHAVIOR_SETTINGS_FILE = "windows-behavior-settings.json";
 const HIDDEN_DIRECT_MESSAGES_STATE_FILE = "hidden-direct-messages-state.json";
 const SECURE_AUTH_STORAGE_FILE = "secure-auth-storage.json";
@@ -132,10 +129,10 @@ const STATUS_PANEL_ENABLED = (() => {
   if (rawValue) {
     return !["0", "false", "off", "no"].includes(rawValue);
   }
-  // Disabled by default to avoid startup UI churn on first launch after install.
-  return false;
+  // Enabled by default in packaged builds to guarantee pre-launch update visibility.
+  return app.isPackaged;
 })();
-const STATUS_PANEL_PROGRESS_BYTES_VISIBILITY_THRESHOLD = 12 * 1024 * 1024;
+const STATUS_PANEL_PROGRESS_BYTES_VISIBILITY_THRESHOLD = 0;
 const STATUS_PANEL_PHASE = Object.freeze({
   IDLE: "idle",
   CHECKING: "checking",
@@ -152,7 +149,7 @@ const STATUS_PANEL_PHASE = Object.freeze({
 });
 const STATUS_PANEL_COPY_PT_BR = Object.freeze({
   [STATUS_PANEL_PHASE.CHECKING]: Object.freeze({
-    title: "Verificando atualizações",
+    title: "Verificando atualizações...",
     subtitle: "Preparando aplicativo",
     showProgressBar: true,
     showProgress: false,
@@ -160,7 +157,7 @@ const STATUS_PANEL_COPY_PT_BR = Object.freeze({
     progressPercent: 22,
   }),
   [STATUS_PANEL_PHASE.UPDATE_AVAILABLE]: Object.freeze({
-    title: "Atualização disponível",
+    title: "Nova atualização encontrada",
     subtitle: "Preparando download",
     showProgressBar: true,
     showProgress: false,
@@ -169,31 +166,31 @@ const STATUS_PANEL_COPY_PT_BR = Object.freeze({
   }),
   [STATUS_PANEL_PHASE.DOWNLOADING]: Object.freeze({
     title: "Baixando atualização",
-    subtitle: "Preparando arquivos",
+    subtitle: "Baixando pacote de atualização",
     showProgressBar: true,
     showProgress: true,
     indeterminate: false,
     progressPercent: 4,
   }),
   [STATUS_PANEL_PHASE.APPLYING]: Object.freeze({
-    title: "Aplicando atualização",
-    subtitle: "Quase pronto",
+    title: "Preparando atualização",
+    subtitle: "Organizando arquivos para instalação",
     showProgressBar: true,
     showProgress: false,
     indeterminate: true,
     progressPercent: 94,
   }),
   [STATUS_PANEL_PHASE.INSTALLING]: Object.freeze({
-    title: "Instalando Messly",
-    subtitle: "Preparando arquivos",
+    title: "Instalando atualização",
+    subtitle: "Não feche o aplicativo",
     showProgressBar: true,
     showProgress: false,
     indeterminate: true,
     progressPercent: 96,
   }),
   [STATUS_PANEL_PHASE.RELAUNCHING]: Object.freeze({
-    title: "Iniciando Messly",
-    subtitle: "Quase pronto",
+    title: "Atualização concluída",
+    subtitle: "Reiniciando aplicativo",
     showProgressBar: true,
     showProgress: false,
     indeterminate: true,
@@ -224,8 +221,8 @@ const STATUS_PANEL_COPY_PT_BR = Object.freeze({
     progressPercent: 100,
   }),
   [STATUS_PANEL_PHASE.FAILED]: Object.freeze({
-    title: "Não foi possível concluir a atualização",
-    subtitle: "Tente novamente",
+    title: "Falha ao atualizar",
+    subtitle: "Tentando novamente",
     showProgressBar: true,
     showProgress: false,
     indeterminate: false,
@@ -254,9 +251,55 @@ const STATUS_PANEL_MIN_VISIBLE_MS = Object.freeze({
   [STATUS_PANEL_PHASE.RETRYING]: 520,
 });
 const MAIN_WINDOW_FIRST_FRAME_TIMEOUT_MS = 12_000;
-const STARTUP_AUTO_UPDATE_BLOCK_TIMEOUT_MS = 8_000;
-const BLOCK_MAIN_WINDOW_ON_STARTUP_UPDATE = readBooleanEnvFlag(process.env.AUTO_UPDATE_BLOCK_STARTUP, false);
-const STARTUP_STATUS_PANEL_HARD_TIMEOUT_MS = 16_000;
+const STARTUP_AUTO_UPDATE_BLOCK_TIMEOUT_MS = readBoundedIntegerEnv(
+  process.env.AUTO_UPDATE_BLOCK_TIMEOUT_MS,
+  app.isPackaged ? 12_000 : 8_000,
+  5_000,
+  180_000,
+);
+const BLOCK_MAIN_WINDOW_ON_STARTUP_UPDATE = readBooleanEnvFlag(process.env.AUTO_UPDATE_BLOCK_STARTUP, app.isPackaged);
+const STARTUP_STATUS_PANEL_HARD_TIMEOUT_MS = readBoundedIntegerEnv(
+  process.env.AUTO_UPDATE_STATUS_PANEL_TIMEOUT_MS,
+  app.isPackaged ? 24_000 : 16_000,
+  12_000,
+  180_000,
+);
+const STARTUP_AUTO_UPDATE_CHECK_RETRY_MAX = readBoundedIntegerEnv(
+  process.env.AUTO_UPDATE_STARTUP_CHECK_RETRIES,
+  3,
+  1,
+  6,
+);
+const STARTUP_AUTO_UPDATE_DOWNLOAD_RETRY_MAX = readBoundedIntegerEnv(
+  process.env.AUTO_UPDATE_STARTUP_DOWNLOAD_RETRIES,
+  3,
+  1,
+  6,
+);
+const STARTUP_AUTO_UPDATE_RETRY_BASE_DELAY_MS = readBoundedIntegerEnv(
+  process.env.AUTO_UPDATE_STARTUP_RETRY_BASE_DELAY_MS,
+  1_600,
+  250,
+  20_000,
+);
+const STARTUP_AUTO_UPDATE_RETRY_MAX_DELAY_MS = readBoundedIntegerEnv(
+  process.env.AUTO_UPDATE_STARTUP_RETRY_MAX_DELAY_MS,
+  10_000,
+  800,
+  60_000,
+);
+const STARTUP_AUTO_UPDATE_CHECK_STEP_TIMEOUT_MS = readBoundedIntegerEnv(
+  process.env.AUTO_UPDATE_STARTUP_CHECK_STEP_TIMEOUT_MS,
+  app.isPackaged ? 10_000 : 4_500,
+  3_000,
+  120_000,
+);
+const STARTUP_AUTO_UPDATE_DOWNLOAD_STEP_TIMEOUT_MS = readBoundedIntegerEnv(
+  process.env.AUTO_UPDATE_STARTUP_DOWNLOAD_STEP_TIMEOUT_MS,
+  app.isPackaged ? 18_000 : 7_500,
+  3_500,
+  240_000,
+);
 const RENDERER_BOOTSTRAP_MAX_RETRIES = 3;
 const RENDERER_BOOTSTRAP_RETRY_DELAYS_MS = Object.freeze([700, 1400, 2600]);
 const RENDERER_BOOTSTRAP_ABORT_CODE = -3;
@@ -293,17 +336,38 @@ const DEFAULT_PUBLIC_WEB_ORIGIN = "https://messly.site";
 const DEFAULT_PUBLIC_API_BASE_URL = "https://gateway.messly.site";
 const DEFAULT_PUBLIC_GATEWAY_URL = "wss://gateway.messly.site/gateway";
 const REQUIRED_PRODUCTION_RENDERER_URL = "https://messly.site/";
+const BUNDLED_RENDERER_INDEX_RELATIVE_PATH = path.join("dist", "index.html");
+const STARTUP_DIAGNOSTICS_FILE = "startup-diagnostics.log";
+const STARTUP_DIAGNOSTICS_MAX_BYTES = 2 * 1024 * 1024;
 
 function resolveAppIconPath(fileName) {
   const iconPath = path.join(APP_ICONS_DIR, fileName);
   return fs.existsSync(iconPath) ? iconPath : undefined;
 }
 
+function resolvePackagedElectronIconPath(fileName) {
+  const candidates = [
+    process.resourcesPath ? path.join(process.resourcesPath, "app.asar", "electron", "assets", "icons", fileName) : "",
+    process.resourcesPath ? path.join(process.resourcesPath, "electron", "assets", "icons", fileName) : "",
+    process.resourcesPath ? path.join(process.resourcesPath, "assets", "icons", fileName) : "",
+  ]
+    .map((candidate) => String(candidate ?? "").trim())
+    .filter(Boolean);
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return "";
+}
+
 function resolveWindowsIcoPath() {
+  const packagedIcoPath = resolvePackagedElectronIconPath("messly.ico");
   const candidates = [
     APP_NOTIFICATION_ICON_ICO_PATH,
-    process.resourcesPath ? path.join(process.resourcesPath, "assets", "icons", "messly.ico") : "",
-    process.resourcesPath ? path.join(process.resourcesPath, "app.asar", "assets", "icons", "messly.ico") : "",
+    packagedIcoPath,
   ]
     .map((candidate) => String(candidate ?? "").trim())
     .filter(Boolean);
@@ -369,18 +433,185 @@ let embeddedDevToolsHostViewRef = null;
 let notificationIconImageCache = undefined;
 let startupAutoUpdatePromise = null;
 let updaterAutoInstallInFlight = false;
+let updaterInstallGuardActive = false;
 let windowsHiddenForUpdateFlow = false;
 let windowsFirewallBootstrapPromise = null;
 let updaterBroadcastThrottleTimer = null;
 let updaterBroadcastQueuedState = null;
 let updaterBroadcastLastAtMs = 0;
 let startupUpdaterBlockTimedOut = false;
+let startupAutoUpdateGateExpired = false;
 let startupStatusPanelLifecycleActive = false;
 let startupStatusPanelHardStopTimer = null;
+let startupDiagnosticsLogPathCache = null;
 const ephemeralSecureAuthStorage = new Map();
 const hardenedWebContents = new WeakSet();
 const hardenedSessions = new WeakSet();
 const startupPerfMarks = new Map();
+
+function normalizeStartupDiagnosticDetails(rawDetails) {
+  const sourceDetails =
+    rawDetails && typeof rawDetails === "object" && !Array.isArray(rawDetails)
+      ? rawDetails
+      : { value: rawDetails ?? null };
+  const seen = new WeakSet();
+  try {
+    const encoded = JSON.stringify(sourceDetails, (_key, value) => {
+      if (value instanceof Error) {
+        return {
+          name: value.name,
+          message: value.message,
+          stack: value.stack,
+        };
+      }
+      if (typeof value === "bigint") {
+        return value.toString();
+      }
+      if (typeof value === "function") {
+        return `[function:${value.name || "anonymous"}]`;
+      }
+      if (value && typeof value === "object") {
+        if (seen.has(value)) {
+          return "[circular]";
+        }
+        seen.add(value);
+      }
+      return value;
+    });
+    if (!encoded) {
+      return {};
+    }
+    const parsed = JSON.parse(encoded);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return { serializationFailed: true };
+  }
+}
+
+function resolveStartupDiagnosticsLogPath() {
+  if (startupDiagnosticsLogPathCache) {
+    return startupDiagnosticsLogPathCache;
+  }
+
+  try {
+    const userDataPath = app.getPath("userData");
+    if (!userDataPath) {
+      return null;
+    }
+    startupDiagnosticsLogPathCache = path.join(userDataPath, STARTUP_DIAGNOSTICS_FILE);
+    return startupDiagnosticsLogPathCache;
+  } catch {
+    return null;
+  }
+}
+
+function appendStartupDiagnosticLogEntry(entry) {
+  const logPath = resolveStartupDiagnosticsLogPath();
+  if (!logPath) {
+    return;
+  }
+
+  try {
+    fs.mkdirSync(path.dirname(logPath), { recursive: true });
+    if (fs.existsSync(logPath)) {
+      const stats = fs.statSync(logPath);
+      if (Number(stats?.size ?? 0) >= STARTUP_DIAGNOSTICS_MAX_BYTES) {
+        const backupPath = `${logPath}.previous`;
+        try {
+          if (fs.existsSync(backupPath)) {
+            fs.unlinkSync(backupPath);
+          }
+        } catch {}
+        try {
+          fs.renameSync(logPath, backupPath);
+        } catch {}
+      }
+    }
+    fs.appendFileSync(logPath, `${JSON.stringify(entry)}\n`, "utf8");
+  } catch {}
+}
+
+function isBrokenPipeStartupError(error) {
+  const code = String(error?.code ?? "").toUpperCase();
+  if (code === "EPIPE") {
+    return true;
+  }
+  const message = String(error?.message ?? "");
+  return /broken pipe/i.test(message);
+}
+
+function safeStartupConsoleWrite(level, line, details) {
+  const targetLevel = String(level ?? "").trim().toLowerCase();
+  const targetMethod =
+    targetLevel === "debug" || targetLevel === "warn" || targetLevel === "error" || targetLevel === "info"
+      ? targetLevel
+      : "info";
+
+  try {
+    if (typeof console?.[targetMethod] === "function") {
+      console[targetMethod](line, details);
+      return;
+    }
+    console.info(line, details);
+  } catch (error) {
+    if (isBrokenPipeStartupError(error)) {
+      return;
+    }
+    try {
+      appendStartupDiagnosticLogEntry({
+        at: new Date().toISOString(),
+        pid: process.pid,
+        level: "warn",
+        event: "startup-console-write-failed",
+        details: {
+          requestedLevel: targetMethod,
+          error: String(error?.message ?? error),
+        },
+      });
+    } catch {}
+  }
+}
+
+function installConsoleBrokenPipeGuard() {
+  const guardedMethods = ["log", "debug", "info", "warn", "error"];
+  for (const methodName of guardedMethods) {
+    const originalMethod = console?.[methodName];
+    if (typeof originalMethod !== "function") {
+      continue;
+    }
+    console[methodName] = (...args) => {
+      try {
+        return originalMethod.apply(console, args);
+      } catch (error) {
+        if (isBrokenPipeStartupError(error)) {
+          return undefined;
+        }
+        throw error;
+      }
+    };
+  }
+}
+
+installConsoleBrokenPipeGuard();
+
+function logStartupDiagnostic(event, details = {}, level = "info") {
+  const normalizedEvent = String(event ?? "").trim() || "unknown";
+  const normalizedLevel = ["debug", "info", "warn", "error"].includes(String(level ?? "").trim().toLowerCase())
+    ? String(level).trim().toLowerCase()
+    : "info";
+  const safeDetails = normalizeStartupDiagnosticDetails(details);
+  const line = `[startup:${normalizedEvent}]`;
+
+  safeStartupConsoleWrite(normalizedLevel, line, safeDetails);
+
+  appendStartupDiagnosticLogEntry({
+    at: new Date().toISOString(),
+    pid: process.pid,
+    level: normalizedLevel,
+    event: normalizedEvent,
+    details: safeDetails,
+  });
+}
 
 function markMainStartupPerf(markName, details = {}) {
   const normalizedMark = String(markName ?? "").trim();
@@ -394,6 +625,10 @@ function markMainStartupPerf(markName, details = {}) {
     atMs,
     details: details && typeof details === "object" ? { ...details } : {},
   });
+  logStartupDiagnostic(`mark:${normalizedMark}`, {
+    atMs,
+    ...details,
+  }, "debug");
 
   if (isDevEnvironment) {
     console.debug(`[electron:startup] mark:${normalizedMark}`, {
@@ -412,6 +647,12 @@ function measureMainStartupPerf(label, startMark, endMark, details = {}) {
   }
 
   const durationMs = Number(Math.max(0, end.atMs - start.atMs).toFixed(2));
+  logStartupDiagnostic(`measure:${normalizedLabel}`, {
+    durationMs,
+    startMark: start.name,
+    endMark: end.name,
+    ...details,
+  }, "debug");
   if (isDevEnvironment) {
     console.debug(`[electron:startup] measure:${normalizedLabel}`, {
       durationMs,
@@ -460,6 +701,11 @@ function getMainStartupPerfSnapshot() {
 }
 
 markMainStartupPerf("main:entry");
+logStartupDiagnostic("main:entry", {
+  appIsPackaged: app.isPackaged,
+  argv: process.argv,
+  startupDiagnosticsPath: resolveStartupDiagnosticsLogPath(),
+});
 
 function logNotificationDebug(event, details = {}) {
   if (!isDevEnvironment) {
@@ -548,6 +794,14 @@ function formatTransferBytes(value) {
   return `${gb.toFixed(gb < 10 ? 1 : 0)} GB`;
 }
 
+function formatTransferRate(bytesPerSecond) {
+  const speed = Number(bytesPerSecond);
+  if (!Number.isFinite(speed) || speed <= 0) {
+    return "";
+  }
+  return `${formatTransferBytes(speed)}/s`;
+}
+
 function clampNumber(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
@@ -570,6 +824,29 @@ function getProductionRendererOrigin() {
 
 function getExpectedProductionRendererUrl() {
   return REQUIRED_PRODUCTION_RENDERER_URL;
+}
+
+function resolveBundledRendererFilePathCandidates() {
+  return [
+    path.resolve(__dirname, "..", BUNDLED_RENDERER_INDEX_RELATIVE_PATH),
+    process.resourcesPath ? path.join(process.resourcesPath, "app.asar", BUNDLED_RENDERER_INDEX_RELATIVE_PATH) : "",
+    process.resourcesPath ? path.join(process.resourcesPath, BUNDLED_RENDERER_INDEX_RELATIVE_PATH) : "",
+  ]
+    .map((candidate) => String(candidate ?? "").trim())
+    .filter(Boolean);
+}
+
+function resolveBundledRendererStartupUrl() {
+  const candidates = resolveBundledRendererFilePathCandidates();
+  for (const candidatePath of candidates) {
+    try {
+      if (!fs.existsSync(candidatePath)) {
+        continue;
+      }
+      return pathToFileURL(candidatePath).toString();
+    } catch {}
+  }
+  return null;
 }
 
 function isLocalRendererHostname(hostname) {
@@ -638,6 +915,10 @@ function validateProductionRendererUrlOrThrow(candidateUrl) {
 function resolveRendererStartupUrl() {
   const mode = app.isPackaged ? "production" : "development";
   console.info(`[electron] desktop renderer mode: ${mode}`);
+  logStartupDiagnostic("renderer:mode-selected", {
+    mode,
+    packaged: app.isPackaged,
+  });
 
   if (!app.isPackaged) {
     const devRendererUrl = String(
@@ -646,6 +927,11 @@ function resolveRendererStartupUrl() {
       ?? DEV_SERVER_URL,
     ).trim() || DEV_SERVER_URL;
     console.info(`[electron] desktop renderer url selected: ${devRendererUrl}`);
+    logStartupDiagnostic("renderer:url-selected", {
+      mode,
+      source: "dev-server",
+      rendererUrl: devRendererUrl,
+    });
     return devRendererUrl;
   }
 
@@ -659,6 +945,11 @@ function resolveRendererStartupUrl() {
   const productionCandidate = explicitProductionCandidate || getExpectedProductionRendererUrl();
   const rendererUrl = validateProductionRendererUrlOrThrow(productionCandidate);
   console.info(`[electron] desktop renderer url selected: ${rendererUrl}`);
+  logStartupDiagnostic("renderer:url-selected", {
+    mode,
+    source: explicitProductionCandidate ? "env-explicit" : "default-remote",
+    rendererUrl,
+  });
   return rendererUrl;
 }
 
@@ -1005,7 +1296,7 @@ function buildStatusPanelHtmlV2(payload) {
       --text: #f4f7fb;
       --muted: #acb6c7;
       --track: rgba(255,255,255,.16);
-      --fill: linear-gradient(90deg, #edf3ff 0%, #ffffff 100%);
+      --fill: linear-gradient(90deg, #ffffff 0%, #ffffff 100%);
     }
     * {
       box-sizing: border-box;
@@ -1356,6 +1647,13 @@ function getStatusPanelWindow() {
   }
   window.setMenuBarVisibility(false);
 
+  window.on("close", (event) => {
+    if (!updaterInstallGuardActive || isAppQuitting) {
+      return;
+    }
+    event.preventDefault();
+  });
+
   window.on("closed", () => {
     if (statusPanelWindowRef === window) {
       statusPanelWindowRef = null;
@@ -1524,6 +1822,9 @@ function armStartupStatusPanelHardStopTimer() {
     }
 
     console.warn(`[electron] startup status panel hard timeout reached after ${STARTUP_STATUS_PANEL_HARD_TIMEOUT_MS}ms`);
+    logStartupDiagnostic("startup-status-panel:hard-timeout", {
+      timeoutMs: STARTUP_STATUS_PANEL_HARD_TIMEOUT_MS,
+    }, "warn");
     completeStartupStatusPanelLifecycle("hard-timeout");
     hideStatusPanel({ force: true });
 
@@ -1609,17 +1910,24 @@ function interpolateDownloadProgress(rawProgress) {
   return statusPanelDisplayProgressPercent;
 }
 
-function formatStatusPanelDownloadProgressText(progressPercent, downloadedBytes, totalBytes) {
+function formatStatusPanelDownloadProgressText(progressPercent, downloadedBytes, totalBytes, bytesPerSecond = 0) {
   const roundedPercent = Math.round(clampStatusPanelProgress(progressPercent));
   const downloaded = Number(downloadedBytes);
   const total = Number(totalBytes);
   if (!Number.isFinite(downloaded) || !Number.isFinite(total) || total <= 0) {
-    return `${roundedPercent}%`;
+    const speedLabel = formatTransferRate(bytesPerSecond);
+    return speedLabel ? `${roundedPercent}%  ${speedLabel}` : `${roundedPercent}%`;
   }
   if (total < STATUS_PANEL_PROGRESS_BYTES_VISIBILITY_THRESHOLD) {
-    return `${roundedPercent}%`;
+    const speedLabel = formatTransferRate(bytesPerSecond);
+    return speedLabel ? `${roundedPercent}%  ${speedLabel}` : `${roundedPercent}%`;
   }
-  return `${roundedPercent}%  ${formatTransferBytes(downloaded)} / ${formatTransferBytes(total)}`;
+  const progressLabel = `${roundedPercent}%  ${formatTransferBytes(downloaded)} / ${formatTransferBytes(total)}`;
+  const speedLabel = formatTransferRate(bytesPerSecond);
+  if (!speedLabel) {
+    return progressLabel;
+  }
+  return `${progressLabel}  ${speedLabel}`;
 }
 
 function buildStatusPanelPhasePayload(phase, data = {}) {
@@ -1643,6 +1951,7 @@ function buildStatusPanelPhasePayload(phase, data = {}) {
         smoothedProgress,
         data.downloadedBytes ?? 0,
         data.totalBytes ?? 0,
+        data.bytesPerSecond ?? 0,
       );
     }
   } else if (statusPanelProgressInterpolationMode === STATUS_PANEL_PHASE.DOWNLOADING) {
@@ -1717,23 +2026,32 @@ function syncStatusPanelWithUpdaterStateV2(nextState) {
     return;
   }
 
+  if (startupAutoUpdateGateExpired) {
+    return;
+  }
+
   const status = String(nextState.status ?? "").trim().toLowerCase();
   if (status === "checking") {
+    updaterInstallGuardActive = false;
     setStatusPanelPhase(STATUS_PANEL_PHASE.CHECKING);
     return;
   }
 
   if (status === "available") {
-    setStatusPanelPhase(STATUS_PANEL_PHASE.UPDATE_AVAILABLE);
-    scheduleStatusPanelAutoHide(1100, STATUS_PANEL_PHASE.UPDATE_AVAILABLE);
+    updaterInstallGuardActive = false;
+    setStatusPanelPhase(STATUS_PANEL_PHASE.UPDATE_AVAILABLE, {
+      detail: nextState.latestVersion ? `Versão ${String(nextState.latestVersion).trim()} disponível.` : "",
+    });
     return;
   }
 
   if (status === "downloading") {
+    updaterInstallGuardActive = false;
     setStatusPanelPhase(STATUS_PANEL_PHASE.DOWNLOADING, {
       progressPercent: Number(nextState.progressPercent ?? 0),
       downloadedBytes: Number(nextState.downloadedBytes ?? 0),
       totalBytes: Number(nextState.totalBytes ?? 0),
+      bytesPerSecond: Number(nextState.bytesPerSecond ?? 0),
       showProgress: true,
       indeterminate: false,
     });
@@ -1743,55 +2061,36 @@ function syncStatusPanelWithUpdaterStateV2(nextState) {
   }
 
   if (status === "downloaded") {
+    updaterInstallGuardActive = false;
     setStatusPanelPhase(STATUS_PANEL_PHASE.APPLYING, {
+      detail: "Download concluído. Preparando instalação.",
       indeterminate: true,
     });
     hideWindowsForUpdateFlow();
-
-    if (updaterAutoInstallInFlight || !appUpdater?.installUpdate) {
-      return;
-    }
-
-    updaterAutoInstallInFlight = true;
-    void appUpdater.installUpdate()
-      .catch((error) => {
-        const message = error instanceof Error ? error.message : String(error ?? "Falha desconhecida.");
-        updaterAutoInstallInFlight = false;
-        if (mainWindowWaitingForFirstFrame && !mainWindowFirstFrameReady) {
-          setStatusPanelPhase(STATUS_PANEL_PHASE.LOADING_SHELL, {
-            title: "Abrindo Messly",
-            subtitle: "Inicializando interface",
-            showProgressBar: true,
-            showProgress: false,
-            indeterminate: true,
-          }, {
-            force: true,
-          });
-          scheduleStatusPanelAutoHide(380);
-        } else {
-          hideStatusPanel({ force: true });
-        }
-        if (message) {
-          console.warn(`[updater] install failed: ${message}`);
-        }
-        restoreWindowsAfterUpdateFlow();
-      })
-      .finally(() => {
-        updaterAutoInstallInFlight = false;
-      });
     return;
   }
 
-  if (status === "installing" || status === "applying") {
-    setStatusPanelPhase(STATUS_PANEL_PHASE.INSTALLING);
+  if (status === "installing" || status === "applying" || status === "relaunching") {
+    updaterInstallGuardActive = true;
+    setStatusPanelPhase(
+      status === "relaunching" ? STATUS_PANEL_PHASE.RELAUNCHING : STATUS_PANEL_PHASE.INSTALLING,
+      {
+        detail: "Não feche o aplicativo durante a instalação.",
+      },
+    );
     hideWindowsForUpdateFlow();
     return;
   }
 
   if (status === "unavailable") {
+    updaterInstallGuardActive = false;
     updaterAutoInstallInFlight = false;
     if (mainWindowWaitingForFirstFrame && !mainWindowFirstFrameReady) {
       setStatusPanelPhase(STATUS_PANEL_PHASE.LOADING_SHELL);
+      return;
+    }
+    if (mainWindowFirstFrameReady) {
+      restoreWindowsAfterUpdateFlow();
       return;
     }
     setStatusPanelPhase(STATUS_PANEL_PHASE.READY, {
@@ -1807,11 +2106,12 @@ function syncStatusPanelWithUpdaterStateV2(nextState) {
     return;
   }
 
-  if (status === "error") {
+  if (status === "error" || status === "failed") {
+    updaterInstallGuardActive = false;
     updaterAutoInstallInFlight = false;
     if (mainWindowWaitingForFirstFrame && !mainWindowFirstFrameReady) {
       setStatusPanelPhase(STATUS_PANEL_PHASE.LOADING_SHELL, {
-        title: "Abrindo Messly",
+        title: "Carregando Messly",
         subtitle: "Inicializando interface",
         showProgressBar: true,
         showProgress: false,
@@ -1827,7 +2127,8 @@ function syncStatusPanelWithUpdaterStateV2(nextState) {
     return;
   }
 
-  if (status === "disabled" || status === "idle") {
+  if (status === "disabled" || status === "idle" || status === "ready" || status === "retrying") {
+    updaterInstallGuardActive = false;
     updaterAutoInstallInFlight = false;
     if (mainWindowWaitingForFirstFrame && !mainWindowFirstFrameReady) {
       setStatusPanelPhase(STATUS_PANEL_PHASE.LOADING_SHELL);
@@ -2655,6 +2956,10 @@ function scheduleMainWindowFirstFrameFallback(mainWindow, startMinimized) {
   if (!mainWindow || mainWindow.isDestroyed() || startMinimized) {
     return;
   }
+  logStartupDiagnostic("renderer:first-frame-fallback-armed", {
+    timeoutMs: MAIN_WINDOW_FIRST_FRAME_TIMEOUT_MS,
+    startMinimized,
+  }, "debug");
 
   mainWindowFirstFrameFallbackTimer = setTimeout(async () => {
     mainWindowFirstFrameFallbackTimer = null;
@@ -2669,10 +2974,16 @@ function scheduleMainWindowFirstFrameFallback(mainWindow, startMinimized) {
     const isStillLoading = Boolean(webContents && !webContents.isDestroyed() && webContents.isLoadingMainFrame());
     const isBlankUrl = !currentUrl || currentUrl === "about:blank";
     const isDataUrl = currentUrl.startsWith("data:text/html");
+    logStartupDiagnostic("renderer:first-frame-fallback-fired", {
+      currentUrl: currentUrl || null,
+      isStillLoading,
+      isBlankUrl,
+      isDataUrl,
+    }, "warn");
 
     if (isBlankUrl || isStillLoading) {
       showMainWindowRendererLoadFailure(mainWindow, {
-        rendererUrl: resolveRendererStartupUrl(),
+        rendererUrl: app.isPackaged ? getExpectedProductionRendererUrl() : DEV_SERVER_URL,
         validatedURL: currentUrl,
         reason: "Tempo limite ao iniciar a interface.",
         details: isStillLoading ? "Carregamento principal excedeu o tempo esperado." : "A janela permaneceu em branco.",
@@ -2685,6 +2996,9 @@ function scheduleMainWindowFirstFrameFallback(mainWindow, startMinimized) {
         mainWindow.show();
       }
       mainWindow.focus();
+      logStartupDiagnostic("renderer:first-frame-fallback-data-url-visible", {
+        currentUrl: currentUrl || null,
+      }, "warn");
       return;
     }
 
@@ -2711,7 +3025,7 @@ function scheduleMainWindowFirstFrameFallback(mainWindow, startMinimized) {
     const hasRenderableDom = rootChildCount > 0 || bodyChildCount > 1 || bodyTextLength > 0;
     if (!hasRenderableDom) {
       showMainWindowRendererLoadFailure(mainWindow, {
-        rendererUrl: resolveRendererStartupUrl(),
+        rendererUrl: app.isPackaged ? getExpectedProductionRendererUrl() : DEV_SERVER_URL,
         validatedURL: currentUrl,
         reason: "A interface não renderizou conteúdo visível.",
         details: `DOM snapshot: root=${rootChildCount}, bodyChildren=${bodyChildCount}, text=${bodyTextLength}`,
@@ -2723,6 +3037,10 @@ function scheduleMainWindowFirstFrameFallback(mainWindow, startMinimized) {
       currentUrl: currentUrl || null,
       isStillLoading,
     });
+    logStartupDiagnostic("renderer:first-frame-fallback-force-reveal", {
+      currentUrl: currentUrl || null,
+      isStillLoading,
+    }, "warn");
     revealMainWindowAfterFirstFrame({
       startMinimized: false,
       surface: "first-frame-timeout-fallback",
@@ -2743,6 +3061,10 @@ function revealMainWindowAfterFirstFrame(options = {}) {
   startupUpdaterBlockTimedOut = false;
   mainWindowWaitingForFirstFrame = false;
   mainWindowFirstFrameReady = true;
+  logStartupDiagnostic("window:reveal-after-first-frame", {
+    startMinimized,
+    surface: String(options?.surface ?? "").trim() || null,
+  });
 
   if (startMinimized) {
     if (loadWindowsBehaviorSettings().closeToTray) {
@@ -2792,12 +3114,26 @@ function handleRendererFirstFrameReady(event, payload) {
   const senderWindow = BrowserWindow.fromWebContents(event.sender) ?? null;
   const mainWindow = getMainWindow();
   if (!senderWindow || !mainWindow || senderWindow !== mainWindow) {
+    logStartupDiagnostic("renderer:first-frame-ignored", {
+      reason: "sender-not-main-window",
+    }, "debug");
     return;
   }
 
   if (mainWindowFirstFrameReady) {
+    logStartupDiagnostic("renderer:first-frame-ignored", {
+      reason: "already-ready",
+      surface: payload?.surface ?? null,
+      route: payload?.route ?? null,
+    }, "debug");
     return;
   }
+
+  logStartupDiagnostic("renderer:first-frame-ready", {
+    surface: payload?.surface ?? null,
+    route: payload?.route ?? null,
+    bootstrapPhase: payload?.bootstrapPhase ?? null,
+  });
 
   markMainStartupPerf("main:renderer-first-frame", {
     surface: payload?.surface ?? null,
@@ -2869,6 +3205,14 @@ function showMainWindowRendererLoadFailure(mainWindow, context = {}) {
     reason,
     details: details || null,
   });
+  logStartupDiagnostic("renderer:load-failure-screen", {
+    rendererUrl,
+    validatedURL: validatedUrl || null,
+    errorCode,
+    errorDescription: errorDescription || null,
+    reason,
+    details: details || null,
+  }, "error");
 
   const html = buildRendererLoadFailureHtml({
     rendererUrl,
@@ -3231,7 +3575,7 @@ async function createAppTray() {
         CHILD_WINDOW_ICON_PATH,
         APP_NOTIFICATION_ICON_ICO_PATH,
         APP_NOTIFICATION_ICON_PNG_PATH,
-        process.resourcesPath ? path.join(process.resourcesPath, "assets", "icons", "messly.ico") : null,
+        resolvePackagedElectronIconPath("messly.ico") || null,
         process.execPath,
       ]
         .map((candidate) => (typeof candidate === "string" ? candidate.trim() : ""))
@@ -3409,6 +3753,14 @@ function readBooleanEnvFlag(rawValue, defaultValue = false) {
   return defaultValue;
 }
 
+function readBoundedIntegerEnv(rawValue, fallbackValue, minValue = Number.MIN_SAFE_INTEGER, maxValue = Number.MAX_SAFE_INTEGER) {
+  const parsed = Number.parseInt(String(rawValue ?? "").trim(), 10);
+  if (!Number.isFinite(parsed)) {
+    return fallbackValue;
+  }
+  return clampNumber(parsed, minValue, maxValue);
+}
+
 function isFirewallVerboseLogsEnabled() {
   return isDevEnvironment || readBooleanEnvFlag(process.env.MESSLY_FIREWALL_VERBOSE_LOGS, false);
 }
@@ -3500,44 +3852,163 @@ async function collectWindowsNetworkDiagnosticsSnapshot() {
 }
 
 function createConfiguredAppUpdater() {
+  const managedByExternalLauncher = readBooleanEnvFlag(process.env.MESSLY_EXTERNAL_LAUNCHER, false);
+  if (managedByExternalLauncher) {
+    logStartupDiagnostic("updater:managed-by-launcher", {
+      managedByExternalLauncher,
+    });
+    return createDisabledUpdater("Atualizacoes gerenciadas pelo Messly Launcher.");
+  }
+
   const enableInDev = readBooleanEnvFlag(process.env.AUTO_UPDATE_ENABLE_IN_DEV, false);
   if (!app.isPackaged && !enableInDev) {
+    logStartupDiagnostic("updater:disabled-in-dev", {
+      appIsPackaged: app.isPackaged,
+      enableInDev,
+    });
     return createDisabledUpdater("Atualizador desativado no modo desenvolvimento.");
   }
 
-  const provider = String(process.env.MESSLY_UPDATER_PROVIDER ?? "electron-updater").trim().toLowerCase();
-  const githubOwner = String(process.env.MESSLY_UPDATER_OWNER ?? "1blayze").trim() || "1blayze";
-  const githubRepo = String(process.env.MESSLY_UPDATER_REPO ?? "Messly-updates").trim() || "Messly-updates";
-  const githubToken =
-    String(
-      process.env.MESSLY_UPDATER_TOKEN ??
-        process.env.GITHUB_TOKEN ??
-        process.env.GH_TOKEN ??
-        "",
-    ).trim() || undefined;
-
-  const createLegacyGithubUpdater = () =>
-    createAppUpdater({
-      app,
-      shell,
-      owner: githubOwner,
-      repo: githubRepo,
-      token: githubToken,
-    });
-
-  if (provider === "github-api" || provider === "legacy-github") {
-    return createLegacyGithubUpdater();
-  }
-
   try {
-    return createElectronUpdaterAdapter({
+    const updater = createElectronUpdaterAdapter({
       app,
     });
+    logStartupDiagnostic("updater:initialized", {
+      appIsPackaged: app.isPackaged,
+      adapter: "electron-updater",
+    });
+    return updater;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error ?? "unknown");
-    console.warn(`[updater] Failed to initialize electron-updater adapter: ${message}. Falling back to github-api updater.`);
-    return createLegacyGithubUpdater();
+    console.warn(`[updater] Falha ao iniciar o updater oficial: ${message}`);
+    logStartupDiagnostic("updater:initialize-failed", {
+      message,
+    }, "warn");
+    return createDisabledUpdater("Não foi possível inicializar o sistema de atualização.");
   }
+}
+
+function waitForTimeout(delayMs) {
+  const parsedDelay = Number(delayMs);
+  const safeDelay = Number.isFinite(parsedDelay) ? Math.max(0, Math.trunc(parsedDelay)) : 0;
+  if (safeDelay <= 0) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    setTimeout(resolve, safeDelay);
+  });
+}
+
+async function runWithTimeout(taskPromise, timeoutMs, timeoutMessage) {
+  const normalizedTimeout = Number(timeoutMs);
+  const safeTimeoutMs = Number.isFinite(normalizedTimeout) ? Math.max(1_000, Math.trunc(normalizedTimeout)) : 0;
+  if (safeTimeoutMs <= 0) {
+    return taskPromise;
+  }
+
+  let timeoutHandle = null;
+  try {
+    const timeoutPromise = new Promise((_, reject) => {
+      timeoutHandle = setTimeout(() => {
+        reject(new Error(timeoutMessage || `Operação excedeu ${safeTimeoutMs}ms.`));
+      }, safeTimeoutMs);
+    });
+    return await Promise.race([taskPromise, timeoutPromise]);
+  } finally {
+    if (timeoutHandle != null) {
+      clearTimeout(timeoutHandle);
+      timeoutHandle = null;
+    }
+  }
+}
+
+function getUpdaterStateStatus(state) {
+  return String(
+    state?.status ??
+      appUpdater?.getState?.()?.status ??
+      "",
+  )
+    .trim()
+    .toLowerCase();
+}
+
+function buildStartupUpdateRetryDelayMs(attemptNumber) {
+  const attemptIndex = Math.max(0, Number(attemptNumber) || 0);
+  const candidate = STARTUP_AUTO_UPDATE_RETRY_BASE_DELAY_MS * (2 ** attemptIndex);
+  return Math.min(STARTUP_AUTO_UPDATE_RETRY_MAX_DELAY_MS, Math.max(250, Math.trunc(candidate)));
+}
+
+async function runStartupUpdateStepWithRetry(stepLabel, maxAttempts, executeStep, timeoutPerAttemptMs = 0) {
+  const safeMaxAttempts = Math.max(1, Number(maxAttempts) || 1);
+  const safeStepLabel = String(stepLabel ?? "").trim() || "Atualização";
+  let attempt = 0;
+
+  while (attempt < safeMaxAttempts) {
+    if (startupAutoUpdateGateExpired) {
+      logStartupDiagnostic("updater:step-skipped-gate-expired", {
+        stepLabel: safeStepLabel,
+      }, "warn");
+      return null;
+    }
+    try {
+      const attemptNumber = attempt + 1;
+      logStartupDiagnostic("updater:step-attempt", {
+        stepLabel: safeStepLabel,
+        attempt: attemptNumber,
+        maxAttempts: safeMaxAttempts,
+        timeoutPerAttemptMs,
+      });
+      const result = await runWithTimeout(
+        executeStep(),
+        timeoutPerAttemptMs,
+        `${safeStepLabel} excedeu ${timeoutPerAttemptMs}ms.`,
+      );
+      logStartupDiagnostic("updater:step-attempt-succeeded", {
+        stepLabel: safeStepLabel,
+        attempt: attemptNumber,
+        maxAttempts: safeMaxAttempts,
+      });
+      return result;
+    } catch (error) {
+      attempt += 1;
+      const isFinalAttempt = attempt >= safeMaxAttempts;
+      const message = error instanceof Error ? error.message : String(error ?? "Falha desconhecida.");
+      logStartupDiagnostic("updater:step-attempt-failed", {
+        stepLabel: safeStepLabel,
+        attempt,
+        maxAttempts: safeMaxAttempts,
+        message,
+        isFinalAttempt,
+      }, "warn");
+      if (isFinalAttempt) {
+        throw error;
+      }
+
+      const retryAttemptNumber = attempt + 1;
+      const delayMs = buildStartupUpdateRetryDelayMs(attempt - 1);
+      if (isStartupStatusPanelLifecycleActive()) {
+        setStatusPanelPhase(
+          STATUS_PANEL_PHASE.RETRYING,
+          {
+            title: "Tentando novamente",
+            subtitle: `${safeStepLabel} (${retryAttemptNumber}/${safeMaxAttempts})`,
+            detail: message || "A conexão oscilou. Vamos tentar novamente.",
+            indeterminate: true,
+            showProgressBar: true,
+          },
+          {
+            force: true,
+          },
+        );
+      }
+      console.warn(`[updater] ${safeStepLabel} falhou na tentativa ${attempt}/${safeMaxAttempts}: ${message}`);
+      await waitForTimeout(delayMs);
+      if (startupAutoUpdateGateExpired) {
+        return null;
+      }
+    }
+  }
+  return null;
 }
 
 async function runStartupAutoUpdateIfEnabled() {
@@ -3546,59 +4017,171 @@ async function runStartupAutoUpdateIfEnabled() {
   }
 
   if (!app.isPackaged || !appUpdater) {
+    logStartupDiagnostic("updater:startup-skipped", {
+      appIsPackaged: app.isPackaged,
+      hasUpdater: Boolean(appUpdater),
+    }, "debug");
     return;
   }
 
   const autoInstallOnStartup = readBooleanEnvFlag(process.env.AUTO_UPDATE_INSTALL_ON_STARTUP, true);
   if (!autoInstallOnStartup) {
+    logStartupDiagnostic("updater:startup-auto-install-disabled", {});
     return;
   }
 
   startupAutoUpdatePromise = (async () => {
     try {
-      const checkedState = await appUpdater.checkForUpdates();
-      const checkedStatus = String(
-        checkedState?.status ??
-          appUpdater?.getState?.()?.status ??
-          "",
-      )
-        .trim()
-        .toLowerCase();
+      startupAutoUpdateGateExpired = false;
+      updaterAutoInstallInFlight = false;
+      updaterInstallGuardActive = false;
+      logStartupDiagnostic("updater:startup-sequence-begin", {
+        blockTimeoutMs: STARTUP_AUTO_UPDATE_BLOCK_TIMEOUT_MS,
+        checkRetryMax: STARTUP_AUTO_UPDATE_CHECK_RETRY_MAX,
+        downloadRetryMax: STARTUP_AUTO_UPDATE_DOWNLOAD_RETRY_MAX,
+        checkStepTimeoutMs: STARTUP_AUTO_UPDATE_CHECK_STEP_TIMEOUT_MS,
+        downloadStepTimeoutMs: STARTUP_AUTO_UPDATE_DOWNLOAD_STEP_TIMEOUT_MS,
+      });
 
-      if (checkedStatus === "available") {
-        await appUpdater.downloadUpdate();
+      const checkedState = await runStartupUpdateStepWithRetry(
+        "Verificando atualizações",
+        STARTUP_AUTO_UPDATE_CHECK_RETRY_MAX,
+        async () => appUpdater.checkForUpdates(),
+        STARTUP_AUTO_UPDATE_CHECK_STEP_TIMEOUT_MS,
+      );
+      if (startupAutoUpdateGateExpired) {
+        logStartupDiagnostic("updater:startup-check-aborted", {
+          reason: "gate-expired-after-check",
+        }, "warn");
+        return;
+      }
+      const checkedStatus = getUpdaterStateStatus(checkedState);
+      logStartupDiagnostic("updater:startup-check-finished", {
+        checkedStatus,
+        latestVersion: checkedState?.latestVersion ?? null,
+      });
+      if (checkedStatus !== "available") {
+        return;
       }
 
-      const resolvedStatus = String(appUpdater?.getState?.()?.status ?? "")
-        .trim()
-        .toLowerCase();
+      if (isStartupStatusPanelLifecycleActive()) {
+        setStatusPanelPhase(
+          STATUS_PANEL_PHASE.UPDATE_AVAILABLE,
+          {
+            detail: checkedState?.latestVersion
+              ? `Versão ${String(checkedState.latestVersion).trim()} encontrada.`
+              : "",
+          },
+          { force: true },
+        );
+      }
+
+      await runStartupUpdateStepWithRetry(
+        "Baixando atualização",
+        STARTUP_AUTO_UPDATE_DOWNLOAD_RETRY_MAX,
+        async () => appUpdater.downloadUpdate(),
+        STARTUP_AUTO_UPDATE_DOWNLOAD_STEP_TIMEOUT_MS,
+      );
+      if (startupAutoUpdateGateExpired) {
+        logStartupDiagnostic("updater:startup-download-aborted", {
+          reason: "gate-expired-after-download",
+        }, "warn");
+        return;
+      }
+
+      const resolvedStatus = getUpdaterStateStatus(appUpdater?.getState?.());
+      logStartupDiagnostic("updater:startup-download-finished", {
+        resolvedStatus,
+      });
       if (resolvedStatus !== "downloaded") {
         return;
       }
 
-      setStatusPanelPhase(STATUS_PANEL_PHASE.APPLYING, {
-        indeterminate: true,
-      }, {
-        force: true,
-      });
+      hideWindowsForUpdateFlow();
+      updaterAutoInstallInFlight = true;
+      updaterInstallGuardActive = true;
+
+      setStatusPanelPhase(
+        STATUS_PANEL_PHASE.APPLYING,
+        {
+          title: "Preparando atualização",
+          subtitle: "Aplicando pacote baixado",
+          detail: "Validando arquivos para instalação.",
+          indeterminate: true,
+        },
+        {
+          force: true,
+        },
+      );
+      await waitForTimeout(420);
+
+      setStatusPanelPhase(
+        STATUS_PANEL_PHASE.INSTALLING,
+        {
+          title: "Instalando atualização",
+          subtitle: "Não feche o aplicativo",
+          detail: "A instalação está em andamento.",
+          indeterminate: true,
+        },
+        {
+          force: true,
+        },
+      );
+      await waitForTimeout(480);
+
+      setStatusPanelPhase(
+        STATUS_PANEL_PHASE.RELAUNCHING,
+        {
+          title: "Atualização concluída",
+          subtitle: "Reiniciando aplicativo",
+          indeterminate: true,
+        },
+        {
+          force: true,
+        },
+      );
 
       await appUpdater.installUpdate();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error ?? "unknown");
       console.warn(`[updater] Startup auto-update failed: ${message}`);
+      logStartupDiagnostic("updater:startup-sequence-failed", {
+        message,
+      }, "warn");
+      updaterAutoInstallInFlight = false;
+      updaterInstallGuardActive = false;
       if (isStartupStatusPanelLifecycleActive()) {
-        setStatusPanelPhase(STATUS_PANEL_PHASE.LOADING_SHELL, {
-          title: "Abrindo Messly",
-          subtitle: "Inicializando interface",
-          showProgressBar: true,
-          showProgress: false,
-          indeterminate: true,
-        }, {
-          force: true,
-        });
-        scheduleStatusPanelAutoHide(380);
+        setStatusPanelPhase(
+          STATUS_PANEL_PHASE.FAILED,
+          {
+            title: "Falha ao atualizar",
+            subtitle: "Abrindo a versão atual",
+            detail: message || "Não foi possível concluir a atualização automática.",
+            showProgressBar: true,
+            showProgress: false,
+            indeterminate: false,
+          },
+          {
+            force: true,
+          },
+        );
+        scheduleStatusPanelAutoHide(1_250, STATUS_PANEL_PHASE.FAILED);
       }
       restoreWindowsAfterUpdateFlow();
+    } finally {
+      logStartupDiagnostic("updater:startup-sequence-finished", {
+        startupAutoUpdateGateExpired,
+        updaterStatus: getUpdaterStateStatus(appUpdater?.getState?.()),
+      });
+      updaterAutoInstallInFlight = false;
+      if (!isAppQuitting) {
+        const updaterStatus = getUpdaterStateStatus(appUpdater?.getState?.());
+        const shouldKeepInstallGuard =
+          updaterStatus === "installing" || updaterStatus === "applying" || updaterStatus === "relaunching";
+        if (!shouldKeepInstallGuard) {
+          updaterInstallGuardActive = false;
+        }
+      }
     }
   })().finally(() => {
     startupAutoUpdatePromise = null;
@@ -3609,9 +4192,16 @@ async function runStartupAutoUpdateIfEnabled() {
 
 async function runStartupAutoUpdateWithGuardTimeout() {
   if (!app.isPackaged) {
+    logStartupDiagnostic("updater:startup-gate-skipped", {
+      appIsPackaged: app.isPackaged,
+    }, "debug");
     return;
   }
 
+  logStartupDiagnostic("updater:startup-gate-begin", {
+    blockTimeoutMs: STARTUP_AUTO_UPDATE_BLOCK_TIMEOUT_MS,
+  });
+  startupAutoUpdateGateExpired = false;
   startupUpdaterBlockTimedOut = false;
   let timeoutHandle = null;
   const timeoutPromise = new Promise((resolve) => {
@@ -3625,6 +4215,9 @@ async function runStartupAutoUpdateWithGuardTimeout() {
     .catch((error) => {
       const message = error instanceof Error ? error.message : String(error ?? "unknown");
       console.warn(`[updater] startup update gate failed: ${message}`);
+      logStartupDiagnostic("updater:startup-gate-failed", {
+        message,
+      }, "warn");
       return "failed";
     });
 
@@ -3635,11 +4228,14 @@ async function runStartupAutoUpdateWithGuardTimeout() {
   }
 
   if (outcome === "timeout") {
+    startupAutoUpdateGateExpired = true;
     startupUpdaterBlockTimedOut = true;
+    updaterAutoInstallInFlight = false;
+    updaterInstallGuardActive = false;
     console.warn(`[updater] startup update check timed out after ${STARTUP_AUTO_UPDATE_BLOCK_TIMEOUT_MS}ms; continuing app launch.`);
     if (isStartupStatusPanelLifecycleActive()) {
       setStatusPanelPhase(STATUS_PANEL_PHASE.LOADING_SHELL, {
-        title: "Abrindo Messly",
+        title: "Carregando Messly",
         subtitle: "Abrindo aplicativo",
         showProgressBar: true,
         indeterminate: true,
@@ -3647,7 +4243,18 @@ async function runStartupAutoUpdateWithGuardTimeout() {
         force: true,
       });
     }
+    restoreWindowsAfterUpdateFlow();
+    logStartupDiagnostic("updater:startup-gate-timeout", {
+      blockTimeoutMs: STARTUP_AUTO_UPDATE_BLOCK_TIMEOUT_MS,
+      updaterStatus: getUpdaterStateStatus(appUpdater?.getState?.()),
+    }, "warn");
+    return;
   }
+
+  logStartupDiagnostic("updater:startup-gate-finished", {
+    outcome,
+    updaterStatus: getUpdaterStateStatus(appUpdater?.getState?.()),
+  });
 }
 
 function getR2Client() {
@@ -4360,6 +4967,7 @@ async function logRendererDiagnosticsHandler(_event, payload) {
   } else {
     console.info(line, details);
   }
+  logStartupDiagnostic(`renderer-diagnostic:${source}:${event}`, details, level);
 
   return {
     ok: true,
@@ -4450,10 +5058,19 @@ function registerIpcHandlers() {
     });
     hideWindowsForUpdateFlow();
     updaterAutoInstallInFlight = true;
+    updaterInstallGuardActive = true;
     try {
+      setStatusPanelPhase(STATUS_PANEL_PHASE.RELAUNCHING, {
+        title: "Atualização concluída",
+        subtitle: "Reiniciando aplicativo",
+        indeterminate: true,
+      }, {
+        force: true,
+      });
       return await appUpdater.installUpdate();
     } catch (error) {
       updaterAutoInstallInFlight = false;
+      updaterInstallGuardActive = false;
       setStatusPanelPhase(STATUS_PANEL_PHASE.FAILED, {
         detail: "Não foi possível concluir a atualização.",
       }, {
@@ -4555,9 +5172,18 @@ function registerIpcHandlers() {
 
 function createMainWindow() {
   markMainStartupPerf("main:create-window:requested");
+  logStartupDiagnostic("window:create-requested", {
+    isAppQuitting,
+    startupUpdaterBlockTimedOut,
+    updaterStatus: getUpdaterStateStatus(appUpdater?.getState?.()),
+  });
   const existingWindow = getMainWindow();
   if (existingWindow) {
     markMainStartupPerf("main:create-window:reuse-existing");
+    logStartupDiagnostic("window:create-reused-existing", {
+      visible: existingWindow.isVisible(),
+      minimized: existingWindow.isMinimized(),
+    }, "debug");
     notificationNavigationCoordinator.registerWindow(existingWindow);
     if (!mainWindowWaitingForFirstFrame && !existingWindow.isVisible()) {
       existingWindow.show();
@@ -4575,6 +5201,10 @@ function createMainWindow() {
   });
   measureMainStartupPerf("main_entry_to_create_window", "main:entry", "main:create-window:new", {
     startMinimized,
+  });
+  logStartupDiagnostic("window:create-new", {
+    startMinimized,
+    shouldUseStartupStatusPanel,
   });
 
   if (shouldUseStartupStatusPanel) {
@@ -4620,6 +5250,25 @@ function createMainWindow() {
   mainWindow.setMenuBarVisibility(false);
 
   mainWindow.on("close", (event) => {
+    if (updaterInstallGuardActive && !isAppQuitting) {
+      event.preventDefault();
+      if (isStartupStatusPanelLifecycleActive()) {
+        setStatusPanelPhase(
+          STATUS_PANEL_PHASE.INSTALLING,
+          {
+            title: "Instalando atualização",
+            subtitle: "Não feche o aplicativo",
+            detail: "A instalação precisa ser concluída para reiniciar.",
+            indeterminate: true,
+          },
+          {
+            force: true,
+          },
+        );
+      }
+      return;
+    }
+
     const shouldMinimizeToTray = loadWindowsBehaviorSettings().closeToTray;
     if (!shouldMinimizeToTray || isAppQuitting) {
       return;
@@ -4632,6 +5281,10 @@ function createMainWindow() {
   mainWindow.once("ready-to-show", () => {
     markMainStartupPerf("main:window-ready-to-show", {
       startMinimized,
+    });
+    logStartupDiagnostic("window:ready-to-show", {
+      startMinimized,
+      mainWindowFirstFrameReady,
     });
     measureMainStartupPerf("main_entry_to_window_ready_to_show", "main:entry", "main:window-ready-to-show", {
       startMinimized,
@@ -4847,6 +5500,8 @@ function createMainWindow() {
   let rendererLoadFailureDisplayed = false;
   let rendererRetryCount = 0;
   let rendererRetryTimer = null;
+  const bundledRendererFallbackUrl = app.isPackaged ? resolveBundledRendererStartupUrl() : null;
+  let rendererBundledFallbackAttempted = false;
 
   const clearRendererRetryTimer = () => {
     if (rendererRetryTimer != null) {
@@ -4919,6 +5574,15 @@ function createMainWindow() {
       retryDelayMs,
       validatedURL: String(context.validatedURL ?? "").trim() || null,
     });
+    logStartupDiagnostic("renderer:retry-scheduled", {
+      attempt: rendererRetryCount,
+      maxAttempts: RENDERER_BOOTSTRAP_MAX_RETRIES,
+      reason: String(context.reason ?? "").trim() || null,
+      errorCode,
+      errorDescription: errorDescription || null,
+      retryDelayMs,
+      validatedURL: String(context.validatedURL ?? "").trim() || null,
+    }, "warn");
 
     if (shouldUseStartupStatusPanel) {
       setStatusPanelPhase(STATUS_PANEL_PHASE.RETRYING, {
@@ -4982,6 +5646,46 @@ function createMainWindow() {
       }
     }
 
+    const shouldTryBundledFallback =
+      app.isPackaged
+      && !rendererBundledFallbackAttempted
+      && typeof bundledRendererFallbackUrl === "string"
+      && bundledRendererFallbackUrl.length > 0
+      && bundledRendererFallbackUrl !== rendererUrl;
+
+    if (shouldTryBundledFallback) {
+      rendererBundledFallbackAttempted = true;
+      const failureDetails =
+        String(context.details ?? "").trim()
+        || errorDescription
+        || (errorCode !== null ? `error code ${errorCode}` : "unknown renderer failure");
+      logStartupDiagnostic("renderer:fallback-to-bundled", {
+        previousRendererUrl: rendererUrl || null,
+        fallbackRendererUrl: bundledRendererFallbackUrl,
+        errorCode,
+        errorDescription: errorDescription || null,
+        reason: String(context.reason ?? "").trim() || null,
+        details: failureDetails,
+      }, "warn");
+      if (shouldUseStartupStatusPanel) {
+        setStatusPanelPhase(STATUS_PANEL_PHASE.LOADING_SHELL, {
+          title: "Carregando Messly",
+          subtitle: "Usando interface local",
+          detail: "Conexao com o servidor oscilando. Continuando com modo local.",
+          showProgressBar: true,
+          showProgress: false,
+          indeterminate: true,
+          progressPercent: 64,
+        }, {
+          force: true,
+        });
+      }
+      rendererRetryCount = 0;
+      rendererUrl = bundledRendererFallbackUrl;
+      void loadMainRendererUrl("bundled-fallback");
+      return;
+    }
+
     const failureDetails =
       String(context.details ?? "").trim()
       || errorDescription
@@ -5003,12 +5707,13 @@ function createMainWindow() {
     rendererLoadAttemptId += 1;
     const currentAttemptId = rendererLoadAttemptId;
     rendererFailureHandledForActiveAttempt = false;
+    const normalizedSource = String(source ?? "initial").trim() || "initial";
     scheduleMainWindowFirstFrameFallback(mainWindow, startMinimized);
 
-    if (shouldUseStartupStatusPanel && source === "retry") {
+    if (shouldUseStartupStatusPanel && (normalizedSource === "retry" || normalizedSource === "bundled-fallback")) {
       setStatusPanelPhase(STATUS_PANEL_PHASE.LOADING_SHELL, {
         title: "Carregando Messly",
-        subtitle: "Reconectando interface",
+        subtitle: normalizedSource === "bundled-fallback" ? "Aplicando fallback local" : "Reconectando interface",
         showProgressBar: true,
         showProgress: false,
         indeterminate: true,
@@ -5018,8 +5723,22 @@ function createMainWindow() {
       });
     }
 
+    logStartupDiagnostic("renderer:load-attempt", {
+      source: normalizedSource,
+      attemptId: currentAttemptId,
+      rendererUrl,
+      startMinimized,
+      bundledFallbackAvailable: Boolean(bundledRendererFallbackUrl),
+      bundledFallbackAttempted: rendererBundledFallbackAttempted,
+    });
+
     try {
       await mainWindow.loadURL(rendererUrl);
+      logStartupDiagnostic("renderer:load-dispatched", {
+        source: normalizedSource,
+        attemptId: currentAttemptId,
+        rendererUrl,
+      });
     } catch (error) {
       if (mainWindow.isDestroyed() || mainWindowFirstFrameReady || rendererLoadFailureDisplayed) {
         return;
@@ -5035,6 +5754,13 @@ function createMainWindow() {
       if (isRendererAbortFailure(parsedCode, message)) {
         return;
       }
+      logStartupDiagnostic("renderer:load-throw", {
+        source: normalizedSource,
+        attemptId: currentAttemptId,
+        rendererUrl,
+        errorCode: parsedCode,
+        errorDescription: message,
+      }, "warn");
       rendererFailureHandledForActiveAttempt = true;
       handleRendererBootstrapFailure({
         errorCode: parsedCode,
@@ -5061,6 +5787,12 @@ function createMainWindow() {
     if (validatedUrlValue.startsWith("data:text/html")) {
       return;
     }
+    logStartupDiagnostic("renderer:did-fail-load", {
+      validatedURL: validatedUrlValue || null,
+      errorCode: normalizedErrorCode,
+      errorDescription: normalizedErrorDescription || null,
+      rendererUrl,
+    }, "warn");
     rendererFailureHandledForActiveAttempt = true;
     handleRendererBootstrapFailure({
       validatedURL: validatedUrlValue,
@@ -5073,6 +5805,11 @@ function createMainWindow() {
     if (mainWindowFirstFrameReady || rendererLoadFailureDisplayed) {
       return;
     }
+    logStartupDiagnostic("renderer:process-gone-before-ready", {
+      reason: String(details?.reason ?? "").trim() || "render-process-gone",
+      exitCode: Number(details?.exitCode ?? 0) || null,
+      rendererUrl,
+    }, "warn");
     rendererFailureHandledForActiveAttempt = true;
     handleRendererBootstrapFailure({
       reason: "O processo de renderização encerrou antes da interface ficar pronta.",
@@ -5087,7 +5824,22 @@ function createMainWindow() {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error ?? "unknown");
     console.error(`[electron] renderer bootstrap aborted: ${message}`);
+    logStartupDiagnostic("renderer:bootstrap-aborted", {
+      message,
+    }, "error");
     throw error;
+  }
+
+  if (app.isPackaged) {
+    if (bundledRendererFallbackUrl) {
+      logStartupDiagnostic("renderer:bundled-fallback-ready", {
+        bundledRendererFallbackUrl,
+      });
+    } else {
+      logStartupDiagnostic("renderer:bundled-fallback-missing", {
+        candidates: resolveBundledRendererFilePathCandidates(),
+      }, "warn");
+    }
   }
 
   markMainStartupPerf("main:window-load-started", {
@@ -5109,7 +5861,14 @@ function isUpdaterBlockingMainWindowCreation() {
     return false;
   }
   const status = String(appUpdater.getState()?.status ?? "").trim().toLowerCase();
-  return status === "checking" || status === "downloading" || status === "installing" || status === "applying";
+  return (
+    status === "checking" ||
+    status === "downloading" ||
+    status === "installing" ||
+    status === "applying" ||
+    status === "relaunching" ||
+    status === "retrying"
+  );
 }
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
@@ -5148,6 +5907,11 @@ app.whenReady().then(async () => {
   if (!hasSingleInstanceLock) {
     return;
   }
+  logStartupDiagnostic("app:when-ready-entered", {
+    appIsPackaged: app.isPackaged,
+    blockMainWindowOnStartupUpdate: BLOCK_MAIN_WINDOW_ON_STARTUP_UPDATE,
+    statusPanelEnabled: STATUS_PANEL_ENABLED,
+  });
   markMainStartupPerf("main:when-ready");
   measureMainStartupPerf("main_entry_to_when_ready", "main:entry", "main:when-ready");
   if (typeof Menu.setApplicationMenu === "function") {
@@ -5232,11 +5996,15 @@ app.whenReady().then(async () => {
 
   if (BLOCK_MAIN_WINDOW_ON_STARTUP_UPDATE) {
     try {
+      logStartupDiagnostic("updater:startup-gate-awaiting", {});
       await runStartupAutoUpdateWithGuardTimeout();
     } catch {}
   }
 
   if (!isAppQuitting) {
+    logStartupDiagnostic("window:create-main-requested", {
+      isAppQuitting,
+    });
     createMainWindow();
   }
 
@@ -5245,6 +6013,10 @@ app.whenReady().then(async () => {
   }
 
   markMainStartupPerf("main:critical-startup-complete");
+  logStartupDiagnostic("app:critical-startup-complete", {
+    startupUpdaterBlockTimedOut,
+    startupAutoUpdateGateExpired,
+  });
   measureMainStartupPerf(
     "main_when_ready_to_critical_startup_complete",
     "main:when-ready",
@@ -5271,18 +6043,27 @@ app.whenReady().then(async () => {
 
   const autoCheckIntervalMs = Number.parseInt(String(process.env.AUTO_UPDATE_CHECK_INTERVAL_MS ?? ""), 10);
   setTimeout(() => {
-    appUpdater.startAutoCheck(Number.isFinite(autoCheckIntervalMs) ? autoCheckIntervalMs : undefined);
+    appUpdater.startAutoCheck(
+      Number.isFinite(autoCheckIntervalMs) ? autoCheckIntervalMs : undefined,
+      { skipInitialCheck: true },
+    );
   }, 1500);
 
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
+    if (BrowserWindow.getAllWindows().length === 0 && !isUpdaterBlockingMainWindowCreation()) {
       createMainWindow();
     }
   });
 });
 
 app.on("before-quit", () => {
+  logStartupDiagnostic("app:before-quit", {
+    updaterStatus: getUpdaterStateStatus(appUpdater?.getState?.()),
+    windowsOpen: BrowserWindow.getAllWindows().length,
+  });
   isAppQuitting = true;
+  updaterInstallGuardActive = false;
+  updaterAutoInstallInFlight = false;
   startupStatusPanelLifecycleActive = false;
   clearStartupStatusPanelHardStopTimer();
   clearMainWindowFirstFrameFallbackTimer();

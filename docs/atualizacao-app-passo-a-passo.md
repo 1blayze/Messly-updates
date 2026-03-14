@@ -1,67 +1,81 @@
-# Messly: Passo a Passo para Subir Atualizacao do Aplicativo
+# Messly: Publicacao de Atualizacao (Arquitetura Shared Runtime)
 
-Este guia publica uma nova versao do app desktop (Windows) com auto-update.
+Este fluxo publica os artefatos separados do desktop:
+
+- `MesslySetup.exe` (bootstrap)
+- `messly-runtime-win32-x64.zip` (runtime Electron)
+- `messly-app-win32-x64.zip` (aplicacao Messly)
+- manifests de update (`runtime-manifest.json` e `app-manifest.json`)
 
 ## 1) Pre-requisitos
 
-- Estar na branch `main`.
-- Ter login no GitHub com permissao nos repos:
-  - codigo: `1blayze/Messly`
-  - updates: `1blayze/Messly-updates`
-- Ter token no `.env.local` (um destes):
-  - `GH_TOKEN`
-  - `GITHUB_TOKEN`
+- Branch `main` atualizada.
+- Permissao no repositório de updates.
+- Token configurado em `.env.local`:
+  - `GH_TOKEN` ou
+  - `GITHUB_TOKEN` ou
   - `MESSLY_UPDATER_TOKEN`
 
-Exemplo (`.env.local`):
+Exemplo:
 
 ```env
-GH_TOKEN=seu_token_aqui
-MESSLY_UPDATER_TOKEN=seu_token_aqui
+GH_TOKEN=seu_token
 ```
 
-## 2) Entrar na pasta do projeto
+## 2) Entrar no projeto
 
 ```powershell
 cd C:\Users\marco\OneDrive\Documentos\Messly
 ```
 
-## 3) Atualizar versao
-
-Escolha a nova versao e rode:
+## 3) Atualizar versao do app
 
 ```powershell
 npm version 0.0.X --no-git-tag-version
 ```
 
-Isso atualiza `package.json` e `package-lock.json`.
-
-## 4) Publicar instalador + latest.yml
+## 4) Gerar artefatos locais
 
 ```powershell
-npm run release:win
+npm run package:win
 ```
 
-Esse comando:
+Artefatos esperados em `release/shared-runtime/artifacts/`:
 
-- gera build de producao
-- cria `release/messly-setup.exe`
-- cria `release/latest.yml`
-- envia os arquivos para `1blayze/Messly-updates` (release `v0.0.X`)
+- `MesslySetup.exe`
+- `messly-runtime-win32-x64.zip`
+- `messly-app-win32-x64.zip`
+- `runtime-manifest.json`
+- `app-manifest.json`
+- `size-report.json`
 
-## 5) Validar artefatos locais
+## 5) Validar artefatos
 
 ```powershell
 npm run release:verify
 ```
 
-Deve validar:
+## 6) Publicar release (opcional automatizado)
 
-- `release/messly-setup.exe`
-- `release/latest.yml`
-- `release/win-unpacked/resources/app.asar`
+```powershell
+npm run release:win
+```
 
-## 6) Commit, tag e push do codigo
+Por padrão, publica em:
+
+- owner: `1blayze`
+- repo: `Messly-updates`
+- tag: `v<versao-do-package.json>`
+
+Variáveis úteis:
+
+- `MESSLY_RELEASE_OWNER`
+- `MESSLY_RELEASE_REPO`
+- `MESSLY_RELEASE_TAG`
+- `MESSLY_RELEASE_NAME`
+- `MESSLY_RELEASE_BASE_URL`
+
+## 7) Commit, tag e push do código
 
 ```powershell
 git add .
@@ -71,43 +85,16 @@ git push origin main
 git push origin v0.0.X
 ```
 
-## 7) Confirmar no GitHub
+## 8) Verificacao final
 
-### Repo de updates (`Messly-updates`)
-
-Verifique se existe release `v0.0.X` com:
-
-- `latest.yml`
-- `messly-setup.exe`
-- `messly-setup.exe.blockmap`
-
-### Repo de codigo (`Messly`)
-
-Verifique:
-
-- commit no `main`
-- tag `v0.0.X`
-
-## 8) Testar no app instalado
-
-1. Abrir app instalado em uma versao anterior.
-2. Aguardar checagem de update (ou reiniciar o app).
-3. Confirmar download e instalacao.
-4. Confirmar que abriu na nova versao.
-
-## Problemas comuns
-
-### `Missing GitHub token for publish mode`
-
-Falta token no ambiente. Configure `GH_TOKEN` ou `MESSLY_UPDATER_TOKEN` no `.env.local`.
-
-### Update nao aparece no app
-
-- Verifique se `latest.yml` da release esta correto.
-- Feche e abra o app para forcar nova checagem.
-- Confirme que o app instalado aponta para `1blayze/Messly-updates`.
-
-### Erro de permissao ao publicar release
-
-O token precisa permissao de `repo` para criar release e upload de assets.
-
+- Confirmar assets da release no GitHub:
+  - `MesslySetup.exe`
+  - `messly-runtime-win32-x64.zip`
+  - `messly-app-win32-x64.zip`
+  - `runtime-manifest.json`
+  - `app-manifest.json`
+- Instalar com `MesslySetup.exe` em maquina limpa.
+- Confirmar criacao dos caminhos:
+  - `%LOCALAPPDATA%\Messly\runtime`
+  - `%LOCALAPPDATA%\Messly\app`
+- Confirmar que atualizacoes de runtime e app ocorrem de forma independente.

@@ -148,6 +148,23 @@ function getFileExtension(fileName: string, fallback: string): string {
   return extension || fallback;
 }
 
+function getProfileMediaExtensionFromContentType(contentTypeRaw: string, fallback: string): string {
+  const contentType = String(contentTypeRaw ?? "").trim().toLowerCase();
+  if (contentType === "image/gif") {
+    return "gif";
+  }
+  if (contentType === "image/png") {
+    return "png";
+  }
+  if (contentType === "image/jpeg") {
+    return "jpg";
+  }
+  if (contentType === "image/webp") {
+    return "webp";
+  }
+  return fallback;
+}
+
 function sanitizeSha256(sha256Raw: string): string {
   const normalized = String(sha256Raw ?? "").trim().toLowerCase();
   if (!SHA256_REGEX.test(normalized)) {
@@ -226,10 +243,14 @@ function resolveUploadKey(userId: string, input: CreateUploadInput): string {
   const safeName = sanitizeFileName(input.fileName);
 
   switch (input.kind) {
-    case "avatar":
-      return `avatars/${userId}.webp`;
-    case "banner":
-      return `banners/${userId}.webp`;
+    case "avatar": {
+      const extension = getProfileMediaExtensionFromContentType(input.contentType, getFileExtension(safeName, "webp"));
+      return `avatars/${userId}.${extension}`;
+    }
+    case "banner": {
+      const extension = getProfileMediaExtensionFromContentType(input.contentType, getFileExtension(safeName, "webp"));
+      return `banners/${userId}.${extension}`;
+    }
     case "message_image":
       return `messages/images/${input.sha256}.webp`;
     case "message_image_preview":

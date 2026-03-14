@@ -1,10 +1,12 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import dotenv from "dotenv";
 
 const shouldPublish = process.argv.includes("--publish");
 const publishMode = shouldPublish ? "always" : "never";
+const windowsTarget = String(process.env.MESSLY_WINDOWS_TARGET ?? "nsis-web").trim() || "nsis-web";
+process.env.MESSLY_WINDOWS_TARGET = windowsTarget;
 const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
 const npmExecPath = String(process.env.npm_execpath ?? "").trim();
 
@@ -93,10 +95,16 @@ function bumpPackageVersion() {
   process.stdout.write(`[release] version bumped: ${currentVersion} -> ${nextVersion}\n`);
 }
 
-if (readBooleanFlag(process.env.MESSLY_AUTO_BUMP_VERSION, true)) {
+if (readBooleanFlag(process.env.MESSLY_AUTO_BUMP_VERSION, false)) {
   bumpPackageVersion();
 } else {
   process.stdout.write("[release] automatic version bump disabled by MESSLY_AUTO_BUMP_VERSION.\n");
+}
+
+const releaseDirPath = resolve(process.cwd(), "release");
+if (existsSync(releaseDirPath)) {
+  rmSync(releaseDirPath, { recursive: true, force: true });
+  process.stdout.write("[release] cleaned previous release artifacts.\n");
 }
 
 if (npmExecPath) {
@@ -109,7 +117,8 @@ if (!existsSync(electronBuilderCliPath)) {
   process.stderr.write(`[release] electron-builder CLI not found at ${electronBuilderCliPath}\n`);
   process.exit(1);
 }
-runOrThrow(process.execPath, [electronBuilderCliPath, "--win", "nsis", "--publish", publishMode]);
+process.stdout.write(`[release] windows target: ${windowsTarget}\n`);
+runOrThrow(process.execPath, [electronBuilderCliPath, "--win", windowsTarget, "--publish", publishMode]);
 
 if (npmExecPath) {
   runOrThrow(process.execPath, [npmExecPath, "run", "release:verify"]);

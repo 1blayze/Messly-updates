@@ -239,6 +239,13 @@
   cursor: not-allowed;
 }
 
+.hint {
+  margin: 0;
+  color: rgba(225, 232, 241, 0.74);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .error {
   margin: 0;
   color: #f4a4ac;

@@ -44,6 +44,28 @@ const BOOTSTRAP_SESSION_VALIDATION_TIMEOUT_MS = 12_000;
 const BOOTSTRAP_OPTIONAL_TASK_TIMEOUT_MS = 12_000;
 const BOOTSTRAP_CACHE_WARMUP_TIMEOUT_MS = 8_000;
 
+function emitBootstrapDiagnostic(
+  event: string,
+  details: Record<string, unknown> = {},
+  level: "debug" | "info" | "warn" | "error" = "info",
+): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const logDiagnostic = window.electronAPI?.logDiagnostic;
+  if (typeof logDiagnostic !== "function") {
+    return;
+  }
+
+  void logDiagnostic({
+    source: "renderer-bootstrap",
+    event,
+    level,
+    details,
+  }).catch(() => undefined);
+}
+
 function normalizeProgress(value: number): number {
   if (!Number.isFinite(value)) {
     return 0;
@@ -243,6 +265,9 @@ class AppBootstrapController {
     this.runId += 1;
     this.activeUserId = null;
     this.runningPromise = null;
+    emitBootstrapDiagnostic("reset-for-guest", {
+      runId: this.runId,
+    }, "debug");
     setChatMessagesCacheAccountScope("guest");
     stopRuntimeServices();
     setRealtimeCacheAccountScope("guest");
@@ -278,6 +303,10 @@ class AppBootstrapController {
       userId,
       runId: currentRunId,
     });
+    emitBootstrapDiagnostic("start", {
+      userId,
+      runId: currentRunId,
+    });
 
     this.commit({
       phase: "running",
@@ -297,6 +326,13 @@ class AppBootstrapController {
         if (!this.isRunCurrent(currentRunId)) {
           return false;
         }
+        emitBootstrapDiagnostic("phase-running", {
+          userId,
+          runId: currentRunId,
+          statusText,
+          detailText,
+          progress,
+        }, "debug");
         this.commit({
           phase: "running",
           userId,
@@ -316,6 +352,12 @@ class AppBootstrapController {
             `Bootstrap optional task timed out: ${taskId}`,
           );
         } catch (error) {
+          emitBootstrapDiagnostic("optional-task-skipped", {
+            userId,
+            runId: currentRunId,
+            taskId,
+            reason: error instanceof Error ? error.message : String(error ?? "unknown"),
+          }, "warn");
           if (import.meta.env.DEV) {
             console.warn(`[app-bootstrap] etapa ignorada: ${taskId}`, error);
           }
@@ -334,6 +376,11 @@ class AppBootstrapController {
           "Tempo limite ao validar sessao.",
         );
       } catch (validationError) {
+        emitBootstrapDiagnostic("session-validation-timeout", {
+          userId,
+          runId: currentRunId,
+          reason: validationError instanceof Error ? validationError.message : String(validationError ?? "unknown"),
+        }, "warn");
         if (import.meta.env.DEV) {
           console.warn("[app-bootstrap] validacao da sessao excedeu tempo limite", validationError);
         }
@@ -345,6 +392,10 @@ class AppBootstrapController {
       }
 
       if (!validatedToken) {
+        emitBootstrapDiagnostic("validated-token-missing", {
+          userId,
+          runId: currentRunId,
+        }, "warn");
         if (import.meta.env.DEV) {
           console.warn("[app-bootstrap] token validado indisponivel; continuando com inicializacao degradada");
         }
@@ -372,22 +423,27 @@ class AppBootstrapController {
           "Tempo limite ao carregar cache local.",
         );
       } catch (cacheWarmupError) {
+        emitBootstrapDiagnostic("cache-warmup-skipped", {
+          userId,
+          runId: currentRunId,
+          reason: cacheWarmupError instanceof Error ? cacheWarmupError.message : String(cacheWarmupError ?? "unknown"),
+        }, "warn");
         if (import.meta.env.DEV) {
           console.warn("[app-bootstrap] warmup de cache ignorado", cacheWarmupError);
         }
       }
       hydrateStoreFromRuntimeCache(cacheSnapshot);
 
-      if (!updateRunning("Preparando interface", 0.72, "Aquecendo componentes principais")) {
+      if (!updateRunning("Preparando interface", 0.72, "Aquecendo componentes em segundo plano")) {
         return;
       }
-      await runOptionalTask("app-shell", async () => {
+      void runOptionalTask("app-shell", async () => {
         await warmAppShellChunk();
       });
-      await runOptionalTask("dm-sidebar", async () => {
+      void runOptionalTask("dm-sidebar", async () => {
         await warmDirectMessagesSidebarChunk();
       });
-      await runOptionalTask("chat-view", async () => {
+      void runOptionalTask("chat-view", async () => {
         await warmDirectMessageChatChunk();
       });
 
@@ -408,6 +464,10 @@ class AppBootstrapController {
         error: null,
       });
       markRuntimePerf("bootstrap:ready", {
+        userId,
+        runId: currentRunId,
+      });
+      emitBootstrapDiagnostic("ready", {
         userId,
         runId: currentRunId,
       });
@@ -457,6 +517,11 @@ class AppBootstrapController {
         if (currentRunId !== this.runId) {
           return;
         }
+        emitBootstrapDiagnostic("error", {
+          userId,
+          runId: currentRunId,
+          reason: resolveErrorMessage(error),
+        }, "error");
         markRuntimePerf("bootstrap:error", {
           userId,
           runId: currentRunId,

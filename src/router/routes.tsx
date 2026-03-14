@@ -23,7 +23,7 @@ const VerifyEmailPage = lazy(() => import("../auth/VerifyEmailPage"));
 const STARTUP_FONTS_TIMEOUT_MS = 900;
 const STARTUP_READY_MAX_RETRIES = 10;
 const STARTUP_LAYOUT_STABILITY_DELTA = 1;
-const APP_BOOTSTRAP_STALL_TIMEOUT_MS = 25_000;
+const APP_BOOTSTRAP_STALL_TIMEOUT_MS = 12_000;
 
 function nextFrame(): Promise<void> {
   return new Promise((resolve) => {

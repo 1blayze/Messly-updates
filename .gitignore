@@ -6,6 +6,8 @@ dist/
 build/
 out/
 release/
+installer/**/bin/
+installer/**/obj/
 
 # TypeScript / bundler caches
 *.tsbuildinfo

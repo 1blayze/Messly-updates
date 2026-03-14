@@ -46,20 +46,15 @@ const PRESETS: Record<ProfileMediaKind, EditPreset> = {
 
 const MAX_ZOOM = 4;
 
-function readFileAsDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = typeof reader.result === "string" ? reader.result : "";
-      if (!result) {
-        reject(new Error("Não foi possível ler a imagem selecionada."));
-        return;
-      }
-      resolve(result);
-    };
-    reader.onerror = () => reject(new Error("Não foi possível ler a imagem selecionada."));
-    reader.readAsDataURL(file);
-  });
+function isGifFile(file: File | null): boolean {
+  if (!file) {
+    return false;
+  }
+  const type = (file.type || "").toLowerCase();
+  if (type === "image/gif") {
+    return true;
+  }
+  return file.name.toLowerCase().endsWith(".gif");
 }
 
 function loadImage(src: string): Promise<HTMLImageElement> {
@@ -81,6 +76,7 @@ function loadImage(src: string): Promise<HTMLImageElement> {
 export default function ImageEditModal({ isOpen, kind, file, isApplying = false, onClose, onApply }: ImageEditModalProps) {
   const preset = PRESETS[kind];
   const isAvatar = preset.mask === "circle";
+  const isGif = useMemo(() => isGifFile(file), [file]);
 
   const [zoom, setZoom] = useState(1);
   const [panX, setPanX] = useState(0);
@@ -125,13 +121,13 @@ export default function ImageEditModal({ isOpen, kind, file, isApplying = false,
     setRotationDegrees(0);
     setErrorMessage(null);
     setDragState(null);
+    setSourceImage(null);
 
-    void readFileAsDataUrl(file)
-      .then(async (dataUrl) => {
-        if (isActive) {
-          setSourceUrl(dataUrl);
-        }
-        const image = await loadImage(dataUrl);
+    const objectUrl = URL.createObjectURL(file);
+    setSourceUrl(objectUrl);
+
+    void loadImage(objectUrl)
+      .then((image) => {
         if (isActive) {
           setSourceImage(image);
         }
@@ -146,6 +142,7 @@ export default function ImageEditModal({ isOpen, kind, file, isApplying = false,
 
     return () => {
       isActive = false;
+      URL.revokeObjectURL(objectUrl);
     };
   }, [file, isOpen]);
 
@@ -220,13 +217,18 @@ export default function ImageEditModal({ isOpen, kind, file, isApplying = false,
     };
   }, [sourceImage, transform]);
 
-  const canApply = useMemo(
-    () => Boolean(file && sourceImage && sourceUrl && transform) && !isApplying && !isPreparing,
-    [file, isApplying, isPreparing, sourceImage, sourceUrl, transform],
-  );
+  const canApply = useMemo(() => {
+    if (!file || !sourceUrl || isApplying || isPreparing) {
+      return false;
+    }
+    if (isGif) {
+      return true;
+    }
+    return Boolean(sourceImage && transform);
+  }, [file, isApplying, isPreparing, isGif, sourceImage, sourceUrl, transform]);
 
   const handleApply = async (): Promise<void> => {
-    if (!file || !sourceImage || !transform || isApplying || isPreparing) {
+    if (!file || isApplying || isPreparing) {
       return;
     }
 
@@ -234,6 +236,15 @@ export default function ImageEditModal({ isOpen, kind, file, isApplying = false,
     setIsPreparing(true);
 
     try {
+      if (isGif) {
+        await onApply(file);
+        return;
+      }
+
+      if (!sourceImage || !transform) {
+        return;
+      }
+
       const editedFile = await exportCroppedImage({
         image: sourceImage,
         fileName: file.name,
@@ -257,7 +268,7 @@ export default function ImageEditModal({ isOpen, kind, file, isApplying = false,
   };
 
   const handleStagePointerDown = (event: ReactPointerEvent<HTMLDivElement>): void => {
-    if (!sourceImage || isApplying || isPreparing || event.button !== 0) {
+    if (isGif || !sourceImage || isApplying || isPreparing || event.button !== 0) {
       return;
     }
 
@@ -307,7 +318,7 @@ export default function ImageEditModal({ isOpen, kind, file, isApplying = false,
           setPanY(0);
           setRotationDegrees(0);
         }}
-        disabled={isApplying || isPreparing}
+        disabled={isGif || isApplying || isPreparing}
       >
         Redefinir
       </button>
@@ -375,7 +386,8 @@ export default function ImageEditModal({ isOpen, kind, file, isApplying = false,
           min={1}
           max={MAX_ZOOM}
           step={0.01}
-          disabled={isApplying || isPreparing}
+          disabled={isGif || isApplying || isPreparing}
+          infoMessage={isGif ? "Para manter a animacao, GIF sera enviado sem recorte." : null}
           errorMessage={errorMessage}
           onZoomChange={setZoom}
           onReset={() => {
@@ -390,3 +402,4 @@ export default function ImageEditModal({ isOpen, kind, file, isApplying = false,
     </Modal>
   );
 }
+

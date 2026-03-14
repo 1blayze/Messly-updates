@@ -1306,11 +1306,6 @@ function formatSessionActiveForLabel(createdAt: number | null, lastSeenAt: numbe
   return `Ativo ${relative}`;
 }
 
-function formatMaskedIpLabel(ipAddressMaskedRaw: string | null | undefined): string {
-  const ipAddressMasked = String(ipAddressMaskedRaw ?? "").trim();
-  return ipAddressMasked ? `IP: ${ipAddressMasked}` : "IP: indisponível";
-}
-
 function formatDeviceLocationLabel(locationLabelRaw: string | null | undefined): string | null {
   const raw = String(locationLabelRaw ?? "").trim();
   if (!raw) {
@@ -3592,6 +3587,7 @@ export default function AppSettingsView({
     [deviceSessions],
   );
   const hasOtherDeviceSessions = otherDeviceSessions.length > 0;
+  const hasKnownDeviceSessions = deviceSessions.length > 0;
   const openEndDeviceSessionModal = useCallback(
     (session: DeviceSessionItem): void => {
       if (
@@ -3621,7 +3617,7 @@ export default function AppSettingsView({
     setPendingDeviceSessionFeedback(null);
   }, [endingDeviceSessionId, isEndingAllOtherDeviceSessions]);
   const openEndAllOtherSessionsModal = useCallback((): void => {
-    if (!hasOtherDeviceSessions || endingDeviceSessionId || isEndingAllOtherDeviceSessions) {
+    if (!hasKnownDeviceSessions || endingDeviceSessionId || isEndingAllOtherDeviceSessions) {
       return;
     }
 
@@ -3630,7 +3626,7 @@ export default function AppSettingsView({
     setEndAllOtherSessionsFeedback(null);
     setDeviceSessionsFeedback(null);
     setDeviceSessionsError(null);
-  }, [endingDeviceSessionId, hasOtherDeviceSessions, isEndingAllOtherDeviceSessions]);
+  }, [endingDeviceSessionId, hasKnownDeviceSessions, isEndingAllOtherDeviceSessions]);
   const closeEndAllOtherSessionsModal = useCallback((): void => {
     if (isEndingAllOtherDeviceSessions || endingDeviceSessionId) {
       return;
@@ -3714,7 +3710,7 @@ export default function AppSettingsView({
     setPendingDeviceSessionFeedback(null);
   }, [handleEndDeviceSession, pendingDeviceSession, pendingDeviceSessionPasswordInput]);
   const handleConfirmEndAllOtherSessions = useCallback(async (): Promise<void> => {
-    if (!hasOtherDeviceSessions) {
+    if (!hasKnownDeviceSessions) {
       setIsEndAllOtherSessionsModalOpen(false);
       return;
     }
@@ -3736,35 +3732,35 @@ export default function AppSettingsView({
       const signOutWithScope = supabase.auth.signOut as unknown as (
         options: { scope: "global" | "local" | "others" },
       ) => Promise<{ error: unknown | null }>;
-      const signOutResult = await signOutWithScope({ scope: "others" }).catch(() => ({ error: null }));
+      const signOutResult = await signOutWithScope({ scope: "global" }).catch(() => ({ error: null }));
       if (signOutResult?.error && import.meta.env.DEV) {
-        console.warn("[devices:end-all-other-sessions:signout-others]", signOutResult.error);
+        console.warn("[devices:end-all-sessions:signout-global]", signOutResult.error);
       }
 
       dismissedLoginSessionsRef.current.clear();
       writeDismissedLoginSessions(dismissedLoginSessionsStorageScope, dismissedLoginSessionsRef.current);
       writeCachedLoginSessions(loginSessionsCacheStorageScope, []);
 
-      setDeviceSessions((current) => current.filter((entry) => entry.isCurrent));
-      setDeviceSessionsFeedback({ tone: "success", message: "Todas as sessões foram encerradas." });
+      setDeviceSessions([]);
+      setDeviceSessionsFeedback({ tone: "success", message: "Todas as sessões conhecidas foram encerradas." });
       setIsEndAllOtherSessionsModalOpen(false);
       setEndAllOtherSessionsPasswordInput("");
       setEndAllOtherSessionsFeedback(null);
-      void refreshDeviceSessionsFromServer().catch(() => undefined);
+      await signOutCurrent();
     } catch (error) {
-      console.error("[devices:end-all-other-sessions]", error);
+      console.error("[devices:end-all-sessions]", error);
       setEndAllOtherSessionsFeedback({ tone: "error", message: getAccountActionErrorMessage(error) });
-      setDeviceSessionsError("Não foi possível encerrar as outras sessões agora.");
+      setDeviceSessionsError("Não foi possível encerrar todas as sessões agora.");
     } finally {
       setIsEndingAllOtherDeviceSessions(false);
     }
   }, [
     dismissedLoginSessionsStorageScope,
     endAllOtherSessionsPasswordInput,
-    hasOtherDeviceSessions,
+    hasKnownDeviceSessions,
     loginSessionsCacheStorageScope,
     reauthenticateCurrentEmailSession,
-    refreshDeviceSessionsFromServer,
+    signOutCurrent,
   ]);
   const spotifyOAuthEnabled = isSpotifyOAuthConfigured();
   const isSpotifyConnected = spotifyConnection.connected;
@@ -4804,12 +4800,6 @@ export default function AppSettingsView({
       return;
     }
 
-    // Send avatar GIFs directly to preserve animation.
-    if (kind === "avatar" && file.type.toLowerCase() === "image/gif") {
-      void uploadProfileMedia(kind, file);
-      return;
-    }
-
     setPendingImageEdit({ kind, file });
   };
 
@@ -5663,7 +5653,7 @@ export default function AppSettingsView({
                         ref={bannerFileInputRef}
                         className={styles.fileInput}
                         type="file"
-                        accept="image/png,image/jpeg,image/webp"
+                        accept="image/png,image/jpeg,image/webp,image/gif"
                         disabled={isBannerUploading || !canUploadMedia}
                         onChange={(event) => {
                           handleProfileMediaFileChange("banner", event);
@@ -6574,7 +6564,6 @@ export default function AppSettingsView({
 
                           {(() => {
                             const currentLocationLabel = formatDeviceLocationLabel(currentDeviceSession.locationLabel);
-                            const currentIpLabel = formatMaskedIpLabel(currentDeviceSession.ipAddressMasked);
 
                             return (
                               <article className={`${styles.deviceRow} ${styles.deviceRowCurrent}`}>
@@ -6594,7 +6583,6 @@ export default function AppSettingsView({
                                   <p className={styles.deviceMetaLine}>
                                     {currentLocationLabel ?? "Localização não disponível"}
                                   </p>
-                                  <p className={styles.deviceMetaLine}>{currentIpLabel}</p>
                                 </div>
                               </article>
                             );
@@ -6614,7 +6602,6 @@ export default function AppSettingsView({
                               );
                               const sessionRelativeLabel = sessionAgeLabel.replace(/^Ativo\s+/i, "");
                               const locationLabel = formatDeviceLocationLabel(session.locationLabel);
-                              const ipLabel = formatMaskedIpLabel(session.ipAddressMasked);
                               const canEndSession = !session.isCurrent && isUuidLike(String(session.sessionId ?? ""));
                               const isEndingSession = endingDeviceSessionId === session.sessionId;
 
@@ -6634,7 +6621,6 @@ export default function AppSettingsView({
                                     <p className={styles.deviceMetaLine}>
                                       {`${locationLabel ?? "Localização não disponível"} - ${sessionRelativeLabel}`}
                                     </p>
-                                    <p className={styles.deviceMetaLine}>{ipLabel}</p>
                                   </div>
 
                                   {canEndSession ? (
@@ -6671,7 +6657,7 @@ export default function AppSettingsView({
                       type="button"
                       className={styles.devicesEndAllDangerButton}
                       onClick={openEndAllOtherSessionsModal}
-                      disabled={!hasOtherDeviceSessions || Boolean(endingDeviceSessionId) || isEndingAllOtherDeviceSessions}
+                      disabled={!hasKnownDeviceSessions || Boolean(endingDeviceSessionId) || isEndingAllOtherDeviceSessions}
                     >
                       {isEndingAllOtherDeviceSessions ? "Encerrando sessões..." : "Sair de todos os dispositivos conhecidos"}
                     </button>
@@ -6884,9 +6870,6 @@ export default function AppSettingsView({
               <p className={styles.deviceSessionSummaryLine}>
                 {formatDeviceLocationLabel(pendingDeviceSession.locationLabel) ?? "Localização não disponível"}
               </p>
-              <p className={styles.deviceSessionSummaryLine}>
-                {formatMaskedIpLabel(pendingDeviceSession.ipAddressMasked)}
-              </p>
             </div>
           ) : null}
 
@@ -6929,7 +6912,7 @@ export default function AppSettingsView({
       <Modal
         isOpen={isEndAllOtherSessionsModalOpen}
         title="Encerrar todas as sessões"
-        ariaLabel="Confirmar encerramento de todas as outras sessões"
+        ariaLabel="Confirmar encerramento de todas as sessões conhecidas"
         onClose={closeEndAllOtherSessionsModal}
         panelClassName={styles.accountModalPanel}
         bodyClassName={styles.accountModalBody}
@@ -6959,7 +6942,7 @@ export default function AppSettingsView({
       >
         <div className={styles.accountModalForm}>
           <p className={styles.accountModalDescription}>
-            Isso irá desconectar sua conta de todos os outros dispositivos. Você continuará conectado apenas neste dispositivo.
+            Isso irá desconectar sua conta de todos os dispositivos conhecidos, incluindo este dispositivo atual.
           </p>
 
           <label className={styles.accountModalLabel} htmlFor="device-session-end-all-password-input">

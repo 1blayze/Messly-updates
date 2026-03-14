@@ -9,19 +9,30 @@ function safeString(value) {
   return normalized || null;
 }
 
-function pickAssetName(info) {
+function pickAssetMetadata(info) {
   const files = Array.isArray(info?.files) ? info.files : [];
   for (const file of files) {
     const fromName = safeString(file?.name);
+    const size = Number(file?.size ?? 0);
+    const normalizedSize = Number.isFinite(size) && size > 0 ? Math.trunc(size) : 0;
     if (fromName) {
-      return fromName;
+      return {
+        name: fromName,
+        size: normalizedSize,
+      };
     }
     const fromUrl = safeString(file?.url);
     if (fromUrl) {
-      return path.basename(fromUrl);
+      return {
+        name: path.basename(fromUrl),
+        size: normalizedSize,
+      };
     }
   }
-  return null;
+  return {
+    name: null,
+    size: 0,
+  };
 }
 
 function normalizeReleaseNotes(rawNotes) {
@@ -74,6 +85,7 @@ function createElectronUpdaterAdapter({ app }) {
     assetName: null,
     downloadedBytes: 0,
     totalBytes: 0,
+    bytesPerSecond: 0,
     progressPercent: 0,
     lastCheckedAt: null,
     errorMessage: null,
@@ -82,6 +94,9 @@ function createElectronUpdaterAdapter({ app }) {
   let broadcast = () => {};
   let autoCheckTimer = null;
   let latestDownloadedFile = "";
+  let checkPromise = null;
+  let downloadPromise = null;
+  let installPromise = null;
 
   const emit = () => {
     try {
@@ -104,6 +119,7 @@ function createElectronUpdaterAdapter({ app }) {
       assetName: null,
       downloadedBytes: 0,
       totalBytes: 0,
+      bytesPerSecond: 0,
       progressPercent: 0,
       errorMessage: null,
       lastCheckedAt: new Date().toISOString(),
@@ -119,11 +135,16 @@ function createElectronUpdaterAdapter({ app }) {
     state.releaseName = safeString(info.releaseName) ?? state.releaseName;
     state.publishedAt = safeString(info.releaseDate) ?? state.publishedAt;
     state.releaseNotes = normalizeReleaseNotes(info.releaseNotes) ?? state.releaseNotes;
-    state.assetName = pickAssetName(info) ?? state.assetName;
+    const asset = pickAssetMetadata(info);
+    state.assetName = asset.name ?? state.assetName;
+    if (asset.size > 0) {
+      state.totalBytes = asset.size;
+    }
   };
 
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = false;
+  autoUpdater.allowDowngrade = false;
 
   autoUpdater.on("checking-for-update", () => {
     setState({
@@ -141,6 +162,7 @@ function createElectronUpdaterAdapter({ app }) {
       progressPercent: 0,
       downloadedBytes: 0,
       totalBytes: 0,
+      bytesPerSecond: 0,
       lastCheckedAt: new Date().toISOString(),
     });
   });
@@ -153,6 +175,7 @@ function createElectronUpdaterAdapter({ app }) {
       progressPercent: 0,
       downloadedBytes: 0,
       totalBytes: 0,
+      bytesPerSecond: 0,
       lastCheckedAt: new Date().toISOString(),
     });
   });
@@ -163,6 +186,7 @@ function createElectronUpdaterAdapter({ app }) {
       errorMessage: null,
       downloadedBytes: Number(progress?.transferred ?? 0) || 0,
       totalBytes: Number(progress?.total ?? 0) || 0,
+      bytesPerSecond: Number(progress?.bytesPerSecond ?? 0) || 0,
       progressPercent: Number(progress?.percent ?? 0) || 0,
     });
   });
@@ -174,6 +198,7 @@ function createElectronUpdaterAdapter({ app }) {
       errorMessage: null,
       progressPercent: 100,
       downloadedBytes: state.totalBytes || state.downloadedBytes,
+      bytesPerSecond: 0,
     });
   });
 
@@ -190,69 +215,173 @@ function createElectronUpdaterAdapter({ app }) {
   });
 
   async function checkForUpdates() {
-    try {
-      await autoUpdater.checkForUpdates();
-      return { ...state };
-    } catch (error) {
-      if (isNoPublishedReleaseError(error)) {
-        setUnavailableState();
-        return { ...state };
-      }
-      const message = getErrorMessage(error) || "Falha ao verificar atualizacao.";
-      setState({
-        status: "error",
-        errorMessage: message,
-        lastCheckedAt: new Date().toISOString(),
-      });
-      throw new Error(message);
+    if (checkPromise) {
+      return checkPromise;
     }
+
+    checkPromise = (async () => {
+      try {
+        setState({
+          status: "checking",
+          errorMessage: null,
+          lastCheckedAt: new Date().toISOString(),
+        });
+        const result = await autoUpdater.checkForUpdates();
+        const updateInfo = result?.updateInfo;
+        if (updateInfo) {
+          applyInfoToState(updateInfo);
+        }
+        if (String(state.status ?? "").trim().toLowerCase() === "checking") {
+          setUnavailableState();
+        }
+        return { ...state };
+      } catch (error) {
+        if (isNoPublishedReleaseError(error)) {
+          setUnavailableState();
+          return { ...state };
+        }
+        const message = getErrorMessage(error) || "Falha ao verificar atualizacao.";
+        setState({
+          status: "error",
+          errorMessage: message,
+          lastCheckedAt: new Date().toISOString(),
+        });
+        throw new Error(message);
+      } finally {
+        checkPromise = null;
+      }
+    })();
+
+    return checkPromise;
   }
 
   async function downloadUpdate() {
-    try {
+    if (downloadPromise) {
+      return downloadPromise;
+    }
+
+    downloadPromise = (async () => {
+      const currentStatus = String(state.status ?? "").trim().toLowerCase();
+      if (currentStatus === "downloaded") {
+        return {
+          state: { ...state },
+          filePath: latestDownloadedFile,
+        };
+      }
+
+      if (currentStatus !== "available" && currentStatus !== "downloading") {
+        await checkForUpdates();
+      }
+
+      const statusAfterCheck = String(state.status ?? "").trim().toLowerCase();
+      if (statusAfterCheck !== "available" && statusAfterCheck !== "downloading" && statusAfterCheck !== "downloaded") {
+        throw new Error("Nenhuma atualizacao disponivel para download.");
+      }
+
+      setState({
+        status: "downloading",
+        errorMessage: null,
+        downloadedBytes: 0,
+        totalBytes: Number(state.totalBytes ?? 0) || 0,
+        bytesPerSecond: 0,
+        progressPercent: 0,
+      });
+
       const result = await autoUpdater.downloadUpdate();
       const filePath = Array.isArray(result) ? String(result[0] ?? "") : String(result ?? "");
       latestDownloadedFile = filePath || latestDownloadedFile;
+      if (String(state.status ?? "").trim().toLowerCase() !== "downloaded") {
+        setState({
+          status: "downloaded",
+          errorMessage: null,
+          downloadedBytes: state.totalBytes || state.downloadedBytes,
+          bytesPerSecond: 0,
+          progressPercent: 100,
+        });
+      }
       return {
         state: { ...state },
         filePath: latestDownloadedFile,
       };
-    } catch (error) {
-      const message = getErrorMessage(error) || "Falha ao baixar atualizacao.";
-      setState({
-        status: "error",
-        errorMessage: message,
+    })()
+      .catch((error) => {
+        const message = getErrorMessage(error) || "Falha ao baixar atualizacao.";
+        setState({
+          status: "error",
+          errorMessage: message,
+          bytesPerSecond: 0,
+        });
+        throw new Error(message);
+      })
+      .finally(() => {
+        downloadPromise = null;
       });
-      throw new Error(message);
-    }
+
+    return downloadPromise;
   }
 
   async function installUpdate() {
+    if (installPromise) {
+      return installPromise;
+    }
+
     if (state.status !== "downloaded") {
       throw new Error("Atualizacao ainda nao foi baixada.");
     }
-    setState({
-      status: "installing",
-      errorMessage: null,
-      progressPercent: 100,
-      downloadedBytes: state.totalBytes || state.downloadedBytes,
-    });
-    setImmediate(() => {
-      try {
-        autoUpdater.quitAndInstall(true, true);
-      } catch {}
-    });
-    return {
-      launched: true,
-    };
+
+    installPromise = (async () => {
+      setState({
+        status: "installing",
+        errorMessage: null,
+        progressPercent: 100,
+        downloadedBytes: state.totalBytes || state.downloadedBytes,
+        bytesPerSecond: 0,
+      });
+
+      await new Promise((resolve) => {
+        setTimeout(resolve, 80);
+      });
+
+      setState({
+        status: "relaunching",
+        errorMessage: null,
+        progressPercent: 100,
+        downloadedBytes: state.totalBytes || state.downloadedBytes,
+        bytesPerSecond: 0,
+      });
+
+      setImmediate(() => {
+        try {
+          autoUpdater.quitAndInstall(true, true);
+        } catch (error) {
+          const message = getErrorMessage(error) || "Falha ao aplicar atualizacao.";
+          setState({
+            status: "error",
+            errorMessage: message,
+          });
+        }
+      });
+
+      return {
+        launched: true,
+      };
+    })()
+      .finally(() => {
+        installPromise = null;
+      });
+
+    return installPromise;
   }
 
-  function startAutoCheck(intervalMs) {
+  function startAutoCheck(intervalMs, options = {}) {
     if (autoCheckTimer) {
       clearInterval(autoCheckTimer);
       autoCheckTimer = null;
     }
-    void checkForUpdates().catch(() => {});
+    const skipInitialCheck = Boolean(options?.skipInitialCheck);
+    if (!skipInitialCheck) {
+      void checkForUpdates().catch(() => {});
+    }
     const safeInterval = Number(intervalMs);
     const delay = Number.isFinite(safeInterval) && safeInterval >= 60_000 ? Math.trunc(safeInterval) : 30 * 60 * 1000;
     autoCheckTimer = setInterval(() => {

@@ -6,12 +6,13 @@ const BANNER_MAX_BYTES = 5 * BYTE_PER_MB;
 const AVATAR_TARGET_WIDTH = 512;
 const AVATAR_TARGET_HEIGHT = 512;
 const AVATAR_GIF_MAX_FRAMES = 60;
+const BANNER_GIF_MAX_FRAMES = 120;
 
 const BANNER_TARGET_WIDTH = 600;
 const BANNER_TARGET_HEIGHT = 240;
 
 const AVATAR_ALLOWED_TYPES = Object.freeze(["image/png", "image/jpeg", "image/webp", "image/gif"]);
-const BANNER_ALLOWED_TYPES = Object.freeze(["image/png", "image/jpeg", "image/webp"]);
+const BANNER_ALLOWED_TYPES = Object.freeze(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 
 module.exports = {
   AVATAR_ALLOWED_TYPES,
@@ -19,6 +20,7 @@ module.exports = {
   AVATAR_MAX_BYTES,
   AVATAR_TARGET_HEIGHT,
   AVATAR_TARGET_WIDTH,
+  BANNER_GIF_MAX_FRAMES,
   BANNER_ALLOWED_TYPES,
   BANNER_MAX_BYTES,
   BANNER_TARGET_HEIGHT,

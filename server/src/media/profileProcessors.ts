@@ -10,12 +10,13 @@ const BANNER_MAX_BYTES = 5 * BYTE_PER_MB;
 const AVATAR_TARGET_WIDTH = 512;
 const AVATAR_TARGET_HEIGHT = 512;
 const AVATAR_GIF_MAX_FRAMES = 60;
+const BANNER_GIF_MAX_FRAMES = 120;
 
 const BANNER_TARGET_WIDTH = 600;
 const BANNER_TARGET_HEIGHT = 240;
 
 const AVATAR_ALLOWED_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"] as const;
-const BANNER_ALLOWED_TYPES = ["image/png", "image/jpeg", "image/webp"] as const;
+const BANNER_ALLOWED_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"] as const;
 
 type ProfileMediaKind = "avatar" | "banner";
 type DetectedMimeType = "image/png" | "image/jpeg" | "image/webp" | "image/gif";
@@ -334,6 +335,31 @@ async function processAvatarUpload(buffer: Buffer): Promise<ProcessedProfileMedi
   return processStaticAvatar(buffer, detectedType.mime);
 }
 
+function processGifBanner(buffer: Buffer): ProcessedProfileMediaAssetInternal {
+  const gifMetadata = readGifMetadata(buffer);
+  if (!gifMetadata) {
+    throw invalidImage(BANNER_ALLOWED_TYPES);
+  }
+
+  if (gifMetadata.frames < 1) {
+    throw invalidImage(BANNER_ALLOWED_TYPES);
+  }
+
+  if (gifMetadata.frames > BANNER_GIF_MAX_FRAMES) {
+    throw createProcessorError("GIF_TOO_MANY_FRAMES", {
+      maxFrames: BANNER_GIF_MAX_FRAMES,
+    });
+  }
+
+  return {
+    buffer,
+    contentType: "image/gif",
+    ext: "gif",
+    hash: getHash(buffer),
+    size: buffer.length,
+  };
+}
+
 async function processBannerUpload(buffer: Buffer): Promise<ProcessedProfileMediaAssetInternal> {
   assertBannerByteLimit(buffer);
 
@@ -346,6 +372,10 @@ async function processBannerUpload(buffer: Buffer): Promise<ProcessedProfileMedi
     throw createProcessorError("UNSUPPORTED_TYPE", {
       allowedTypes: [...BANNER_ALLOWED_TYPES],
     });
+  }
+
+  if (detectedType.mime === "image/gif") {
+    return processGifBanner(buffer);
   }
 
   let metadata;

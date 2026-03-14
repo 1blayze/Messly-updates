@@ -88,6 +88,7 @@ const TWEMOJI_BASE_URL = "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/ass
 const TWEMOJI_CACHE_LIMIT = 400;
 const INITIAL_MESSAGE_CACHE_TTL_MS = 5 * 60_000;
 const STALE_MESSAGE_SEED_CACHE_TTL_MS = 30 * 60_000;
+const TRANSIENT_MISSING_MESSAGE_RETAIN_MS = 45_000;
 const INITIAL_LOADING_SKELETON_ROWS = 8;
 const MESSAGE_PROFILE_POPOVER_WIDTH = 300;
 const MESSAGE_PROFILE_POPOVER_MIN_HEIGHT = 240;
@@ -920,6 +921,50 @@ function sortMessages(messages: ChatMessageItem[]): ChatMessageItem[] {
   return sorted;
 }
 
+function shouldRetainLocalMessageDuringReload(
+  message: ChatMessageItem,
+  serverMessageIds: ReadonlySet<string>,
+  serverClientIds: ReadonlySet<string>,
+  oldestServerMessage: ChatMessageItem | null,
+  nowMs: number,
+): boolean {
+  if (serverMessageIds.has(message.id)) {
+    return false;
+  }
+
+  if (message.clientId && serverClientIds.has(message.clientId)) {
+    return false;
+  }
+
+  const createdAtMs = toTimestamp(message.createdAt);
+  if (createdAtMs <= 0) {
+    return false;
+  }
+
+  const ageMs = nowMs - createdAtMs;
+  if (ageMs > TRANSIENT_MISSING_MESSAGE_RETAIN_MS) {
+    return false;
+  }
+
+  if (!oldestServerMessage) {
+    return true;
+  }
+
+  const oldestServerCreatedAtMs = toTimestamp(oldestServerMessage.createdAt);
+  if (oldestServerCreatedAtMs <= 0) {
+    return true;
+  }
+
+  if (createdAtMs > oldestServerCreatedAtMs) {
+    return true;
+  }
+  if (createdAtMs < oldestServerCreatedAtMs) {
+    return false;
+  }
+
+  return message.id.localeCompare(oldestServerMessage.id) >= 0;
+}
+
 type MessageTrimDirection = "drop-older" | "drop-newer";
 
 interface MessageWindowTrimResult {
@@ -1629,6 +1674,16 @@ function toSafeCallErrorMessage(
     || normalizedMessage.includes("error processing ice candidate")
   ) {
     return silentWhenRecoverable ? null : "Instabilidade de conexao na chamada.";
+  }
+
+  if (
+    normalizedMessage.includes("servidor de voz indisponivel")
+    || normalizedMessage.includes("habilitar ws /voice")
+    || normalizedMessage.includes("conexao de voz encerrada antes de abrir")
+    || normalizedMessage.includes("falha ao conectar no servidor de voz")
+    || normalizedMessage.includes("tempo limite ao conectar no servidor de voz")
+  ) {
+    return "Servidor de voz indisponivel. Atualize o gateway para a versao com suporte a /voice.";
   }
 
   if (!rawMessage) {
@@ -3882,18 +3937,34 @@ export default function DirectMessageChatView({
       }
 
       const visibleServerMessages = serverMessages.filter((message) => !knownDeletedMessageIds.has(message.id));
-      const optimisticMessages = messagesRef.current.filter(
-        (message) => (message.optimistic || message.failed) && !knownDeletedMessageIds.has(message.id),
-      );
+      const localMessages = messagesRef.current.filter((message) => !knownDeletedMessageIds.has(message.id));
+      const optimisticMessages = localMessages.filter((message) => message.optimistic || message.failed);
+      const serverMessageIds = new Set(visibleServerMessages.map((message) => message.id).filter(Boolean));
       const serverClientIds = new Set(
         visibleServerMessages.map((message) => (message.clientId ? message.clientId : "")).filter(Boolean),
       );
 
       const carryOverMessages = optimisticMessages.filter(
-        (message) => !message.clientId || !serverClientIds.has(message.clientId),
+        (message) =>
+          !serverMessageIds.has(message.id) && (!message.clientId || !serverClientIds.has(message.clientId)),
       );
+      const oldestServerMessage = visibleServerMessages[0] ?? null;
+      const nowMs = Date.now();
+      const localTransientMessages = localMessages.filter(
+        (message) =>
+          !message.optimistic &&
+          !message.failed &&
+          shouldRetainLocalMessageDuringReload(
+            message,
+            serverMessageIds,
+            serverClientIds,
+            oldestServerMessage,
+            nowMs,
+          ),
+      );
+      const mergedWithCarryOver = upsertMessages(visibleServerMessages, [...carryOverMessages, ...localTransientMessages]);
       const mergedMessages = filterMessagesByVisibilityAndDeletedIds(
-        sortMessages([...visibleServerMessages, ...carryOverMessages]),
+        mergedWithCarryOver,
         knownDeletedMessageIds,
       );
       const trimmed = trimMessagesToActiveWindow(mergedMessages, "drop-older");
