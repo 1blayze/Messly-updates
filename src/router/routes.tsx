@@ -6,18 +6,9 @@ import { appBootstrap, useAppBootstrapSnapshot } from "../core/appBootstrap";
 import { markStartupUiReady } from "../app/startupUi";
 import AppStartupScreen from "../app/AppStartupScreen";
 import {
-  PublicCommunityGuidelinesPage,
-  PublicContactPage,
-  PublicCookiesPage,
-  PublicDownloadPage,
-  PublicFeaturesPage,
-  PublicIntellectualPropertyPage,
   PublicLandingPage,
   PublicPrivacyPage,
-  PublicSecurityPage,
   PublicSiteLayout,
-  PublicStatusPage,
-  PublicSupportPage,
   PublicTermsPage,
 } from "../public";
 
@@ -420,21 +411,13 @@ export default function AppRoutes() {
         {isElectronRuntime ? <Route path="/" element={<RootRedirect />} /> : null}
         <Route element={<PublicSiteLayout />}>
           {!isElectronRuntime ? <Route path="/" element={<PublicLandingPage />} /> : null}
-          <Route path="/recursos" element={<PublicFeaturesPage />} />
-          <Route path="/download" element={<PublicDownloadPage />} />
-          <Route path="/seguranca" element={<PublicSecurityPage />} />
-          <Route path="/status" element={<PublicStatusPage />} />
-          <Route path="/suporte" element={<PublicSupportPage />} />
-          <Route path="/diretrizes-da-comunidade" element={<PublicCommunityGuidelinesPage />} />
-          <Route path="/termos-de-uso" element={<PublicTermsPage />} />
-          <Route path="/politica-de-privacidade" element={<PublicPrivacyPage />} />
-          <Route path="/politica-de-cookies" element={<PublicCookiesPage />} />
-          <Route path="/contato" element={<PublicContactPage />} />
-          <Route path="/propriedade-intelectual" element={<PublicIntellectualPropertyPage />} />
+          <Route path="/terms" element={<PublicTermsPage />} />
+          <Route path="/privacy" element={<PublicPrivacyPage />} />
         </Route>
-        <Route path="/termos" element={<Navigate to="/termos-de-uso" replace />} />
-        <Route path="/privacidade" element={<Navigate to="/politica-de-privacidade" replace />} />
-        <Route path="/cookies" element={<Navigate to="/politica-de-cookies" replace />} />
+        <Route path="/termos" element={<Navigate to="/terms" replace />} />
+        <Route path="/termos-de-uso" element={<Navigate to="/terms" replace />} />
+        <Route path="/privacidade" element={<Navigate to="/privacy" replace />} />
+        <Route path="/politica-de-privacidade" element={<Navigate to="/privacy" replace />} />
         <Route path="/auth/login" element={<LoginRoute />} />
         <Route path="/auth/register" element={<RegisterRoute />} />
         <Route path="/auth/verify" element={<VerifyRoute />} />
