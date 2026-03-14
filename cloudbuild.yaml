@@ -3,8 +3,13 @@ steps:
     args:
       - build
       - -t
-      - ${_IMAGE}
+      - us-central1-docker.pkg.dev/${PROJECT_ID}/messly/messly-gateway:latest
       - .
+
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - us-central1-docker.pkg.dev/${PROJECT_ID}/messly/messly-gateway:latest
 
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk
     entrypoint: gcloud
@@ -13,7 +18,7 @@ steps:
       - deploy
       - ${_SERVICE}
       - --image
-      - ${_IMAGE}
+      - us-central1-docker.pkg.dev/${PROJECT_ID}/messly/messly-gateway:latest
       - --region
       - ${_REGION}
       - --platform
@@ -24,5 +29,4 @@ steps:
 
 substitutions:
   _SERVICE: messly-gateway
-  _REGION: us-central1
-  _IMAGE: us-central1-docker.pkg.dev/$PROJECT_ID/messly/messly-gateway:latest
+  _REGION: southamerica-east1

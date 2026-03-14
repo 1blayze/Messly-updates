@@ -397,6 +397,25 @@ export class GatewayApplication {
 
   private async handleHttpRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const url = new URL(request.url ?? "/", "http://messly.local");
+    const origin = String(request.headers.origin ?? "").trim();
+    const baseCorsHeaders: Record<string, string> = {
+      vary: "Origin",
+    };
+    if (origin && this.isAllowedOrigin(origin)) {
+      baseCorsHeaders["access-control-allow-origin"] = origin;
+      baseCorsHeaders["access-control-allow-methods"] = "GET, OPTIONS";
+      baseCorsHeaders["access-control-allow-headers"] = "authorization,content-type,x-client-version";
+    }
+
+    if ((url.pathname === "/gateway" || url.pathname === "/gateway/" || url.pathname === "/voice" || url.pathname === "/voice/")
+      && request.method?.toUpperCase() === "OPTIONS") {
+      response.writeHead(204, {
+        ...baseCorsHeaders,
+        "cache-control": "no-store",
+      });
+      response.end();
+      return;
+    }
 
     if (url.pathname === "/livez") {
       response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
@@ -439,6 +458,7 @@ export class GatewayApplication {
 
     if (url.pathname === "/gateway" || url.pathname === "/gateway/") {
       response.writeHead(426, {
+        ...baseCorsHeaders,
         "content-type": "application/json",
         "cache-control": "no-store",
         connection: "Upgrade",
@@ -455,6 +475,7 @@ export class GatewayApplication {
 
     if (url.pathname === "/voice" || url.pathname === "/voice/") {
       response.writeHead(426, {
+        ...baseCorsHeaders,
         "content-type": "application/json",
         "cache-control": "no-store",
         connection: "Upgrade",
@@ -477,7 +498,11 @@ export class GatewayApplication {
       return;
     }
 
-    response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+    response.writeHead(200, {
+      ...baseCorsHeaders,
+      "content-type": "application/json",
+      "cache-control": "no-store",
+    });
     response.end(
       JSON.stringify({
         service: "messly-gateway",

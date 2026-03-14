@@ -190,6 +190,19 @@ function toVoiceProbeHttpUrl(voiceUrlRaw: string): string | null {
   }
 }
 
+function isCrossOriginVoiceProbe(probeUrlRaw: string): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  try {
+    const probeOrigin = new URL(probeUrlRaw).origin;
+    return probeOrigin !== window.location.origin;
+  } catch {
+    return false;
+  }
+}
+
 type VoiceEndpointProbeResult = "supported" | "unsupported" | "unknown";
 
 async function probeVoiceEndpoint(voiceUrl: string): Promise<VoiceEndpointProbeResult> {
@@ -199,6 +212,9 @@ async function probeVoiceEndpoint(voiceUrl: string): Promise<VoiceEndpointProbeR
 
   const probeUrl = toVoiceProbeHttpUrl(voiceUrl);
   if (!probeUrl) {
+    return "unknown";
+  }
+  if (isCrossOriginVoiceProbe(probeUrl)) {
     return "unknown";
   }
 
@@ -821,6 +837,7 @@ export class CallService {
       this.socket = socket;
       let opened = false;
       let settled = false;
+      let sawSocketError = false;
       const openTimeoutId = setTimeout(() => {
         try {
           socket.close(1000, "VOICE_CONNECT_TIMEOUT");
@@ -844,7 +861,7 @@ export class CallService {
         settle(() => resolve());
       }, { once: true });
       socket.addEventListener("error", () => {
-        settle(() => reject(new Error("Falha ao conectar no servidor de voz.")));
+        sawSocketError = true;
       }, { once: true });
       socket.addEventListener("message", (event) => this.onSocketMessage(String(event.data ?? "")));
       socket.addEventListener("close", (event) => {
@@ -860,7 +877,11 @@ export class CallService {
           const closeLabel = Number.isFinite(closeCode) && closeCode > 0
             ? `codigo ${closeCode}${closeReason ? `: ${closeReason}` : ""}`
             : "erro de handshake";
-          settle(() => reject(new Error(`Conexao de voz encerrada antes de abrir (${closeLabel}).`)));
+          const hasHandshakeFailure = closeCode === 1006 || sawSocketError;
+          const hint = hasHandshakeFailure
+            ? " Verifique se o gateway suporta WS /voice e se MESSLY_ALLOWED_ORIGINS inclui este dominio."
+            : "";
+          settle(() => reject(new Error(`Conexao de voz encerrada antes de abrir (${closeLabel}).${hint}`)));
           return;
         }
         if (!this.disposed) {
