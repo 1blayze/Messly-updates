@@ -787,6 +787,18 @@ export class VoiceServer {
     if (!call) {
       return;
     }
+
+    const replacementConnection = this.findActiveConnectionByParticipant(connection.callId, connection.participantId);
+    if (replacementConnection && replacementConnection.connectionId !== connection.connectionId) {
+      this.logger.info("voice_socket_close_ignored_replaced_connection", {
+        callId: connection.callId,
+        staleConnectionId: connection.connectionId,
+        replacementConnectionId: replacementConnection.connectionId,
+        participantId: connection.participantId,
+      });
+      return;
+    }
+
     const participant = this.findParticipantById(call, connection.participantId);
     if (!participant) {
       return;

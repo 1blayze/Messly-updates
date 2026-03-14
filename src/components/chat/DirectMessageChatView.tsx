@@ -1755,7 +1755,8 @@ function isTransientCallSignalError(error: unknown): boolean {
   return normalizedMessage.includes("socket de voz fechado")
     || normalizedMessage.includes("resposta de voz pendente")
     || normalizedMessage.includes("tempo limite aguardando")
-    || normalizedMessage.includes("conexao de voz encerrada antes de abrir");
+    || normalizedMessage.includes("conexao de voz encerrada antes de abrir")
+    || normalizedMessage.includes("producer cannot be consumed by this peer");
 }
 
 function buildCallAudioSettingsStorageKey(userUid: string | null | undefined): string {
@@ -6633,7 +6634,7 @@ export default function DirectMessageChatView({
       };
     })();
 
-    const rejoinState = rejoinConversationId && inferredRemoteConnected
+    const rejoinState = preserveForResume && rejoinConversationId && inferredRemoteConnected
       ? {
           conversationId: rejoinConversationId,
           mode: rejoinMode,
@@ -6648,7 +6649,7 @@ export default function DirectMessageChatView({
       persistCurrentCallResumeSnapshot(rejoinState);
     }
     await resetCallUi({ preservePersistedResume: preserveForResume });
-    if (rejoinConversationId && inferredRemoteConnected) {
+    if (preserveForResume && rejoinConversationId && inferredRemoteConnected) {
       setRejoinAvailableCall(rejoinState);
     } else {
       setRejoinAvailableCall((current) => (current?.conversationId === rejoinConversationId ? null : current));
@@ -7658,7 +7659,15 @@ export default function DirectMessageChatView({
               )
               ?? "",
             ).trim();
-            if (liveSnapshot.callPhase !== "idle" && liveSession && liveCallId && resolvedTargetUid) {
+            if (
+              !isLocalCallDisconnectedRef.current &&
+              Boolean(callServiceRef.current) &&
+              liveSnapshot.callPhase !== "idle" &&
+              liveSession &&
+              liveSession.status === "active" &&
+              liveCallId &&
+              resolvedTargetUid
+            ) {
               void sendCallRealtimeEvent({
                 kind: "resume",
                 callId: liveCallId,

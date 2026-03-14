@@ -1,4 +1,15 @@
 (function () {
+  if (typeof window !== 'undefined') {
+    const pathname = window.location.pathname;
+    if (pathname === '/landing' || pathname === '/landing/' || pathname === '/landing/index.html') {
+      try {
+        window.history.replaceState(window.history.state, '', '/');
+      } catch {
+        // Best effort.
+      }
+    }
+  }
+
   const topbar = document.querySelector('.topbar');
   const menuToggle = document.getElementById('menuToggle');
   const menu = document.getElementById('menuNav');

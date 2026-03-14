@@ -404,6 +404,83 @@ function isTrackEndedError(error: unknown): boolean {
   return message.includes("track ended") || message.includes("invalidstateerror");
 }
 
+type CallCandidateType = "host" | "srflx" | "relay" | "prflx" | "unknown" | null;
+
+interface VoiceStatsSnapshot {
+  timestampMs: number;
+  outboundBytes: number | null;
+  inboundBytes: number | null;
+  smoothedPingMs: number | null;
+}
+
+interface VoiceStatsValues {
+  currentRttMs: number | null;
+  packetLossPercent: number | null;
+  outboundBytes: number | null;
+  inboundBytes: number | null;
+  localCandidateType: CallCandidateType;
+  remoteCandidateType: CallCandidateType;
+}
+
+function toFiniteNumber(value: unknown): number | null {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function toStatsEntries(report: unknown): Array<Record<string, unknown>> {
+  const entries: Array<Record<string, unknown>> = [];
+  if (!report) {
+    return entries;
+  }
+
+  const maybeReport = report as {
+    forEach?: (callback: (value: unknown) => void) => void;
+  };
+  if (typeof maybeReport.forEach === "function") {
+    maybeReport.forEach((value) => {
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        entries.push(value as Record<string, unknown>);
+      }
+    });
+    return entries;
+  }
+
+  if (Array.isArray(report)) {
+    for (const value of report) {
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        entries.push(value as Record<string, unknown>);
+      }
+    }
+    return entries;
+  }
+
+  if (typeof report === "object") {
+    for (const value of Object.values(report as Record<string, unknown>)) {
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        entries.push(value as Record<string, unknown>);
+      }
+    }
+  }
+
+  return entries;
+}
+
+function toCandidateType(value: unknown): CallCandidateType {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+  if (normalized === "host" || normalized === "srflx" || normalized === "relay" || normalized === "prflx") {
+    return normalized;
+  }
+  return "unknown";
+}
+
+function isAudioRtpEntry(entry: Record<string, unknown>): boolean {
+  const kind = String(entry.kind ?? entry.mediaType ?? "").trim().toLowerCase();
+  return kind === "audio";
+}
+
 export class CallService {
   private readonly options: CallServiceOptions;
   private audioSettings: NormalizedAudioSettings;
@@ -426,6 +503,7 @@ export class CallService {
   private readonly mediaManager: MediaDeviceManager;
   private readonly reconnectManager: ReconnectManager;
   private connectionState: RTCPeerConnectionState = "new";
+  private statsSnapshot: VoiceStatsSnapshot | null = null;
   private disposed = false;
 
   constructor(options: CallServiceOptions) {
@@ -583,6 +661,16 @@ export class CallService {
     });
 
     await this.mediaManager.ensureLocalTracks();
+
+    const hasLiveVoiceSession =
+      Boolean(this.socket && this.socket.readyState === WebSocket.OPEN) &&
+      Boolean(this.transportManager.getSendTransport()) &&
+      Boolean(this.transportManager.getRecvTransport());
+    if (hasLiveVoiceSession) {
+      await this.syncProducers("call.startOutgoing.reuse");
+      return buildOffer(this.requireSession());
+    }
+
     await this.connectToVoice("call.startOutgoing");
     await this.syncProducers("call.startOutgoing");
 
@@ -697,16 +785,49 @@ export class CallService {
             ? "closed"
             : "checking";
 
+    const stats = await this.collectVoiceStats();
+    const nowMs = Date.now();
+    const previousSnapshot = this.statsSnapshot;
+    const nextSmoothedPing = stats.currentRttMs == null
+      ? previousSnapshot?.smoothedPingMs ?? null
+      : previousSnapshot?.smoothedPingMs == null
+        ? stats.currentRttMs
+        : (previousSnapshot.smoothedPingMs * 0.75) + (stats.currentRttMs * 0.25);
+
+    let outboundBitrateKbps: number | null = null;
+    let inboundBitrateKbps: number | null = null;
+    if (previousSnapshot) {
+      const elapsedMs = Math.max(1, nowMs - previousSnapshot.timestampMs);
+      if (stats.outboundBytes != null && previousSnapshot.outboundBytes != null) {
+        const deltaBytes = Math.max(0, stats.outboundBytes - previousSnapshot.outboundBytes);
+        outboundBitrateKbps = (deltaBytes * 8) / (elapsedMs / 1_000) / 1_000;
+      }
+      if (stats.inboundBytes != null && previousSnapshot.inboundBytes != null) {
+        const deltaBytes = Math.max(0, stats.inboundBytes - previousSnapshot.inboundBytes);
+        inboundBitrateKbps = (deltaBytes * 8) / (elapsedMs / 1_000) / 1_000;
+      }
+    }
+
+    this.statsSnapshot = {
+      timestampMs: nowMs,
+      outboundBytes: stats.outboundBytes,
+      inboundBytes: stats.inboundBytes,
+      smoothedPingMs: nextSmoothedPing,
+    };
+
     return {
-      averagePingMs: null,
-      lastPingMs: null,
-      packetLossPercent: null,
-      connectionType: null,
-      localCandidateType: null,
-      remoteCandidateType: null,
-      usingRelay: null,
-      outboundBitrateKbps: null,
-      inboundBitrateKbps: null,
+      averagePingMs: nextSmoothedPing,
+      lastPingMs: stats.currentRttMs,
+      packetLossPercent: stats.packetLossPercent,
+      connectionType: stats.remoteCandidateType ?? stats.localCandidateType ?? null,
+      localCandidateType: stats.localCandidateType,
+      remoteCandidateType: stats.remoteCandidateType,
+      usingRelay:
+        stats.localCandidateType == null && stats.remoteCandidateType == null
+          ? null
+          : stats.localCandidateType === "relay" || stats.remoteCandidateType === "relay",
+      outboundBitrateKbps,
+      inboundBitrateKbps,
       connectionState: state,
       iceConnectionState,
       updatedAt: new Date().toISOString(),
@@ -730,6 +851,7 @@ export class CallService {
       this.mediaManager.dispose();
       this.sessionManager.setSession(null);
       this.sessionManager.transition("destroyed", "call.close");
+      this.statsSnapshot = null;
       this.debugLog("call_ended", {
         reason: "manual-close",
       });
@@ -737,6 +859,140 @@ export class CallService {
 
     this.options.onLocalStream?.(null);
     this.options.onRemoteStream?.(null);
+  }
+
+  private async collectVoiceStats(): Promise<VoiceStatsValues> {
+    const sendTransport = this.transportManager.getSendTransport();
+    const recvTransport = this.transportManager.getRecvTransport();
+    const [sendStatsReport, recvStatsReport] = await Promise.all([
+      sendTransport?.getStats().catch(() => null) ?? Promise.resolve(null),
+      recvTransport?.getStats().catch(() => null) ?? Promise.resolve(null),
+    ]);
+
+    const entries = [...toStatsEntries(sendStatsReport), ...toStatsEntries(recvStatsReport)];
+
+    let outboundBytesTotal = 0;
+    let outboundBytesSamples = 0;
+    let inboundBytesTotal = 0;
+    let inboundBytesSamples = 0;
+    let packetsReceivedTotal = 0;
+    let packetsLostTotal = 0;
+    let hasPacketCounters = false;
+
+    for (const entryRaw of entries) {
+      const entry = toRecord(entryRaw);
+      const type = String(entry.type ?? "").trim().toLowerCase();
+      if (type === "outbound-rtp" && isAudioRtpEntry(entry)) {
+        const bytesSent = toFiniteNumber(entry.bytesSent);
+        if (bytesSent != null) {
+          outboundBytesTotal += bytesSent;
+          outboundBytesSamples += 1;
+        }
+        continue;
+      }
+
+      if (type === "inbound-rtp" && isAudioRtpEntry(entry)) {
+        const bytesReceived = toFiniteNumber(entry.bytesReceived);
+        if (bytesReceived != null) {
+          inboundBytesTotal += bytesReceived;
+          inboundBytesSamples += 1;
+        }
+
+        const packetsReceived = toFiniteNumber(entry.packetsReceived);
+        const packetsLost = toFiniteNumber(entry.packetsLost);
+        if (packetsReceived != null) {
+          packetsReceivedTotal += Math.max(0, packetsReceived);
+          hasPacketCounters = true;
+        }
+        if (packetsLost != null) {
+          packetsLostTotal += Math.max(0, packetsLost);
+          hasPacketCounters = true;
+        }
+      }
+    }
+
+    const candidatePairs = entries
+      .map((entry) => toRecord(entry))
+      .filter((entry) => String(entry.type ?? "").trim().toLowerCase() === "candidate-pair");
+
+    const selectedPair =
+      candidatePairs.find((entry) => entry.selected === true)
+      ?? candidatePairs.find((entry) => entry.nominated === true && String(entry.state ?? "").trim().toLowerCase() === "succeeded")
+      ?? candidatePairs.find((entry) => String(entry.state ?? "").trim().toLowerCase() === "succeeded")
+      ?? null;
+
+    const localCandidateId = toId(selectedPair?.localCandidateId);
+    const remoteCandidateId = toId(selectedPair?.remoteCandidateId);
+    const localCandidate = localCandidateId
+      ? entries.find(
+        (entry) =>
+          toId(toRecord(entry).id) === localCandidateId &&
+          String(toRecord(entry).type ?? "").trim().toLowerCase() === "local-candidate",
+      )
+      : null;
+    const remoteCandidate = remoteCandidateId
+      ? entries.find(
+        (entry) =>
+          toId(toRecord(entry).id) === remoteCandidateId &&
+          String(toRecord(entry).type ?? "").trim().toLowerCase() === "remote-candidate",
+      )
+      : null;
+
+    let currentRttMs = (() => {
+      const currentRoundTripTime = toFiniteNumber(selectedPair?.currentRoundTripTime);
+      if (currentRoundTripTime != null) {
+        return currentRoundTripTime * 1_000;
+      }
+
+      const totalRoundTripTime = toFiniteNumber(selectedPair?.totalRoundTripTime);
+      const responsesReceived = toFiniteNumber(selectedPair?.responsesReceived);
+      if (totalRoundTripTime != null && responsesReceived != null && responsesReceived > 0) {
+        return (totalRoundTripTime / responsesReceived) * 1_000;
+      }
+      return null;
+    })();
+
+    if (currentRttMs == null) {
+      let rttTotalMs = 0;
+      let rttSamples = 0;
+      for (const entryRaw of entries) {
+        const entry = toRecord(entryRaw);
+        if (String(entry.type ?? "").trim().toLowerCase() !== "remote-inbound-rtp" || !isAudioRtpEntry(entry)) {
+          continue;
+        }
+
+        const roundTripTime = toFiniteNumber(entry.roundTripTime);
+        if (roundTripTime != null) {
+          rttTotalMs += roundTripTime * 1_000;
+          rttSamples += 1;
+          continue;
+        }
+
+        const totalRoundTripTime = toFiniteNumber(entry.totalRoundTripTime);
+        const reportsReceived = toFiniteNumber(entry.reportsReceived);
+        if (totalRoundTripTime != null && reportsReceived != null && reportsReceived > 0) {
+          rttTotalMs += (totalRoundTripTime / reportsReceived) * 1_000;
+          rttSamples += 1;
+        }
+      }
+
+      if (rttSamples > 0) {
+        currentRttMs = rttTotalMs / rttSamples;
+      }
+    }
+
+    const packetLossPercent = hasPacketCounters && packetsReceivedTotal + packetsLostTotal > 0
+      ? (packetsLostTotal / (packetsReceivedTotal + packetsLostTotal)) * 100
+      : null;
+
+    return {
+      currentRttMs,
+      packetLossPercent,
+      outboundBytes: outboundBytesSamples > 0 ? outboundBytesTotal : null,
+      inboundBytes: inboundBytesSamples > 0 ? inboundBytesTotal : null,
+      localCandidateType: toCandidateType(toRecord(localCandidate).candidateType),
+      remoteCandidateType: toCandidateType(toRecord(remoteCandidate).candidateType),
+    };
   }
 
   private async connectToVoice(scope: string): Promise<void> {
@@ -801,16 +1057,30 @@ export class CallService {
     this.consumerManager.clear("transport-rebuild");
     this.producerManager.closeAll("transport-rebuild");
     this.transportManager.closeTransports();
+    this.statsSnapshot = null;
 
     await this.transportManager.setup(routerRtpCapabilities, sendTransport, recvTransport);
 
     const producerRows = Array.isArray(auth.producers) ? auth.producers : [];
     for (const row of producerRows) {
-      await this.consumerManager.consumeProducer(
-        toRecord(row),
-        this.transportManager.getRecvTransport(),
-        this.transportManager.getDevice(),
-      );
+      const producerPayload = toRecord(row);
+      try {
+        await this.consumerManager.consumeProducer(
+          producerPayload,
+          this.transportManager.getRecvTransport(),
+          this.transportManager.getDevice(),
+        );
+      } catch (error) {
+        if (this.isProducerConsumeRaceError(error)) {
+          this.debugLog("consumer_skipped", {
+            reason: "initial-consume-race",
+            producerId: toId(producerPayload.producerId) || null,
+            message: error instanceof Error ? error.message : String(error ?? ""),
+          });
+          continue;
+        }
+        throw error;
+      }
     }
 
     this.debugLog("device_loaded", {
@@ -1031,6 +1301,14 @@ export class CallService {
           );
         })
         .catch((error) => {
+          if (this.isProducerConsumeRaceError(error)) {
+            this.debugLog("consumer_skipped", {
+              reason: "producer-added-consume-race",
+              producerId: toId(toRecord(frame.d).producerId) || null,
+              message: error instanceof Error ? error.message : String(error ?? ""),
+            });
+            return;
+          }
           if (this.isRecoverableCallError(error)) {
             this.requestReconnect("producer-added-consume-failed");
             return;
@@ -1221,6 +1499,15 @@ export class CallService {
     }
   }
 
+  private isProducerConsumeRaceError(error: unknown): boolean {
+    const message = String(error instanceof Error ? error.message : error ?? "").trim().toLowerCase();
+    return (
+      message.includes("producer cannot be consumed by this peer")
+      || message.includes("producer owner not found")
+      || message.includes("producer not found")
+    );
+  }
+
   private isRecoverableCallError(error: unknown): boolean {
     const message = String(error instanceof Error ? error.message : error ?? "").trim().toLowerCase();
     return (
@@ -1231,6 +1518,9 @@ export class CallService {
       || message.includes("resposta de voz pendente")
       || message.includes("tempo limite aguardando")
       || message.includes("conexao de voz encerrada antes de abrir")
+      || message.includes("producer cannot be consumed by this peer")
+      || message.includes("producer owner not found")
+      || message.includes("producer not found")
     );
   }
 }
