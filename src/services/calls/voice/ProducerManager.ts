@@ -167,4 +167,29 @@ export class ProducerManager {
     this.closeAudioProducer(reason);
     this.closeVideoProducer(reason);
   }
+
+  hasActiveAudioProducer(): boolean {
+    return Boolean(this.audioProducer && !this.audioProducer.closed);
+  }
+
+  hasProducerId(producerIdRaw: unknown): boolean {
+    const producerId = String(producerIdRaw ?? "").trim();
+    if (!producerId) {
+      return false;
+    }
+    if (this.audioProducer && !this.audioProducer.closed && this.audioProducer.id === producerId) {
+      return true;
+    }
+    if (this.videoProducer && !this.videoProducer.closed && this.videoProducer.id === producerId) {
+      return true;
+    }
+    return false;
+  }
+
+  getAudioProducerTrack(): MediaStreamTrack | null {
+    if (!this.audioProducer || this.audioProducer.closed) {
+      return null;
+    }
+    return this.audioProducer.track ?? null;
+  }
 }

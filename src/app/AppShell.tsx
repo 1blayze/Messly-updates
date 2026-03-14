@@ -907,6 +907,23 @@ function readPersistedSidebarCallStateDetail(): SidebarCallStateDetail | null {
     return {
       ...detail,
       conversationId,
+      localAudioTrackState:
+        detail.localAudioTrackState === "live" ||
+        detail.localAudioTrackState === "muted" ||
+        detail.localAudioTrackState === "ended"
+          ? detail.localAudioTrackState
+          : "missing",
+      remoteAudioTrackState:
+        detail.remoteAudioTrackState === "live" ||
+        detail.remoteAudioTrackState === "muted" ||
+        detail.remoteAudioTrackState === "ended"
+          ? detail.remoteAudioTrackState
+          : "missing",
+      sendingAudio: typeof detail.sendingAudio === "boolean" ? detail.sendingAudio : null,
+      receivingAudio: typeof detail.receivingAudio === "boolean" ? detail.receivingAudio : null,
+      remoteAudioConsumers: Number.isFinite(Number(detail.remoteAudioConsumers))
+        ? Math.max(0, Math.round(Number(detail.remoteAudioConsumers)))
+        : 0,
       micEnabled: detail.micEnabled ?? true,
       soundEnabled: detail.soundEnabled ?? true,
       isPopoutOpen: detail.isPopoutOpen ?? false,

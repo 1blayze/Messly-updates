@@ -110,6 +110,50 @@ function formatMemberSinceDate(timestamp: string | null | undefined): string {
   }).format(date);
 }
 
+function formatTrackStateLabel(stateRaw: SidebarCallStateDetail["localAudioTrackState"]): string {
+  switch (stateRaw) {
+    case "live":
+      return "Ativa";
+    case "muted":
+      return "Mutada";
+    case "ended":
+      return "Encerrada";
+    default:
+      return "Ausente";
+  }
+}
+
+function formatAudioFlowLabel(
+  value: boolean | null,
+  trackState: SidebarCallStateDetail["localAudioTrackState"],
+): string {
+  if (value === true) {
+    return "Ativo";
+  }
+  if (value === false) {
+    if (trackState === "muted") {
+      return "Mutado";
+    }
+    if (trackState === "ended") {
+      return "Encerrado";
+    }
+    if (trackState === "missing") {
+      return "Sem stream";
+    }
+    return "Sem audio";
+  }
+  if (trackState === "muted") {
+    return "Mutado";
+  }
+  if (trackState === "ended") {
+    return "Encerrado";
+  }
+  if (trackState === "missing") {
+    return "Aguardando";
+  }
+  return "--";
+}
+
 export default function UserCard({
   userId = null,
   currentUserId = null,
@@ -144,6 +188,11 @@ export default function UserCard({
     averagePingMs: null,
     lastPingMs: null,
     packetLossPercent: null,
+    localAudioTrackState: "missing",
+    remoteAudioTrackState: "missing",
+    sendingAudio: null,
+    receivingAudio: null,
+    remoteAudioConsumers: 0,
     micEnabled: true,
     soundEnabled: true,
     isPopoutOpen: false,
@@ -227,6 +276,11 @@ export default function UserCard({
   const averagePingLabel = sidebarCallState.averagePingMs == null ? "-- ms" : `${Math.max(0, Math.round(sidebarCallState.averagePingMs))} ms`;
   const lastPingLabel = sidebarCallState.lastPingMs == null ? "-- ms" : `${Math.max(0, Math.round(sidebarCallState.lastPingMs))} ms`;
   const packetLossLabel = sidebarCallState.packetLossPercent == null ? "--%" : `${sidebarCallState.packetLossPercent.toFixed(1)}%`;
+  const sendingAudioLabel = formatAudioFlowLabel(sidebarCallState.sendingAudio, sidebarCallState.localAudioTrackState);
+  const receivingAudioLabel = formatAudioFlowLabel(sidebarCallState.receivingAudio, sidebarCallState.remoteAudioTrackState);
+  const localTrackLabel = formatTrackStateLabel(sidebarCallState.localAudioTrackState);
+  const remoteTrackLabel = formatTrackStateLabel(sidebarCallState.remoteAudioTrackState);
+  const remoteConsumersLabel = `${Math.max(0, Math.round(Number(sidebarCallState.remoteAudioConsumers) || 0))}`;
   const shouldShowCallStrip =
     sidebarCallState.active &&
     sidebarCallState.phase !== "incoming" &&
@@ -260,6 +314,23 @@ export default function UserCard({
       }
       const normalizedDetail: SidebarCallStateDetail = {
         ...detail,
+        localAudioTrackState:
+          detail.localAudioTrackState === "live" ||
+          detail.localAudioTrackState === "muted" ||
+          detail.localAudioTrackState === "ended"
+            ? detail.localAudioTrackState
+            : "missing",
+        remoteAudioTrackState:
+          detail.remoteAudioTrackState === "live" ||
+          detail.remoteAudioTrackState === "muted" ||
+          detail.remoteAudioTrackState === "ended"
+            ? detail.remoteAudioTrackState
+            : "missing",
+        sendingAudio: typeof detail.sendingAudio === "boolean" ? detail.sendingAudio : null,
+        receivingAudio: typeof detail.receivingAudio === "boolean" ? detail.receivingAudio : null,
+        remoteAudioConsumers: Number.isFinite(Number(detail.remoteAudioConsumers))
+          ? Math.max(0, Math.round(Number(detail.remoteAudioConsumers)))
+          : 0,
         micEnabled: detail.micEnabled ?? true,
         soundEnabled: detail.soundEnabled ?? true,
         isPopoutOpen: detail.isPopoutOpen ?? false,
@@ -438,6 +509,23 @@ export default function UserCard({
       }
       const detail: SidebarCallStateDetail = {
         ...detailRaw,
+        localAudioTrackState:
+          detailRaw.localAudioTrackState === "live" ||
+          detailRaw.localAudioTrackState === "muted" ||
+          detailRaw.localAudioTrackState === "ended"
+            ? detailRaw.localAudioTrackState
+            : "missing",
+        remoteAudioTrackState:
+          detailRaw.remoteAudioTrackState === "live" ||
+          detailRaw.remoteAudioTrackState === "muted" ||
+          detailRaw.remoteAudioTrackState === "ended"
+            ? detailRaw.remoteAudioTrackState
+            : "missing",
+        sendingAudio: typeof detailRaw.sendingAudio === "boolean" ? detailRaw.sendingAudio : null,
+        receivingAudio: typeof detailRaw.receivingAudio === "boolean" ? detailRaw.receivingAudio : null,
+        remoteAudioConsumers: Number.isFinite(Number(detailRaw.remoteAudioConsumers))
+          ? Math.max(0, Math.round(Number(detailRaw.remoteAudioConsumers)))
+          : 0,
         micEnabled: detailRaw.micEnabled ?? true,
         soundEnabled: detailRaw.soundEnabled ?? true,
         isPopoutOpen: detailRaw.isPopoutOpen ?? false,
@@ -580,6 +668,26 @@ export default function UserCard({
                     <p className={styles.voiceDetailsMetricRow}>
                       <span className={styles.voiceDetailsMetricLabel}>Perda de pacotes</span>
                       <span className={styles.voiceDetailsMetricValue}>{packetLossLabel}</span>
+                    </p>
+                    <p className={styles.voiceDetailsMetricRow}>
+                      <span className={styles.voiceDetailsMetricLabel}>Enviando audio</span>
+                      <span className={styles.voiceDetailsMetricValue}>{sendingAudioLabel}</span>
+                    </p>
+                    <p className={styles.voiceDetailsMetricRow}>
+                      <span className={styles.voiceDetailsMetricLabel}>Recebendo audio</span>
+                      <span className={styles.voiceDetailsMetricValue}>{receivingAudioLabel}</span>
+                    </p>
+                    <p className={styles.voiceDetailsMetricRow}>
+                      <span className={styles.voiceDetailsMetricLabel}>Track local</span>
+                      <span className={styles.voiceDetailsMetricValue}>{localTrackLabel}</span>
+                    </p>
+                    <p className={styles.voiceDetailsMetricRow}>
+                      <span className={styles.voiceDetailsMetricLabel}>Track remota</span>
+                      <span className={styles.voiceDetailsMetricValue}>{remoteTrackLabel}</span>
+                    </p>
+                    <p className={styles.voiceDetailsMetricRow}>
+                      <span className={styles.voiceDetailsMetricLabel}>Streams remotos</span>
+                      <span className={styles.voiceDetailsMetricValue}>{remoteConsumersLabel}</span>
                     </p>
                   </div>
                   <p className={styles.voiceDetailsHint}>

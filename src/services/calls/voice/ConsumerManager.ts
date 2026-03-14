@@ -42,6 +42,36 @@ export class ConsumerManager {
     return new MediaStream(this.remoteStream.getTracks());
   }
 
+  hasConsumerForProducer(producerIdRaw: unknown): boolean {
+    const producerId = toId(producerIdRaw);
+    if (!producerId) {
+      return false;
+    }
+    return this.consumers.has(producerId);
+  }
+
+  getAudioConsumerCount(): number {
+    let count = 0;
+    for (const consumer of this.consumers.values()) {
+      if (String(consumer.kind ?? "").trim().toLowerCase() === "audio") {
+        count += 1;
+      }
+    }
+    return count;
+  }
+
+  getPrimaryRemoteAudioTrack(): MediaStreamTrack | null {
+    if (!this.remoteStream) {
+      return null;
+    }
+    for (const track of this.remoteStream.getAudioTracks()) {
+      if (track.readyState === "live") {
+        return track;
+      }
+    }
+    return null;
+  }
+
   async consumeProducer(
     producerPayloadRaw: Record<string, unknown>,
     recvTransport: Transport | null,
@@ -88,6 +118,15 @@ export class ConsumerManager {
       producerId,
       kind,
     });
+
+    consumer.track.onended = () => {
+      this.debugLog("consumer_track_ended", {
+        consumerId: consumer.id,
+        producerId,
+        kind,
+      });
+      this.removeConsumerByProducerId(producerId, "track-ended");
+    };
 
     consumer.on("transportclose", () => {
       this.removeConsumerByProducerId(producerId, "transport-close");

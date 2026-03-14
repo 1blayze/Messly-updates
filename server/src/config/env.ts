@@ -72,6 +72,11 @@ function isLocalHostname(hostnameRaw: string | null | undefined): boolean {
   return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
 }
 
+function isWildcardListenIp(valueRaw: string | null | undefined): boolean {
+  const value = String(valueRaw ?? "").trim().toLowerCase();
+  return value === "0.0.0.0" || value === "::" || value === "::0";
+}
+
 function normalizeHttpUrl(value: string, field: string): string {
   try {
     const parsed = new URL(value);
@@ -120,6 +125,32 @@ function toHttpBaseUrl(publicGatewayUrl: string): string {
   parsed.search = "";
   parsed.hash = "";
   return parsed.toString().replace(/\/+$/, "");
+}
+
+function resolveSfuAnnouncedIp(
+  listenIpRaw: string,
+  announcedIpRaw: string | null,
+  publicGatewayUrl: string,
+): string | null {
+  const explicitAnnouncedIp = toNonEmptyString(announcedIpRaw);
+  if (explicitAnnouncedIp) {
+    return explicitAnnouncedIp;
+  }
+
+  const listenIp = String(listenIpRaw ?? "").trim();
+  if (listenIp && !isWildcardListenIp(listenIp) && !isLocalHostname(listenIp)) {
+    return null;
+  }
+
+  try {
+    const publicGatewayHost = String(new URL(publicGatewayUrl).hostname ?? "").trim();
+    if (!publicGatewayHost || isLocalHostname(publicGatewayHost)) {
+      return null;
+    }
+    return publicGatewayHost;
+  } catch {
+    return null;
+  }
 }
 
 const envSchema = z
@@ -275,6 +306,11 @@ function parseInteger(value: string, field: string, minimum: number): number {
 function toGatewayEnv(raw: z.infer<typeof envSchema>): GatewayEnv {
   const nodeEnv = raw.NODE_ENV;
   const publicUrl = normalizeGatewayUrl(raw.MESSLY_GATEWAY_PUBLIC_URL, nodeEnv);
+  const sfuAnnouncedIp = resolveSfuAnnouncedIp(
+    raw.MESSLY_SFU_LISTEN_IP,
+    toNonEmptyString(raw.MESSLY_SFU_ANNOUNCED_IP),
+    publicUrl,
+  );
   const heartbeatIntervalMs = parseInteger(raw.MESSLY_HEARTBEAT_INTERVAL_MS, "MESSLY_HEARTBEAT_INTERVAL_MS", 5_000);
   const clientTimeoutMs = parseInteger(raw.MESSLY_CLIENT_TIMEOUT_MS, "MESSLY_CLIENT_TIMEOUT_MS", heartbeatIntervalMs * 2);
   const sfuRtcMinPort = parseInteger(raw.MESSLY_SFU_RTC_MIN_PORT, "MESSLY_SFU_RTC_MIN_PORT", 10_000);
@@ -328,7 +364,7 @@ function toGatewayEnv(raw: z.infer<typeof envSchema>): GatewayEnv {
     ),
     region: raw.MESSLY_GATEWAY_REGION,
     sfuListenIp: raw.MESSLY_SFU_LISTEN_IP,
-    sfuAnnouncedIp: toNonEmptyString(raw.MESSLY_SFU_ANNOUNCED_IP),
+    sfuAnnouncedIp,
     sfuRtcMinPort,
     sfuRtcMaxPort,
     sfuEnableUdp: parseBoolean(raw.MESSLY_SFU_ENABLE_UDP),

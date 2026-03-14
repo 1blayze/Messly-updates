@@ -2520,6 +2520,11 @@ export default function DirectMessageChatView({
     outboundBitrateKbps: number | null;
     inboundBitrateKbps: number | null;
     usingRelay: boolean | null;
+    localAudioTrackState: "live" | "muted" | "ended" | "missing";
+    remoteAudioTrackState: "live" | "muted" | "ended" | "missing";
+    sendingAudio: boolean | null;
+    receivingAudio: boolean | null;
+    remoteAudioConsumers: number;
   }>({
     averagePingMs: null,
     lastPingMs: null,
@@ -2528,6 +2533,11 @@ export default function DirectMessageChatView({
     outboundBitrateKbps: null,
     inboundBitrateKbps: null,
     usingRelay: null,
+    localAudioTrackState: "missing",
+    remoteAudioTrackState: "missing",
+    sendingAudio: null,
+    receivingAudio: null,
+    remoteAudioConsumers: 0,
   });
   const [isCallMicEnabled, setIsCallMicEnabled] = useState(true);
   const [isCallSoundEnabled, setIsCallSoundEnabled] = useState(true);
@@ -5898,6 +5908,11 @@ export default function DirectMessageChatView({
       outboundBitrateKbps: null,
       inboundBitrateKbps: null,
       usingRelay: null,
+      localAudioTrackState: "missing",
+      remoteAudioTrackState: "missing",
+      sendingAudio: null,
+      receivingAudio: null,
+      remoteAudioConsumers: 0,
     });
     setIsCallMicEnabled(true);
     setIsCallSoundEnabled(true);
@@ -7732,6 +7747,11 @@ export default function DirectMessageChatView({
             diagnostics.inboundBitrateKbps == null ? null : Number(diagnostics.inboundBitrateKbps.toFixed(1));
           const connectionType = diagnostics.connectionType ?? null;
           const usingRelay = diagnostics.usingRelay ?? null;
+          const localAudioTrackState = diagnostics.localAudioTrackState;
+          const remoteAudioTrackState = diagnostics.remoteAudioTrackState;
+          const sendingAudio = diagnostics.sendingAudio ?? null;
+          const receivingAudio = diagnostics.receivingAudio ?? null;
+          const remoteAudioConsumers = Math.max(0, Math.round(Number(diagnostics.remoteAudioConsumers ?? 0)));
           if (
             current.averagePingMs === roundedAverage &&
             current.lastPingMs === roundedLast &&
@@ -7739,7 +7759,12 @@ export default function DirectMessageChatView({
             current.outboundBitrateKbps === roundedOutboundBitrate &&
             current.inboundBitrateKbps === roundedInboundBitrate &&
             current.connectionType === connectionType &&
-            current.usingRelay === usingRelay
+            current.usingRelay === usingRelay &&
+            current.localAudioTrackState === localAudioTrackState &&
+            current.remoteAudioTrackState === remoteAudioTrackState &&
+            current.sendingAudio === sendingAudio &&
+            current.receivingAudio === receivingAudio &&
+            current.remoteAudioConsumers === remoteAudioConsumers
           ) {
             return current;
           }
@@ -7751,6 +7776,11 @@ export default function DirectMessageChatView({
             inboundBitrateKbps: roundedInboundBitrate,
             connectionType,
             usingRelay,
+            localAudioTrackState,
+            remoteAudioTrackState,
+            sendingAudio,
+            receivingAudio,
+            remoteAudioConsumers,
           };
         });
       } catch {
@@ -8043,6 +8073,11 @@ export default function DirectMessageChatView({
       averagePingMs: callVoiceDiagnostics.averagePingMs,
       lastPingMs: callVoiceDiagnostics.lastPingMs,
       packetLossPercent: callVoiceDiagnostics.packetLossPercent,
+      localAudioTrackState: callVoiceDiagnostics.localAudioTrackState,
+      remoteAudioTrackState: callVoiceDiagnostics.remoteAudioTrackState,
+      sendingAudio: callVoiceDiagnostics.sendingAudio,
+      receivingAudio: callVoiceDiagnostics.receivingAudio,
+      remoteAudioConsumers: callVoiceDiagnostics.remoteAudioConsumers,
       micEnabled: isCallMicEnabled,
       soundEnabled: isCallSoundEnabled,
       isPopoutOpen: isCallPopoutOpen,
@@ -8053,6 +8088,11 @@ export default function DirectMessageChatView({
     callVoiceDiagnostics.averagePingMs,
     callVoiceDiagnostics.lastPingMs,
     callVoiceDiagnostics.packetLossPercent,
+    callVoiceDiagnostics.localAudioTrackState,
+    callVoiceDiagnostics.remoteAudioTrackState,
+    callVoiceDiagnostics.sendingAudio,
+    callVoiceDiagnostics.receivingAudio,
+    callVoiceDiagnostics.remoteAudioConsumers,
     conversationId,
     inCallMode,
     isCallMicEnabled,
@@ -8077,6 +8117,11 @@ export default function DirectMessageChatView({
       averagePingMs: null,
       lastPingMs: null,
       packetLossPercent: null,
+      localAudioTrackState: "missing",
+      remoteAudioTrackState: "missing",
+      sendingAudio: null,
+      receivingAudio: null,
+      remoteAudioConsumers: 0,
       micEnabled: true,
       soundEnabled: true,
       isPopoutOpen: false,

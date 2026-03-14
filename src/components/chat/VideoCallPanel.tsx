@@ -76,8 +76,11 @@ function StreamVideo({ className, stream, muted = false, videoRef }: StreamVideo
 
     element.srcObject = stream;
     if (stream) {
-      void element.play().catch(() => {
-        // ignore autoplay policy errors
+      void element.play().catch((error) => {
+        console.warn("[call-audio] Falha ao reproduzir stream de midia.", {
+          className,
+          message: error instanceof Error ? error.message : String(error ?? ""),
+        });
       });
     }
 
@@ -788,8 +791,12 @@ export default function VideoCallPanel({
 
     remoteAudio.srcObject = remoteStream;
     if (remoteStream) {
-      void remoteAudio.play().catch(() => {
-        // ignore autoplay policy errors
+      void remoteAudio.play().catch((error) => {
+        console.warn("[call-audio] Falha ao reproduzir audio remoto.", {
+          message: error instanceof Error ? error.message : String(error ?? ""),
+          remoteAudioTracks: remoteStream.getAudioTracks().length,
+          remoteVideoTracks: remoteStream.getVideoTracks().length,
+        });
       });
     }
 

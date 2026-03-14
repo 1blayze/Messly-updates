@@ -20,6 +20,11 @@ export interface SidebarCallStateDetail {
   averagePingMs: number | null;
   lastPingMs: number | null;
   packetLossPercent: number | null;
+  localAudioTrackState: "live" | "muted" | "ended" | "missing";
+  remoteAudioTrackState: "live" | "muted" | "ended" | "missing";
+  sendingAudio: boolean | null;
+  receivingAudio: boolean | null;
+  remoteAudioConsumers: number;
   micEnabled: boolean;
   soundEnabled: boolean;
   isPopoutOpen: boolean;

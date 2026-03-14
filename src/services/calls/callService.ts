@@ -28,6 +28,11 @@ export interface CallVoiceDiagnostics {
   usingRelay: boolean | null;
   outboundBitrateKbps: number | null;
   inboundBitrateKbps: number | null;
+  localAudioTrackState: "live" | "muted" | "ended" | "missing";
+  remoteAudioTrackState: "live" | "muted" | "ended" | "missing";
+  sendingAudio: boolean | null;
+  receivingAudio: boolean | null;
+  remoteAudioConsumers: number;
   connectionState: RTCPeerConnectionState | null;
   iceConnectionState: RTCIceConnectionState | null;
   updatedAt: string;
@@ -81,6 +86,8 @@ const DEFAULT_SCREEN_SHARE_QUALITY = "1080p60";
 const VOICE_REQUEST_TIMEOUT_MS = 10_000;
 const VOICE_SOCKET_OPEN_TIMEOUT_MS = 8_000;
 const VOICE_ENDPOINT_PROBE_TIMEOUT_MS = 3_500;
+const CONSUME_RETRY_BASE_DELAY_MS = 250;
+const CONSUME_RETRY_MAX_ATTEMPTS = 8;
 const DEFAULT_AUDIO: NormalizedAudioSettings = {
   inputDeviceId: "",
   noiseSuppression: true,
@@ -481,6 +488,19 @@ function isAudioRtpEntry(entry: Record<string, unknown>): boolean {
   return kind === "audio";
 }
 
+function resolveAudioTrackState(track: MediaStreamTrack | null | undefined): "live" | "muted" | "ended" | "missing" {
+  if (!track) {
+    return "missing";
+  }
+  if (track.readyState !== "live") {
+    return "ended";
+  }
+  if (!track.enabled) {
+    return "muted";
+  }
+  return "live";
+}
+
 export class CallService {
   private readonly options: CallServiceOptions;
   private audioSettings: NormalizedAudioSettings;
@@ -504,6 +524,8 @@ export class CallService {
   private readonly reconnectManager: ReconnectManager;
   private connectionState: RTCPeerConnectionState = "new";
   private statsSnapshot: VoiceStatsSnapshot | null = null;
+  private readonly consumeRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly consumeRetryAttempts = new Map<string, number>();
   private disposed = false;
 
   constructor(options: CallServiceOptions) {
@@ -546,6 +568,11 @@ export class CallService {
     this.consumerManager = new ConsumerManager({
       request: (op, payload, expectedOp) => this.request(op, payload, expectedOp),
       onRemoteStreamUpdated: (stream) => {
+        this.debugLog("remote_stream_updated", {
+          tracks: stream?.getTracks().length ?? 0,
+          audioTracks: stream?.getAudioTracks().length ?? 0,
+          videoTracks: stream?.getVideoTracks().length ?? 0,
+        });
         this.options.onRemoteStream?.(stream);
       },
       debugLog: this.debugLog,
@@ -815,6 +842,21 @@ export class CallService {
       smoothedPingMs: nextSmoothedPing,
     };
 
+    const localAudioTrackState = resolveAudioTrackState(this.mediaManager.getAudioTrack());
+    const remoteAudioTrackState = resolveAudioTrackState(this.consumerManager.getPrimaryRemoteAudioTrack());
+    const remoteAudioConsumers = this.consumerManager.getAudioConsumerCount();
+    const hasActiveAudioProducer = this.producerManager.hasActiveAudioProducer();
+    const sendingAudio = localAudioTrackState !== "live"
+      ? false
+      : outboundBitrateKbps == null
+        ? (hasActiveAudioProducer ? null : false)
+        : outboundBitrateKbps > 0.5;
+    const receivingAudio = remoteAudioTrackState !== "live"
+      ? false
+      : inboundBitrateKbps == null
+        ? (remoteAudioConsumers > 0 ? null : false)
+        : inboundBitrateKbps > 0.5;
+
     return {
       averagePingMs: nextSmoothedPing,
       lastPingMs: stats.currentRttMs,
@@ -828,6 +870,11 @@ export class CallService {
           : stats.localCandidateType === "relay" || stats.remoteCandidateType === "relay",
       outboundBitrateKbps,
       inboundBitrateKbps,
+      localAudioTrackState,
+      remoteAudioTrackState,
+      sendingAudio,
+      receivingAudio,
+      remoteAudioConsumers,
       connectionState: state,
       iceConnectionState,
       updatedAt: new Date().toISOString(),
@@ -843,6 +890,7 @@ export class CallService {
 
     await this.callGraphLock.runExclusive(async () => {
       this.sessionManager.transition("disconnecting", "call.close");
+      this.clearConsumeRetries();
       this.closeSocket(1000, "CALL_CLOSE");
       this.rejectPendingReply(new Error("Socket de voz fechado."));
       this.consumerManager.clear("call.close");
@@ -1054,6 +1102,7 @@ export class CallService {
       throw new Error("AUTH_OK sem informacoes de transporte.");
     }
 
+    this.clearConsumeRetries();
     this.consumerManager.clear("transport-rebuild");
     this.producerManager.closeAll("transport-rebuild");
     this.transportManager.closeTransports();
@@ -1064,6 +1113,14 @@ export class CallService {
     const producerRows = Array.isArray(auth.producers) ? auth.producers : [];
     for (const row of producerRows) {
       const producerPayload = toRecord(row);
+      const producerId = toId(producerPayload.producerId);
+      if (this.producerManager.hasProducerId(producerId)) {
+        this.debugLog("consumer_skipped", {
+          reason: "skip-own-producer",
+          producerId,
+        });
+        continue;
+      }
       try {
         await this.consumerManager.consumeProducer(
           producerPayload,
@@ -1077,6 +1134,7 @@ export class CallService {
             producerId: toId(producerPayload.producerId) || null,
             message: error instanceof Error ? error.message : String(error ?? ""),
           });
+          this.scheduleConsumeRetry(producerPayload, "initial-consume-race");
           continue;
         }
         throw error;
@@ -1292,10 +1350,19 @@ export class CallService {
     }
 
     if (frame.op === "PRODUCER_ADDED") {
+      const producerPayload = toRecord(frame.d);
+      const producerId = toId(producerPayload.producerId);
+      if (this.producerManager.hasProducerId(producerId)) {
+        this.debugLog("consumer_skipped", {
+          reason: "skip-own-producer",
+          producerId,
+        });
+        return;
+      }
       void this.callGraphLock
         .runExclusive(async () => {
           await this.consumerManager.consumeProducer(
-            toRecord(frame.d),
+            producerPayload,
             this.transportManager.getRecvTransport(),
             this.transportManager.getDevice(),
           );
@@ -1304,9 +1371,10 @@ export class CallService {
           if (this.isProducerConsumeRaceError(error)) {
             this.debugLog("consumer_skipped", {
               reason: "producer-added-consume-race",
-              producerId: toId(toRecord(frame.d).producerId) || null,
+              producerId: toId(producerPayload.producerId) || null,
               message: error instanceof Error ? error.message : String(error ?? ""),
             });
+            this.scheduleConsumeRetry(producerPayload, "producer-added-consume-race");
             return;
           }
           if (this.isRecoverableCallError(error)) {
@@ -1323,6 +1391,7 @@ export class CallService {
       if (!producerId) {
         return;
       }
+      this.clearConsumeRetryForProducer(producerId);
       this.consumerManager.removeProducer(producerId);
     }
   }
@@ -1392,6 +1461,7 @@ export class CallService {
           conversationId: session.conversationId,
         });
 
+        this.clearConsumeRetries();
         this.closeSocket(1012, "RECONNECT");
         this.rejectPendingReply(new Error("Socket de voz fechado."));
         this.consumerManager.clear("reconnect");
@@ -1442,6 +1512,117 @@ export class CallService {
     }
     this.sessionManager.transition("reconnecting", reason);
     this.reconnectManager.schedule(reason);
+  }
+
+  private scheduleConsumeRetry(producerPayloadRaw: Record<string, unknown>, reason: string): void {
+    const producerPayload = toRecord(producerPayloadRaw);
+    const producerId = toId(producerPayload.producerId);
+    if (!producerId || this.disposed || !this.isSessionActive()) {
+      return;
+    }
+    if (this.producerManager.hasProducerId(producerId)) {
+      this.clearConsumeRetryForProducer(producerId);
+      this.debugLog("consume_retry_skipped", {
+        producerId,
+        reason: "skip-own-producer",
+      });
+      return;
+    }
+    if (this.consumerManager.hasConsumerForProducer(producerId)) {
+      this.clearConsumeRetryForProducer(producerId);
+      return;
+    }
+
+    const previousAttempts = this.consumeRetryAttempts.get(producerId) ?? 0;
+    if (previousAttempts >= CONSUME_RETRY_MAX_ATTEMPTS) {
+      this.debugLog("consume_retry_aborted", {
+        producerId,
+        reason,
+        attempts: previousAttempts,
+      });
+      this.clearConsumeRetryForProducer(producerId);
+      return;
+    }
+
+    if (this.consumeRetryTimers.has(producerId)) {
+      return;
+    }
+
+    const nextAttempt = previousAttempts + 1;
+    this.consumeRetryAttempts.set(producerId, nextAttempt);
+    const delayMs = Math.min(CONSUME_RETRY_BASE_DELAY_MS * (2 ** (nextAttempt - 1)), 3_000);
+    const timer = setTimeout(() => {
+      this.consumeRetryTimers.delete(producerId);
+      if (this.disposed || !this.isSessionActive()) {
+        return;
+      }
+      const recvTransport = this.transportManager.getRecvTransport();
+      const device = this.transportManager.getDevice();
+      if (!recvTransport || !device) {
+        this.scheduleConsumeRetry(producerPayload, "consume-retry-missing-transport");
+        return;
+      }
+
+      void this.callGraphLock
+        .runExclusive(async () => {
+          await this.consumerManager.consumeProducer(producerPayload, recvTransport, device);
+        })
+        .then(() => {
+          this.debugLog("consume_retry_succeeded", {
+            producerId,
+            attempts: nextAttempt,
+            reason,
+          });
+          this.clearConsumeRetryForProducer(producerId);
+        })
+        .catch((error) => {
+          if (this.isProducerConsumeRaceError(error)) {
+            this.debugLog("consume_retry_race", {
+              producerId,
+              attempts: nextAttempt,
+              reason,
+              message: error instanceof Error ? error.message : String(error ?? ""),
+            });
+            this.scheduleConsumeRetry(producerPayload, "consume-retry-race");
+            return;
+          }
+          if (this.isRecoverableCallError(error)) {
+            this.debugLog("consume_retry_recoverable_error", {
+              producerId,
+              attempts: nextAttempt,
+              reason,
+              message: error instanceof Error ? error.message : String(error ?? ""),
+            });
+            this.scheduleConsumeRetry(producerPayload, "consume-retry-recoverable");
+            return;
+          }
+          this.clearConsumeRetryForProducer(producerId);
+          this.emitError(error);
+        });
+    }, delayMs);
+
+    this.consumeRetryTimers.set(producerId, timer);
+  }
+
+  private clearConsumeRetryForProducer(producerIdRaw: string | null | undefined): void {
+    const producerId = toId(producerIdRaw);
+    if (!producerId) {
+      return;
+    }
+    const timer = this.consumeRetryTimers.get(producerId);
+    if (timer) {
+      clearTimeout(timer);
+    }
+    this.consumeRetryTimers.delete(producerId);
+    this.consumeRetryAttempts.delete(producerId);
+  }
+
+  private clearConsumeRetries(): void {
+    for (const timer of this.consumeRetryTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.consumeRetryTimers.clear();
+    this.consumeRetryAttempts.clear();
   }
 
   private requireSession(): VoiceSession {
