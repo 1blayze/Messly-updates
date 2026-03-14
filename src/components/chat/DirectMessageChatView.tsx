@@ -1669,6 +1669,14 @@ function toSafeCallErrorMessage(
     return "Servidor de voz indisponivel. Atualize o gateway para a versao com suporte a /voice.";
   }
 
+  if (
+    normalizedMessage.includes("socket de voz fechado")
+    || normalizedMessage.includes("resposta de voz pendente")
+    || normalizedMessage.includes("tempo limite aguardando")
+  ) {
+    return silentWhenRecoverable ? null : "Reconectando chamada...";
+  }
+
   if (!rawMessage) {
     return fallback;
   }
@@ -1694,6 +1702,16 @@ function isUserCancelledScreenShareError(error: unknown): boolean {
   return normalizedMessage.includes("permission denied")
     || normalizedMessage.includes("denied by user")
     || normalizedMessage.includes("cancel");
+}
+
+function isTransientCallSignalError(error: unknown): boolean {
+  const normalizedMessage = String((error as { message?: unknown } | null)?.message ?? "")
+    .trim()
+    .toLowerCase();
+  return normalizedMessage.includes("socket de voz fechado")
+    || normalizedMessage.includes("resposta de voz pendente")
+    || normalizedMessage.includes("tempo limite aguardando")
+    || normalizedMessage.includes("conexao de voz encerrada antes de abrir");
 }
 
 function buildCallAudioSettingsStorageKey(userUid: string | null | undefined): string {
@@ -7262,7 +7280,9 @@ export default function DirectMessageChatView({
                 const callerService = callServiceRef.current;
                 if (callerService) {
                   try {
-                    const refreshedOffer = await callerService.startAsCaller();
+                    const refreshedOffer =
+                      (callerService.getConnectionState() === "connected" ? callerService.getOfferPayload() : null)
+                      ?? await callerService.startAsCaller();
                     await sendCallRealtimeEvent({
                       kind: "signal",
                       callId: event.callId,
@@ -7271,10 +7291,12 @@ export default function DirectMessageChatView({
                       signalPayload: refreshedOffer,
                     });
                   } catch (error) {
-                    reportClientError(error, {
-                      scope: "call.refreshOfferAfterAccept",
-                      callId: event.callId,
-                    });
+                    if (!isTransientCallSignalError(error)) {
+                      reportClientError(error, {
+                        scope: "call.refreshOfferAfterAccept",
+                        callId: event.callId,
+                      });
+                    }
                   }
                 }
                 return;
@@ -7398,7 +7420,9 @@ export default function DirectMessageChatView({
                 }
 
                 try {
-                  const refreshedOffer = await service.startAsCaller();
+                  const refreshedOffer =
+                    (service.getConnectionState() === "connected" ? service.getOfferPayload() : null)
+                    ?? await service.startAsCaller();
                   await sendCallRealtimeEvent({
                     kind: "signal",
                     callId: event.callId,
@@ -7408,10 +7432,12 @@ export default function DirectMessageChatView({
                     session: effectiveSession,
                   });
                 } catch (error) {
-                  reportClientError(error, {
-                    scope: "call.resume.refreshOffer",
-                    callId: event.callId,
-                  });
+                  if (!isTransientCallSignalError(error)) {
+                    reportClientError(error, {
+                      scope: "call.resume.refreshOffer",
+                      callId: event.callId,
+                    });
+                  }
                 }
                 return;
               }
@@ -7492,11 +7518,13 @@ export default function DirectMessageChatView({
                   });
                 }
               } catch (error) {
-                reportClientError(error, {
-                  scope: "call.handleSignal",
-                  callId: event.callId,
-                  signalType: event.signalType,
-                });
+                if (!isTransientCallSignalError(error)) {
+                  reportClientError(error, {
+                    scope: "call.handleSignal",
+                    callId: event.callId,
+                    signalType: event.signalType,
+                  });
+                }
                 setCallErrorText(
                   toSafeCallErrorMessage(error, "Falha no sinal da chamada.", {
                     silentWhenRecoverable: true,

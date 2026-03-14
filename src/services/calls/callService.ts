@@ -449,6 +449,12 @@ export class CallService {
   getRemoteStream(): MediaStream | null { return this.remoteStream; }
   getConnectionState(): RTCPeerConnectionState | null { return this.state; }
   isScreenSharing(): boolean { return Boolean(this.screenTrack && this.screenTrack.readyState === "live"); }
+  getOfferPayload(): Record<string, unknown> | null {
+    if (!this.session) {
+      return null;
+    }
+    return buildOffer(this.session);
+  }
 
   async startAsCaller(): Promise<Record<string, unknown>> {
     if (!this.session) {
@@ -466,7 +472,17 @@ export class CallService {
       };
     }
     await this.ensureLocalTracks();
-    await this.connectToVoice(this.session);
+    if (this.state !== "connected" || !this.sendTransport || !this.recvTransport || !this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      try {
+        await this.connectToVoice(this.session);
+      } catch (error) {
+        if (this.isTransientSocketCloseError(error)) {
+          await this.reconnect().catch(() => undefined);
+        } else {
+          throw error;
+        }
+      }
+    }
     await this.syncProducers();
     return buildOffer(this.session);
   }
@@ -905,6 +921,14 @@ export class CallService {
     if (!frame || !frame.op) {
       return;
     }
+    if (frame.op === "ERROR") {
+      const payload = toRecord(frame.d);
+      const message = toId(payload.message) || "Operacao de voz falhou.";
+      const code = toId(payload.code);
+      const composedMessage = code ? `${message} (${code})` : message;
+      this.rejectPendingReply(new Error(composedMessage));
+      return;
+    }
     this.reconnectAttempt = 0;
     if (this.pendingReply && this.pendingReply.op === frame.op) {
       const pending = this.pendingReply;
@@ -913,7 +937,12 @@ export class CallService {
       return;
     }
     if (frame.op === "PRODUCER_ADDED") {
-      void this.consumeProducer(toRecord(frame.d));
+      void this.consumeProducer(toRecord(frame.d)).catch((error) => {
+        if (this.isTransientSocketCloseError(error)) {
+          return;
+        }
+        this.emitError(error);
+      });
       return;
     }
     if (frame.op === "PRODUCER_REMOVED") {
@@ -1078,5 +1107,15 @@ export class CallService {
   private emitError(error: unknown): void {
     const casted = error instanceof Error ? error : new Error(String(error ?? "Falha na chamada."));
     this.options.onError?.(casted);
+  }
+
+  private isTransientSocketCloseError(error: unknown): boolean {
+    const message = String(error instanceof Error ? error.message : error ?? "").trim().toLowerCase();
+    return (
+      message.includes("socket de voz fechado")
+      || message.includes("resposta de voz pendente")
+      || message.includes("tempo limite aguardando")
+      || message.includes("conexao de voz encerrada antes de abrir")
+    );
   }
 }
