@@ -1681,6 +1681,21 @@ function toSafeCallErrorMessage(
   return fallback;
 }
 
+function isUserCancelledScreenShareError(error: unknown): boolean {
+  const name = String((error as { name?: unknown } | null)?.name ?? "").trim().toLowerCase();
+  const normalizedMessage = String((error as { message?: unknown } | null)?.message ?? "")
+    .trim()
+    .toLowerCase();
+
+  if (name === "notallowederror" || name === "aborterror") {
+    return true;
+  }
+
+  return normalizedMessage.includes("permission denied")
+    || normalizedMessage.includes("denied by user")
+    || normalizedMessage.includes("cancel");
+}
+
 function buildCallAudioSettingsStorageKey(userUid: string | null | undefined): string {
   const normalizedUid = String(userUid ?? "").trim();
   if (!normalizedUid) {
@@ -6914,10 +6929,12 @@ export default function DirectMessageChatView({
         setCallErrorText("Nao foi possivel iniciar o compartilhamento de tela.");
       }
     } catch (error) {
-      reportClientError(error, {
-        scope: "call.startScreenShare",
-        callId: activeCallIdRef.current ?? "",
-      });
+      if (!isUserCancelledScreenShareError(error)) {
+        reportClientError(error, {
+          scope: "call.startScreenShare",
+          callId: activeCallIdRef.current ?? "",
+        });
+      }
       setCallErrorText(
         toSafeCallErrorMessage(error, "Falha ao compartilhar tela.", {
           silentWhenUserCancelled: true,
