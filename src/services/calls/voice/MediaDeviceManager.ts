@@ -29,7 +29,6 @@ export class MediaDeviceManager {
   private audioSettings: NormalizedAudioSettings;
   private cameraEnabled: boolean;
   private micEnabled = true;
-  private micTestMuted = false;
   private pushToTalkPressed = false;
   private audioTrack: MediaStreamTrack | null = null;
   private cameraTrack: MediaStreamTrack | null = null;
@@ -78,18 +77,6 @@ export class MediaDeviceManager {
     this.micEnabled = !this.micEnabled;
     this.syncAudioEnabled();
     return this.micEnabled;
-  }
-
-  setMicTestMuted(enabled: boolean): void {
-    const nextValue = Boolean(enabled);
-    if (this.micTestMuted === nextValue) {
-      return;
-    }
-    this.micTestMuted = nextValue;
-    this.syncAudioEnabled();
-    this.debugLog("mic_test_mute_changed", {
-      active: this.micTestMuted,
-    });
   }
 
   setPushToTalkEnabled(enabled: boolean): void {
@@ -285,7 +272,7 @@ export class MediaDeviceManager {
     if (!this.audioTrack) {
       return;
     }
-    const enabled = !this.micTestMuted && this.micEnabled && (!this.audioSettings.pushToTalkEnabled || this.pushToTalkPressed);
+    const enabled = this.micEnabled && (!this.audioSettings.pushToTalkEnabled || this.pushToTalkPressed);
     this.audioTrack.enabled = enabled;
     this.publishLocalStream();
   }

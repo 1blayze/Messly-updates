@@ -246,8 +246,6 @@ const SIDEBAR_IDENTITY_CACHE_PREFIX = "messly:sidebar-identity:";
 const SIDEBAR_RESOLVED_MEDIA_CACHE_PREFIX = "messly:sidebar-media:";
 const AUDIO_SETTINGS_STORAGE_KEY_PREFIX = "messly:audio-settings:";
 const AUDIO_SETTINGS_UPDATED_EVENT = "messly:audio-settings-updated";
-const AUDIO_MIC_TEST_STATE_EVENT = "messly:audio-mic-test-state";
-const AUDIO_MIC_TEST_STATE_STORAGE_KEY = "messly:audio-mic-test-active";
 const PROFILE_PLUS_THEME_STORAGE_KEY_PREFIX = "messly:profile-plus-theme:";
 const PROFILE_PLUS_THEME_UPDATED_EVENT = "messly:profile-plus-theme-updated";
 const USERNAME_CHANGE_STORAGE_KEY_PREFIX = "messly:username-change:";
@@ -440,31 +438,6 @@ function buildAudioSettingsStorageKey(userUid: string | null | undefined): strin
     return `${AUDIO_SETTINGS_STORAGE_KEY_PREFIX}guest`;
   }
   return `${AUDIO_SETTINGS_STORAGE_KEY_PREFIX}${normalizedUid}`;
-}
-
-function publishMicTestState(active: boolean): void {
-  if (typeof window === "undefined") {
-    return;
-  }
-
-  const nextActive = Boolean(active);
-  try {
-    if (nextActive) {
-      window.localStorage.setItem(AUDIO_MIC_TEST_STATE_STORAGE_KEY, "1");
-    } else {
-      window.localStorage.removeItem(AUDIO_MIC_TEST_STATE_STORAGE_KEY);
-    }
-  } catch {
-    // Ignore storage failures.
-  }
-
-  window.dispatchEvent(
-    new CustomEvent(AUDIO_MIC_TEST_STATE_EVENT, {
-      detail: {
-        active: nextActive,
-      },
-    }),
-  );
 }
 
 function buildProfilePlusThemeStorageKey(userUid: string | null | undefined): string {
@@ -1856,13 +1829,6 @@ export default function AppSettingsView({
   const [pushToTalkEnabled, setPushToTalkEnabled] = useState(false);
   const [pushToTalkBind, setPushToTalkBind] = useState(DEFAULT_PUSH_TO_TALK_BIND);
   const [listeningForBind, setListeningForBind] = useState(false);
-  const [micTestActive, setMicTestActive] = useState(false);
-  const [micTestError, setMicTestError] = useState<string | null>(null);
-  const [localMicLevel, setLocalMicLevel] = useState(0);
-  const [localMicPeak, setLocalMicPeak] = useState(0);
-  const [localMicClipping, setLocalMicClipping] = useState(false);
-  const [micMeterHasSignal, setMicMeterHasSignal] = useState(false);
-  const [vadState, setVadState] = useState<"speaking" | "silence">("silence");
   const bannerColorPickerRef = useRef<HTMLDivElement | null>(null);
   const bannerColorAreaRef = useRef<HTMLDivElement | null>(null);
   const profileThemeColorPickerRef = useRef<HTMLDivElement | null>(null);
@@ -1879,18 +1845,8 @@ export default function AppSettingsView({
   const temporaryBannerUrlRef = useRef<string | null>(null);
   const windowsBehaviorLoadedRef = useRef(false);
   const audioSettingsLoadedRef = useRef(false);
-  const micTestAnimationFrameRef = useRef<number | null>(null);
-  const micTestStreamRef = useRef<MediaStream | null>(null);
-  const micTestAudioContextRef = useRef<AudioContext | null>(null);
-  const micTestAnalyserRef = useRef<AnalyserNode | null>(null);
-  const micTestAnalyserDataRef = useRef<Float32Array<ArrayBuffer> | null>(null);
-  const micTestFeedbackGainRef = useRef<GainNode | null>(null);
   const inputDeviceSelectRef = useRef<HTMLDivElement | null>(null);
   const outputDeviceSelectRef = useRef<HTMLDivElement | null>(null);
-  const inputGainRef = useRef(100);
-  const vadEnabledRef = useRef(true);
-  const autoMicSensitivityRef = useRef(true);
-  const manualMicSensitivityRef = useRef(-70);
   const accountProfileSyncSignatureRef = useRef<string>("");
   const normalizedInputGain = clamp(Math.round(inputGain), 0, 100);
   const normalizedOutputVolume = clamp(Math.round(outputVolume), 0, 200);
@@ -2102,35 +2058,6 @@ export default function AppSettingsView({
     }
   };
 
-  const stopMicTest = (): void => {
-    if (micTestAnimationFrameRef.current !== null) {
-      window.cancelAnimationFrame(micTestAnimationFrameRef.current);
-      micTestAnimationFrameRef.current = null;
-    }
-
-    micTestAnalyserDataRef.current = null;
-    micTestAnalyserRef.current = null;
-    micTestFeedbackGainRef.current = null;
-
-    if (micTestAudioContextRef.current) {
-      void micTestAudioContextRef.current.close().catch(() => undefined);
-      micTestAudioContextRef.current = null;
-    }
-
-    if (micTestStreamRef.current) {
-      micTestStreamRef.current.getTracks().forEach((track) => track.stop());
-      micTestStreamRef.current = null;
-    }
-
-    setMicTestActive(false);
-    setLocalMicLevel(0);
-    setLocalMicPeak(0);
-    setLocalMicClipping(false);
-    setMicMeterHasSignal(false);
-    setVadState("silence");
-    publishMicTestState(false);
-  };
-
   const refreshAudioDevices = async (): Promise<void> => {
     if (typeof navigator === "undefined" || !navigator.mediaDevices?.enumerateDevices) {
       return;
@@ -2174,117 +2101,6 @@ export default function AppSettingsView({
     } catch {
       // Ignore enumerateDevices failures on unsupported environments.
     }
-  };
-
-  const startMicTest = async (): Promise<void> => {
-    if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
-      setMicTestError("Teste de microfone indisponível neste ambiente.");
-      return;
-    }
-
-    stopMicTest();
-    setMicTestError(null);
-
-    const audioConstraints: MediaTrackConstraints = {
-      noiseSuppression,
-      echoCancellation,
-      autoGainControl,
-    };
-    if (selectedInputId) {
-      audioConstraints.deviceId = { exact: selectedInputId };
-    }
-
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: audioConstraints,
-        video: false,
-      });
-
-      const audioContext = new AudioContext({ latencyHint: "interactive" });
-      if (audioContext.state === "suspended") {
-        await audioContext.resume().catch(() => undefined);
-      }
-      const analyser = audioContext.createAnalyser();
-      analyser.fftSize = 2048;
-      analyser.smoothingTimeConstant = 0.82;
-
-      const source = audioContext.createMediaStreamSource(stream);
-      source.connect(analyser);
-      const feedbackGain = audioContext.createGain();
-      feedbackGain.gain.value = clamp(normalizedOutputVolume / 100, 0, 2);
-      source.connect(feedbackGain);
-      feedbackGain.connect(audioContext.destination);
-
-      const analyserData = new Float32Array(analyser.fftSize);
-      const audioTrack = stream.getAudioTracks()[0] ?? null;
-      if (audioTrack) {
-        audioTrack.onended = () => {
-          stopMicTest();
-          setMicTestError("O teste de microfone foi interrompido.");
-        };
-      }
-
-      micTestStreamRef.current = stream;
-      micTestAudioContextRef.current = audioContext;
-      micTestAnalyserRef.current = analyser;
-      micTestAnalyserDataRef.current = analyserData;
-      micTestFeedbackGainRef.current = feedbackGain;
-      setMicTestActive(true);
-      publishMicTestState(true);
-
-      let peakHold = 0;
-      const tick = (): void => {
-        const currentAnalyser = micTestAnalyserRef.current;
-        const currentData = micTestAnalyserDataRef.current;
-        if (!currentAnalyser || !currentData) {
-          return;
-        }
-
-        currentAnalyser.getFloatTimeDomainData(currentData);
-
-        let squared = 0;
-        let peak = 0;
-        for (let index = 0; index < currentData.length; index += 1) {
-          const sample = currentData[index] ?? 0;
-          const absolute = Math.abs(sample);
-          squared += sample * sample;
-          if (absolute > peak) {
-            peak = absolute;
-          }
-        }
-
-        const rms = Math.sqrt(squared / currentData.length);
-        const gainScale = Math.max(0.1, inputGainRef.current / 100);
-        const level = Math.min(1, rms * 5 * gainScale);
-        peakHold = Math.max(peakHold * 0.9, peak);
-
-        const sensitivityDb = clamp(manualMicSensitivityRef.current, -100, 0);
-        const threshold = autoMicSensitivityRef.current ? 0.055 : 0.02 + ((sensitivityDb + 100) / 100) * 0.18;
-        const speaking = vadEnabledRef.current ? rms >= threshold : false;
-        const clipping = peak >= 0.985;
-
-        setLocalMicLevel(level);
-        setLocalMicPeak(Math.min(1, peakHold));
-        setLocalMicClipping(clipping);
-        setMicMeterHasSignal(level >= 0.04);
-        setVadState(speaking ? "speaking" : "silence");
-
-        micTestAnimationFrameRef.current = window.requestAnimationFrame(tick);
-      };
-
-      micTestAnimationFrameRef.current = window.requestAnimationFrame(tick);
-    } catch {
-      stopMicTest();
-      setMicTestError("Não foi possível acessar o microfone para teste.");
-    }
-  };
-
-  const handleMicTestToggle = (): void => {
-    if (micTestActive) {
-      stopMicTest();
-      return;
-    }
-    void startMicTest();
   };
 
   const handlePushToTalkChange = (isEnabled: boolean): void => {
@@ -2497,29 +2313,6 @@ export default function AppSettingsView({
   }, []);
 
   useEffect(() => {
-    inputGainRef.current = normalizedInputGain;
-  }, [normalizedInputGain]);
-
-  useEffect(() => {
-    if (!micTestFeedbackGainRef.current) {
-      return;
-    }
-    micTestFeedbackGainRef.current.gain.value = clamp(normalizedOutputVolume / 100, 0, 2);
-  }, [normalizedOutputVolume]);
-
-  useEffect(() => {
-    vadEnabledRef.current = vadEnabled;
-  }, [vadEnabled]);
-
-  useEffect(() => {
-    autoMicSensitivityRef.current = autoMicSensitivity;
-  }, [autoMicSensitivity]);
-
-  useEffect(() => {
-    manualMicSensitivityRef.current = manualMicSensitivity;
-  }, [manualMicSensitivity]);
-
-  useEffect(() => {
     if (typeof window === "undefined") {
       audioSettingsLoadedRef.current = true;
       return;
@@ -2715,22 +2508,6 @@ export default function AppSettingsView({
       window.removeEventListener("mousedown", handleMouseDown, { capture: true });
     };
   }, [listeningForBind]);
-
-  useEffect(() => {
-    if (activeSection === "audio") {
-      return;
-    }
-    if (micTestActive) {
-      stopMicTest();
-    }
-  }, [activeSection, micTestActive]);
-
-  useEffect(
-    () => () => {
-      stopMicTest();
-    },
-    [],
-  );
 
   useEffect(() => {
     const stored = readProfilePlusThemeSettings(user?.uid ?? null);
@@ -3494,16 +3271,6 @@ export default function AppSettingsView({
     return `Você poderá alterar o nome de usuário novamente em ${usernameCooldownState.remainingDays} dias.`;
   }, [usernameCooldownState]);
   const safeAbout = useMemo(() => about.trim(), [about]);
-  const micMeterBars = useMemo(
-    () =>
-      Array.from({ length: 56 }, (_, index) => {
-        const shape = 0.72 + Math.sin(index * 0.42) * 0.16;
-        const levelContribution = localMicLevel * 1.28;
-        const peakContribution = localMicPeak * 0.44;
-        return clamp((levelContribution + peakContribution) * shape, 0.14, 1);
-      }),
-    [localMicLevel, localMicPeak],
-  );
   const hasUnsavedProfileChanges = useMemo(
     () =>
       displayName.trim() !== savedDisplayName.trim() ||
@@ -3843,9 +3610,26 @@ export default function AppSettingsView({
         setSpotifyConnectionError("Conta conectada, mas não foi possível salvar a conexão no perfil.");
       }
     } catch (error) {
-      const message = error instanceof Error && error.message.trim()
-        ? error.message.trim()
-        : "Não foi possível conectar a conta do Spotify.";
+      const rawMessage = error instanceof Error ? error.message.trim() : "";
+      const normalizedMessage = rawMessage.toLowerCase();
+      let message = rawMessage || "Não foi possível conectar a conta do Spotify.";
+
+      if (
+        normalizedMessage.includes("invalid client secret") ||
+        normalizedMessage.includes("invalid_client") ||
+        normalizedMessage.includes("spotify_client_secret") ||
+        normalizedMessage.includes("configuracao do spotify invalida") ||
+        normalizedMessage.includes("configuracao oauth do spotify invalida")
+      ) {
+        message = "Configuração do Spotify inválida no servidor. Verifique SPOTIFY_CLIENT_ID e SPOTIFY_CLIENT_SECRET na Edge Function.";
+      } else if (
+        normalizedMessage.includes("request timeout") ||
+        normalizedMessage.includes("tempo limite") ||
+        normalizedMessage.includes("timed out")
+      ) {
+        message = "Tempo limite ao conectar com o Spotify. Tente novamente.";
+      }
+
       setSpotifyConnectionError(message);
     } finally {
       setIsSpotifyConnecting(false);
@@ -6261,39 +6045,6 @@ export default function AppSettingsView({
                           />
                         </label>
                       </article>
-                    </section>
-
-                    <section className={styles.audioTestCard} aria-label="Teste de microfone">
-                      <div className={styles.audioTestMeterRow}>
-                        <button
-                          type="button"
-                          className={`${styles.audioTestButton} ${styles.audioTestButtonCompact}${
-                            micTestActive ? ` ${styles.audioTestButtonStop}` : ""
-                          }`}
-                          onClick={handleMicTestToggle}
-                        >
-                          {micTestActive ? "Parar teste" : "Teste do microfone"}
-                        </button>
-
-                        <div
-                          className={`${styles.audioSignalIndicator}${
-                            micMeterHasSignal ? ` ${styles.audioSignalIndicatorActive}` : ""
-                          }${localMicClipping ? ` ${styles.audioSignalIndicatorClip}` : ""}`}
-                          aria-hidden="true"
-                        >
-                          <div className={styles.audioSignalBars}>
-                            {micMeterBars.map((scale, index) => (
-                              <span
-                                key={`audio-stage-${index}`}
-                                className={styles.audioSignalBar}
-                                style={{ transform: `scaleY(${scale})` }}
-                              />
-                            ))}
-                          </div>
-                        </div>
-                      </div>
-
-                      {micTestError ? <p className={styles.audioError}>{micTestError}</p> : null}
                     </section>
 
                     <section className={styles.audioProcessingSection} aria-label="Processamento de voz">

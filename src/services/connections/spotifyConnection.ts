@@ -72,7 +72,6 @@ const SPOTIFY_DESKTOP_PRESENCE_BRIDGE_ENABLED = String(import.meta.env.VITE_SPOT
 const SPOTIFY_AUTHORIZE_URL = "https://accounts.spotify.com/authorize";
 const SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token";
 const SPOTIFY_API_BASE_URL = "https://api.spotify.com/v1";
-const SPOTIFY_POPUP_NAME = "messly_spotify_oauth";
 const SPOTIFY_POPUP_TIMEOUT_MS = 3 * 60 * 1000;
 const SPOTIFY_PLAYBACK_ACTIVE_SYNC_INTERVAL_MS = 2_500;
 const SPOTIFY_PLAYBACK_ACTIVE_DEGRADED_SYNC_INTERVAL_MS = 5_000;
@@ -422,7 +421,7 @@ function clampInt(value: unknown, fallback: number, min: number, max: number): n
 }
 
 interface SpotifyApiError extends Error {
-  code: "spotify_unauthorized" | "spotify_rate_limited" | "spotify_api_error" | "spotify_request_aborted";
+  code: "spotify_unauthorized" | "spotify_rate_limited" | "spotify_api_error" | "spotify_request_aborted" | "spotify_server_config";
   retryAfterMs?: number;
 }
 
@@ -485,9 +484,23 @@ function normalizeSpotifyEdgeError(error: unknown): never {
       code === "EDGE_NETWORK_ERROR" &&
       (normalizedMessage.includes("abort") ||
         normalizedMessage.includes("aborted") ||
-        normalizedMessage.includes("signal is aborted"))
+        normalizedMessage.includes("signal is aborted") ||
+        normalizedMessage.includes("request timeout") ||
+        normalizedMessage.includes("timeouterror") ||
+        normalizedMessage.includes("timed out"))
     ) {
-      throw createSpotifyApiError("spotify_request_aborted", message);
+      throw createSpotifyApiError("spotify_request_aborted", "Tempo limite na comunicacao com o Spotify.");
+    }
+
+    if (
+      code === "SPOTIFY_SERVER_CONFIG_INVALID" ||
+      normalizedMessage.includes("invalid client secret") ||
+      normalizedMessage.includes("invalid_client")
+    ) {
+      throw createSpotifyApiError(
+        "spotify_server_config",
+        "Configuracao do Spotify invalida no servidor. Verifique SPOTIFY_CLIENT_ID e SPOTIFY_CLIENT_SECRET.",
+      );
     }
 
     if (status === 401 || status === 403 || code === "UNAUTHENTICATED" || code === "INVALID_TOKEN") {
@@ -1002,13 +1015,13 @@ function openSpotifyAuthPopup(url: string): Window | null {
   if (typeof window === "undefined") {
     return null;
   }
-
-  const width = 520;
-  const height = 720;
-  const left = Math.max(0, window.screenX + Math.round((window.outerWidth - width) / 2));
-  const top = Math.max(0, window.screenY + Math.round((window.outerHeight - height) / 2));
-  const features = `popup=yes,width=${width},height=${height},left=${left},top=${top},resizable=yes,scrollbars=yes`;
-  return window.open(url, SPOTIFY_POPUP_NAME, features);
+  const opened = window.open(url, "_blank");
+  try {
+    opened?.focus();
+  } catch {
+    // Best effort.
+  }
+  return opened;
 }
 
 function normalizeUrlPathname(pathname: string): string {
@@ -2338,7 +2351,7 @@ export async function syncSpotifyConnection(
       },
       {
         signal: options.signal,
-        timeoutMs: 12_000,
+        timeoutMs: 20_000,
       },
     );
 

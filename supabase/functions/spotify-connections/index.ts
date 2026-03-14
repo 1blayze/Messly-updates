@@ -175,13 +175,61 @@ function buildConnection(input: {
   };
 }
 
+function stripWrappedQuotes(value: string): string {
+  const normalized = asText(value);
+  if (!normalized) return "";
+
+  const first = normalized.charAt(0);
+  const last = normalized.charAt(normalized.length - 1);
+  if (
+    (first === "\"" && last === "\"") ||
+    (first === "'" && last === "'") ||
+    (first === "`" && last === "`")
+  ) {
+    return normalized.slice(1, -1).trim();
+  }
+
+  return normalized;
+}
+
+function normalizeCredentialFromEnv(rawValue: string, keys: string[]): string {
+  let normalized = asText(rawValue);
+  if (!normalized) return "";
+
+  for (const key of keys) {
+    const prefix = `${key}=`;
+    if (normalized.toUpperCase().startsWith(prefix.toUpperCase())) {
+      normalized = normalized.slice(prefix.length).trim();
+      break;
+    }
+  }
+
+  normalized = stripWrappedQuotes(normalized);
+  return normalized.replace(/\s+/g, "");
+}
+
 function getConfig(): SpotifyConfig {
-  const clientId = asText(Deno.env.get("SPOTIFY_CLIENT_ID") ?? Deno.env.get("VITE_SPOTIFY_CLIENT_ID") ?? "");
-  const clientSecret = asText(Deno.env.get("SPOTIFY_CLIENT_SECRET") ?? "");
-  const redirectRaw = asText(Deno.env.get("SPOTIFY_REDIRECT_URI") ?? Deno.env.get("VITE_SPOTIFY_REDIRECT_URI") ?? SPOTIFY_DEFAULT_REDIRECT_URI);
+  const clientId = normalizeCredentialFromEnv(
+    String(Deno.env.get("SPOTIFY_CLIENT_ID") ?? Deno.env.get("VITE_SPOTIFY_CLIENT_ID") ?? ""),
+    ["SPOTIFY_CLIENT_ID", "VITE_SPOTIFY_CLIENT_ID"],
+  );
+  const clientSecret = normalizeCredentialFromEnv(
+    String(Deno.env.get("SPOTIFY_CLIENT_SECRET") ?? Deno.env.get("VITE_SPOTIFY_CLIENT_SECRET") ?? ""),
+    ["SPOTIFY_CLIENT_SECRET", "VITE_SPOTIFY_CLIENT_SECRET"],
+  );
+  const redirectRaw = stripWrappedQuotes(
+    asText(Deno.env.get("SPOTIFY_REDIRECT_URI") ?? Deno.env.get("VITE_SPOTIFY_REDIRECT_URI") ?? SPOTIFY_DEFAULT_REDIRECT_URI),
+  );
 
   if (!clientId) throw new HttpError(500, "SERVER_CONFIG_ERROR", "SPOTIFY_CLIENT_ID nao configurada.");
   if (!clientSecret) throw new HttpError(500, "SERVER_CONFIG_ERROR", "SPOTIFY_CLIENT_SECRET nao configurada.");
+  if (clientId === clientSecret) {
+    throw new HttpError(
+      500,
+      "SERVER_CONFIG_ERROR",
+      "SPOTIFY_CLIENT_SECRET invalida: o valor nao pode ser igual ao SPOTIFY_CLIENT_ID.",
+    );
+  }
 
   let parsed: URL;
   try {
@@ -223,8 +271,16 @@ async function fetchToken(body: URLSearchParams): Promise<TokenPayload> {
   });
   const payload = (await response.json().catch(() => null)) as TokenPayload | null;
   if (!response.ok) {
+    const spotifyError = asText(payload?.error).toLowerCase();
     const message = asText(payload?.error_description) || asText(payload?.error) || "Falha na autenticacao Spotify.";
-    throw new HttpError(400, "SPOTIFY_TOKEN_FAILED", message);
+    if (spotifyError === "invalid_client" || message.toLowerCase().includes("invalid client secret")) {
+      throw new HttpError(
+        500,
+        "SPOTIFY_SERVER_CONFIG_INVALID",
+        "Configuracao OAuth do Spotify invalida no servidor.",
+      );
+    }
+    throw new HttpError(response.status >= 500 ? 502 : 400, "SPOTIFY_TOKEN_FAILED", message);
   }
   return payload ?? {};
 }

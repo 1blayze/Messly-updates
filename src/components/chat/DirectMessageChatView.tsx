@@ -107,8 +107,6 @@ const CALL_RESUME_STORAGE_KEY_PREFIX = "messly:call-resume:v1:";
 const CALL_RESUME_MAX_AGE_MS = 15 * 60_000;
 const AUDIO_SETTINGS_STORAGE_KEY_PREFIX = "messly:audio-settings:";
 const AUDIO_SETTINGS_UPDATED_EVENT = "messly:audio-settings-updated";
-const AUDIO_MIC_TEST_STATE_EVENT = "messly:audio-mic-test-state";
-const AUDIO_MIC_TEST_STATE_STORAGE_KEY = "messly:audio-mic-test-active";
 const DEFAULT_PUSH_TO_TALK_BIND = "V";
 const CALL_RINGING_SOUND_URL = new URL("../../assets/sounds/call_ringing.mp3", import.meta.url).href;
 const CALL_JOIN_SOUND_URL = new URL("../../assets/sounds/call_join.mp3", import.meta.url).href;
@@ -2615,7 +2613,6 @@ export default function DirectMessageChatView({
   const pushToTalkBindRef = useRef<string>(DEFAULT_PUSH_TO_TALK_BIND);
   const pushToTalkEnabledRef = useRef<boolean>(false);
   const pushToTalkPressedRef = useRef<boolean>(false);
-  const micTestMutedForLoopbackRef = useRef<boolean>(false);
   const previousRemoteParticipantInCallRef = useRef(false);
   const previousCallPhaseRef = useRef<"idle" | "incoming" | "outgoing" | "connecting" | "active" | "reconnecting">("idle");
   const openPerfRef = useRef<{ conversationId: string; openedAt: number; firstPaintLogged: boolean }>({
@@ -6201,7 +6198,6 @@ export default function DirectMessageChatView({
     });
 
     callServiceRef.current = serviceInstance;
-    serviceInstance.setMicrophoneTestActive(micTestMutedForLoopbackRef.current);
     setIsCallMicEnabled(true);
     setIsCallSoundEnabled(true);
     setIsCallCameraEnabled(mode === "video");
@@ -6277,49 +6273,6 @@ export default function DirectMessageChatView({
       window.removeEventListener("storage", handleStorageUpdate);
     };
   }, [applyLatestCallAudioSettings, currentFirebaseUid, currentUserId]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    const readMicTestState = (): boolean => {
-      try {
-        return window.localStorage.getItem(AUDIO_MIC_TEST_STATE_STORAGE_KEY) === "1";
-      } catch {
-        return false;
-      }
-    };
-
-    const applyMicTestState = (active: boolean): void => {
-      const nextActive = Boolean(active);
-      micTestMutedForLoopbackRef.current = nextActive;
-      callServiceRef.current?.setMicrophoneTestActive(nextActive);
-    };
-
-    const handleMicTestStateUpdated = (event: Event): void => {
-      const detail = (event as CustomEvent<{ active?: unknown }>).detail;
-      applyMicTestState(Boolean(detail?.active));
-    };
-
-    const handleStorageUpdate = (event: StorageEvent): void => {
-      if (event.storageArea !== window.localStorage) {
-        return;
-      }
-      if (event.key && event.key !== AUDIO_MIC_TEST_STATE_STORAGE_KEY) {
-        return;
-      }
-      applyMicTestState(readMicTestState());
-    };
-
-    applyMicTestState(readMicTestState());
-    window.addEventListener(AUDIO_MIC_TEST_STATE_EVENT, handleMicTestStateUpdated as EventListener);
-    window.addEventListener("storage", handleStorageUpdate);
-    return () => {
-      window.removeEventListener(AUDIO_MIC_TEST_STATE_EVENT, handleMicTestStateUpdated as EventListener);
-      window.removeEventListener("storage", handleStorageUpdate);
-    };
-  }, []);
 
   useEffect(() => {
     const releasePushToTalk = (): void => {

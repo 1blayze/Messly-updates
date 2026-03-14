@@ -77,6 +77,18 @@ function toRecord(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+function isTransportAlreadyConnectedError(error: unknown): boolean {
+  const message = String(error instanceof Error ? error.message : error ?? "").trim().toLowerCase();
+  return message.includes("connect() already called")
+    || message.includes("webrtctransport.connect")
+    || message.includes("already called");
+}
+
+function isConsumerNotFoundError(error: unknown): boolean {
+  const message = String(error instanceof Error ? error.message : error ?? "").trim().toLowerCase();
+  return message.includes("consumer not found");
+}
+
 function cloneTransportOptions(transport: WebRtcTransport): SfuTransportOptions {
   return {
     id: transport.id,
@@ -192,7 +204,19 @@ export class MediasoupSfu extends EventEmitter {
     dtlsParameters: DtlsParameters,
   ): Promise<void> {
     const transport = this.getTransport(roomId, peerId, transportId);
-    await transport.connect({ dtlsParameters });
+    try {
+      await transport.connect({ dtlsParameters });
+    } catch (error) {
+      if (isTransportAlreadyConnectedError(error)) {
+        this.logger.warn("sfu_transport_connect_already_connected", {
+          roomId,
+          peerId,
+          transportId,
+        });
+        return;
+      }
+      throw error;
+    }
   }
 
   async produce(input: {
@@ -294,9 +318,16 @@ export class MediasoupSfu extends EventEmitter {
     const peer = this.getPeerOrThrow(room, peerId);
     const consumer = peer.consumers.get(consumerId);
     if (!consumer) {
-      throw new Error("Consumer not found.");
+      return;
     }
-    await consumer.resume();
+    try {
+      await consumer.resume();
+    } catch (error) {
+      if (isConsumerNotFoundError(error)) {
+        return;
+      }
+      throw error;
+    }
   }
 
   async pauseProducer(roomId: string, peerId: string, producerId: string): Promise<void> {

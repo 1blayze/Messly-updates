@@ -127,6 +127,30 @@ function toId(value: unknown): string {
   return String(value ?? "").trim();
 }
 
+function toCandidateAddress(candidateRaw: unknown): string {
+  const candidate = toRecord(candidateRaw);
+  return String(candidate.address ?? candidate.ip ?? "").trim().toLowerCase();
+}
+
+function hasNonWildcardIceCandidate(candidateListRaw: unknown): boolean {
+  if (!Array.isArray(candidateListRaw) || candidateListRaw.length === 0) {
+    return false;
+  }
+
+  for (const candidateRaw of candidateListRaw) {
+    const address = toCandidateAddress(candidateRaw);
+    if (!address) {
+      continue;
+    }
+    if (address === "0.0.0.0" || address === "::") {
+      continue;
+    }
+    return true;
+  }
+
+  return false;
+}
+
 function normalizeVoiceSocketUrl(valueRaw: string | null | undefined): string | null {
   const value = String(valueRaw ?? "").trim();
   if (!value) {
@@ -747,10 +771,6 @@ export class CallService {
     return this.mediaManager.toggleMute();
   }
 
-  setMicrophoneTestActive(active: boolean): void {
-    this.mediaManager.setMicTestMuted(active);
-  }
-
   toggleCamera(): boolean {
     const nextEnabled = this.mediaManager.toggleCamera();
     void this.syncProducers("call.toggleCamera").catch((error) => {
@@ -1100,6 +1120,13 @@ export class CallService {
     const recvTransport = toRecord(transports.recvTransport);
     if (!routerRtpCapabilities || !sendTransport.id || !recvTransport.id) {
       throw new Error("AUTH_OK sem informacoes de transporte.");
+    }
+    const hasValidSendCandidates = hasNonWildcardIceCandidate(sendTransport.iceCandidates);
+    const hasValidRecvCandidates = hasNonWildcardIceCandidate(recvTransport.iceCandidates);
+    if (!hasValidSendCandidates || !hasValidRecvCandidates) {
+      throw new Error(
+        "Servidor de voz sem ICE publico valido. Verifique MESSLY_SFU_ANNOUNCED_IP e rede/portas UDP/TCP do SFU.",
+      );
     }
 
     this.clearConsumeRetries();

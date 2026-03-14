@@ -765,8 +765,10 @@ class AuthService {
       if (await this.isAccessTokenAcceptedBySupabase(currentAccessToken)) {
         return currentAccessToken;
       }
-    } catch {
-      return isLikelyJwt(currentAccessToken) ? currentAccessToken : null;
+    } catch (error) {
+      if (import.meta.env.DEV) {
+        console.warn("[auth] falha ao validar token atual para Edge Function", error);
+      }
     }
 
     let refreshedSession: Session | null;
@@ -781,8 +783,13 @@ class AuthService {
       if (await this.isAccessTokenAcceptedBySupabase(refreshedAccessToken)) {
         return refreshedAccessToken;
       }
-    } catch {
-      return isLikelyJwt(refreshedAccessToken) ? refreshedAccessToken : null;
+    } catch (error) {
+      if (import.meta.env.DEV) {
+        console.warn("[auth] falha ao validar token renovado para Edge Function", error);
+      }
+      // Never trust tokens that failed remote validation. This avoids Invalid JWT
+      // loops against Supabase Edge Functions like spotify-connections.
+      return null;
     }
 
     await clearSessionState();
