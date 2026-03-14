@@ -185,21 +185,45 @@ function resolveUploadKindFromKey(
   throw new Error("Chave de anexo invalida para upload.");
 }
 
+function isMissingElectronR2EnvError(error: unknown): boolean {
+  const message = String(error instanceof Error ? error.message : error ?? "").trim().toLowerCase();
+  if (!message) {
+    return false;
+  }
+
+  if (
+    message.includes("error invoking remote method")
+    && message.includes("media:upload-attachment")
+    && message.includes("missing required environment variable")
+    && message.includes("r2_")
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
 export async function uploadAttachmentBlob(options: UploadAttachmentBlobOptions): Promise<void> {
   const uploadAttachment = typeof window !== "undefined" ? window.electronAPI?.uploadAttachment : undefined;
   if (uploadAttachment) {
-    const bytes = await options.file.arrayBuffer();
-    const result = await uploadAttachment({
-      key: options.key,
-      bytes,
-      contentType: String(options.contentType ?? options.file.type ?? "application/octet-stream").trim()
-        || "application/octet-stream",
-    });
-    if (String(result?.key ?? "").trim() !== options.key) {
-      throw new Error("Chave de upload divergente da chave esperada.");
+    try {
+      const bytes = await options.file.arrayBuffer();
+      const result = await uploadAttachment({
+        key: options.key,
+        bytes,
+        contentType: String(options.contentType ?? options.file.type ?? "application/octet-stream").trim()
+          || "application/octet-stream",
+      });
+      if (String(result?.key ?? "").trim() !== options.key) {
+        throw new Error("Chave de upload divergente da chave esperada.");
+      }
+      options.onProgress?.(1);
+      return;
+    } catch (error) {
+      if (!isMissingElectronR2EnvError(error)) {
+        throw error;
+      }
     }
-    options.onProgress?.(1);
-    return;
   }
 
   const uploadKind = resolveUploadKindFromKey(options.key, options.file);

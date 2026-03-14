@@ -178,23 +178,6 @@ function mixHexThemeColors(hexA: string | null | undefined, hexB: string | null 
   });
 }
 
-function getHexThemeRelativeLuminance(hexColor: string | null | undefined): number | null {
-  const rgb = parseHexThemeColor(hexColor);
-  if (!rgb) {
-    return null;
-  }
-
-  const toLinear = (channel: number): number => {
-    const normalized = channel / 255;
-    return normalized <= 0.04045 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
-  };
-
-  const red = toLinear(rgb.red);
-  const green = toLinear(rgb.green);
-  const blue = toLinear(rgb.blue);
-  return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
-}
-
 interface MessageRow {
   id: string;
   conversation_id: string;
@@ -2749,28 +2732,26 @@ export default function DirectMessageChatView({
       return undefined;
     }
 
-    const primaryBase = normalizeBannerColor(targetThemePrimaryColor) ?? null;
-    const accentBase = normalizeBannerColor(targetThemeAccentColor) ?? null;
+    const bannerBase = normalizeBannerColor(targetBannerColor) ?? null;
+    const normalizedPrimary = normalizeBannerColor(targetThemePrimaryColor) ?? null;
+    const normalizedAccent = normalizeBannerColor(targetThemeAccentColor) ?? null;
+    const primaryBase = normalizedPrimary ?? bannerBase;
+    const accentBase = normalizedAccent ?? normalizedPrimary ?? bannerBase;
     if (!primaryBase && !accentBase) {
       return undefined;
     }
 
     const effectivePrimary = primaryBase ?? accentBase;
     const effectiveAccent = accentBase ?? primaryBase;
-    const luminances = [getHexThemeRelativeLuminance(effectivePrimary), getHexThemeRelativeLuminance(effectiveAccent)].filter(
-      (value): value is number => typeof value === "number",
-    );
-    const averageLuminance = luminances.length > 0 ? luminances.reduce((sum, value) => sum + value, 0) / luminances.length : null;
-    const maxLuminance = luminances.length > 0 ? Math.max(...luminances) : null;
-    const isLightTheme = (averageLuminance ?? 0) >= 0.62;
-    const isNearBlackTheme = (maxLuminance ?? 1) <= 0.022;
-
     const fallbackThemeColor = effectivePrimary ?? effectiveAccent ?? "#262626";
     const harmonizedTheme = createProfileTheme({
       primaryColor: fallbackThemeColor,
       accentColor: effectiveAccent ?? fallbackThemeColor,
-      mode: isLightTheme ? "light" : "dark",
+      // Keep DM sidebar theme aligned with full profile popover theme generation.
+      mode: "dark",
     });
+    const isPureBlackTheme =
+      harmonizedTheme.normalizedPrimary === "#000000" && harmonizedTheme.normalizedAccent === "#000000";
 
     const resolvedAccent = harmonizedTheme.tokens["--profile-accent"] ?? effectiveAccent ?? fallbackThemeColor;
     const currentPresenceColor =
@@ -2802,7 +2783,7 @@ export default function DirectMessageChatView({
     let footerBorder = "rgba(60, 67, 74, 0.12)";
     let footerBg = "transparent";
 
-    if (isNearBlackTheme) {
+    if (isPureBlackTheme) {
       panelBg = "#000000";
       panelGradient = "#000000";
       sidebarBg = "#000000";
@@ -2852,7 +2833,7 @@ export default function DirectMessageChatView({
       ["--profile-transition-fast" as const]: harmonizedTheme.tokens["--profile-transition-fast"],
       ["--profile-transition-standard" as const]: harmonizedTheme.tokens["--profile-transition-standard"],
     } as CSSProperties;
-  }, [isTargetProfileResolved, targetPresenceState, targetThemeAccentColor, targetThemePrimaryColor]);
+  }, [isTargetProfileResolved, targetBannerColor, targetPresenceState, targetThemeAccentColor, targetThemePrimaryColor]);
   const targetHasCustomBannerImage = useMemo(() => {
     const trimmed = String(targetBannerSrc ?? "").trim();
     if (!trimmed) {
