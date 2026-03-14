@@ -61,6 +61,20 @@ internal sealed class InstallerUiHost : IInstallerProgressSink, IDisposable
     Report(new InstallerProgressState(statusMessage, null, true));
   }
 
+  public void BringToFront()
+  {
+    var dispatcher = _dispatcher;
+    if (dispatcher == null || dispatcher.HasShutdownStarted || dispatcher.HasShutdownFinished)
+    {
+      return;
+    }
+
+    _ = dispatcher.BeginInvoke(() =>
+    {
+      _window?.BringToFront();
+    });
+  }
+
   public void Dispose()
   {
     if (_disposed)
@@ -492,5 +506,28 @@ internal sealed class InstallerWindow : Window
     }
 
     return null;
+  }
+
+  public void BringToFront()
+  {
+    try
+    {
+      if (!IsVisible)
+      {
+        Show();
+      }
+      if (WindowState == WindowState.Minimized)
+      {
+        WindowState = WindowState.Normal;
+      }
+
+      Activate();
+      Topmost = true;
+      Topmost = false;
+      Focus();
+    }
+    catch
+    {
+    }
   }
 }

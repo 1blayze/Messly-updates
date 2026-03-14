@@ -2,7 +2,7 @@
   "name": "messly",
   "private": true,
   "productName": "Messly",
-  "version": "0.0.25",
+  "version": "0.0.26",
   "author": "Mackstony Labs",
   "type": "module",
   "main": "electron/main.cjs",

@@ -1331,6 +1331,33 @@
   animation: dm-chat-messages-fade-in 140ms ease;
 }
 
+.dm-chat__date-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 6px 16px 8px;
+  color: rgba(255, 255, 255, 0.48);
+  user-select: none;
+}
+
+.dm-chat__date-divider::before,
+.dm-chat__date-divider::after {
+  content: "";
+  flex: 1 1 auto;
+  min-width: 20px;
+  height: 1px;
+  background: color-mix(in srgb, var(--border-subtle, rgba(255, 255, 255, 0.12)) 86%, transparent);
+}
+
+.dm-chat__date-divider-label {
+  font-size: 12px;
+  line-height: 1;
+  letter-spacing: 0.01em;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.48);
+  white-space: nowrap;
+}
+
 @keyframes dm-chat-messages-fade-in {
   from {
     opacity: 0;

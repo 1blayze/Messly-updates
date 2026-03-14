@@ -39,6 +39,16 @@ export class NotificationDedupStore {
     return false;
   }
 
+  unmark(keys: readonly string[]): void {
+    const normalizedKeys = this.normalizeKeys(keys);
+    if (normalizedKeys.length === 0) {
+      return;
+    }
+    for (const key of normalizedKeys) {
+      this.entries.delete(key);
+    }
+  }
+
   clear(): void {
     this.entries.clear();
   }

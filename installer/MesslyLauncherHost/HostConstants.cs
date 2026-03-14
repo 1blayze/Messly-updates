@@ -14,4 +14,5 @@ internal static class HostConstants
   public const string AppManifestArgPrefix = "--app-manifest-url=";
   public const string LogPrefix = "[messly-host]";
   public const string MutexName = "Global\\MesslyLauncherHost";
+  public const string ActivationEventName = "Global\\MesslyLauncherHost.Activate";
 }

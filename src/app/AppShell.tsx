@@ -91,6 +91,7 @@ type SettingsSection = "account" | "profile" | "connections" | "social" | "devic
 const PRESENCE_DEVICE_STALE_MS = 90_000;
 const SPOTIFY_ACTIVITY_END_GRACE_MS = 8_000;
 const SPOTIFY_ACTIVITY_NO_DURATION_STALE_MS = 60_000;
+const SETTINGS_AUTO_OPEN_SECTION_KEY = "messly:settings:auto-open-section";
 
 interface FriendRequestRow {
   id: string;
@@ -1326,6 +1327,22 @@ export default function AppShell() {
     void preloadAppSettingsView();
     setIsSettingsOpen(true);
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || isSettingsOpen) {
+      return;
+    }
+
+    const queuedSection = String(window.sessionStorage.getItem(SETTINGS_AUTO_OPEN_SECTION_KEY) ?? "")
+      .trim()
+      .toLowerCase();
+    if (queuedSection !== "connections") {
+      return;
+    }
+
+    window.sessionStorage.removeItem(SETTINGS_AUTO_OPEN_SECTION_KEY);
+    handleOpenSettings("connections");
+  }, [handleOpenSettings, isSettingsOpen]);
 
   const handleCloseSettings = useCallback((): void => {
     setIsSettingsOpen(false);

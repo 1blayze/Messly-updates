@@ -39,12 +39,12 @@ export class NotificationPolicyService {
     const messageId = this.normalizeIdentifier(notification.messageId);
     const authorId = this.normalizeIdentifier(notification.authorId);
     const conversationId = this.normalizeIdentifier(notification.conversationId);
-    if (!messageId || !authorId || !conversationId) {
+    if (!messageId || !conversationId) {
       return { allow: false, reason: "invalid_payload" };
     }
 
     const currentUserId = this.normalizeIdentifier(this.context.currentUserId);
-    if (currentUserId && currentUserId === authorId) {
+    if (currentUserId && authorId && currentUserId === authorId) {
       return { allow: false, reason: "self_message" };
     }
 

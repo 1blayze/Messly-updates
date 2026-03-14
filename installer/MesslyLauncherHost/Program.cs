@@ -7,10 +7,13 @@ var options = HostOptions.Parse(args);
 var installPaths = InstallPaths.CreateDefault();
 var logger = new LineLogger(installPaths.LogFilePath);
 using var mutex = new Mutex(false, MutexName);
+using var activationEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ActivationEventName);
 InstallerUiHost? installerUi = null;
+RegisteredWaitHandle? activationWait = null;
 
 if (!mutex.WaitOne(TimeSpan.FromSeconds(2), false))
 {
+  TrySignalRunningInstance(activationEvent);
   logger.Warn("Another launcher process is active; exiting.");
   return 0;
 }
@@ -37,13 +40,24 @@ try
 
   if (!options.IsLauncherMode)
   {
-    installerUi = new InstallerUiHost();
-    installerUi.Report(new InstallerProgressState("Installing Messly", null, true));
+    if (!options.IsSilentMode)
+    {
+      installerUi = new InstallerUiHost();
+      installerUi.Report(new InstallerProgressState("Installing Messly", null, true));
+      activationWait = RegisterActivationListener(activationEvent, installerUi, logger);
+    }
   }
 
   if (options.IsLauncherMode)
   {
-    await RunLauncherModeAsync(options, installPaths, logger, progressSink: null);
+    if (ShouldShowLauncherProgressUi(options, installPaths))
+    {
+      installerUi = new InstallerUiHost();
+      installerUi.Report(new InstallerProgressState("Checking for updates", null, true));
+      activationWait = RegisterActivationListener(activationEvent, installerUi, logger);
+    }
+
+    await RunLauncherModeAsync(options, installPaths, logger, installerUi);
   }
   else
   {
@@ -65,8 +79,65 @@ catch (Exception error)
 }
 finally
 {
+  activationWait?.Unregister(null);
   installerUi?.Dispose();
   logger.Dispose();
+}
+
+static bool ShouldShowLauncherProgressUi(HostOptions options, InstallPaths paths)
+{
+  if (options.IsSilentMode || options.NoLaunch)
+  {
+    return false;
+  }
+
+  var runtimeExecutablePath = TryResolveRuntimeExecutable(paths);
+  if (runtimeExecutablePath != null && IsRuntimeRunning(runtimeExecutablePath))
+  {
+    return false;
+  }
+
+  return true;
+}
+
+static RegisteredWaitHandle? RegisterActivationListener(
+  EventWaitHandle activationEvent,
+  InstallerUiHost installerUi,
+  LineLogger logger
+)
+{
+  try
+  {
+    return ThreadPool.RegisterWaitForSingleObject(
+      activationEvent,
+      static (state, _) =>
+      {
+        if (state is InstallerUiHost uiHost)
+        {
+          uiHost.BringToFront();
+        }
+      },
+      installerUi,
+      Timeout.Infinite,
+      executeOnlyOnce: false
+    );
+  }
+  catch (Exception error)
+  {
+    logger.Warn($"Failed to register activation listener: {error.Message}");
+    return null;
+  }
+}
+
+static void TrySignalRunningInstance(EventWaitHandle activationEvent)
+{
+  try
+  {
+    activationEvent.Set();
+  }
+  catch
+  {
+  }
 }
 
 static async Task RunBootstrapModeAsync(

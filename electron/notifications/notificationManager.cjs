@@ -67,10 +67,10 @@ function resolveAttachmentFallback(payload) {
 
 function normalizeMessageNotificationPayload(rawPayload) {
   const conversationId = sanitizeIdentifier(rawPayload?.conversationId);
-  const messageId = sanitizeIdentifier(rawPayload?.messageId);
+  const messageId = sanitizeIdentifier(rawPayload?.messageId) || sanitizeIdentifier(rawPayload?.eventId);
   const eventId = sanitizeIdentifier(rawPayload?.eventId);
-  const authorId = sanitizeIdentifier(rawPayload?.authorId);
-  if (!conversationId || !messageId || !authorId) {
+  const authorId = sanitizeIdentifier(rawPayload?.authorId) || `conversation:${conversationId || "unknown"}`;
+  if (!conversationId || !messageId) {
     return null;
   }
 
@@ -243,12 +243,38 @@ class NotificationManager {
     try {
       notification.show();
     } catch (error) {
-      this.debugLog("show_failed", {
-        conversationId: notificationPayload.conversationId,
-        messageId: notificationPayload.messageId,
-        reason: error instanceof Error ? error.message : String(error),
-      });
-      return;
+      const hasIcon = Boolean(notificationOptions.icon);
+      if (!hasIcon) {
+        this.debugLog("show_failed", {
+          conversationId: notificationPayload.conversationId,
+          messageId: notificationPayload.messageId,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+        return;
+      }
+
+      const fallbackOptions = { ...notificationOptions };
+      delete fallbackOptions.icon;
+
+      try {
+        const fallbackNotification = new this.NotificationCtor(fallbackOptions);
+        fallbackNotification.once("click", () => {
+          this.navigationCoordinator.handleNotificationClick({
+            conversationId: notificationPayload.conversationId,
+            messageId: notificationPayload.messageId,
+            eventId: notificationPayload.eventId,
+            source: "native-notification",
+          });
+        });
+        fallbackNotification.show();
+      } catch (fallbackError) {
+        this.debugLog("show_failed", {
+          conversationId: notificationPayload.conversationId,
+          messageId: notificationPayload.messageId,
+          reason: fallbackError instanceof Error ? fallbackError.message : String(fallbackError),
+        });
+        return;
+      }
     }
     this.debugLog("shown", {
       conversationId: notificationPayload.conversationId,
@@ -268,6 +294,7 @@ class NotificationManager {
     const options = {
       title,
       body,
+      subtitle: this.appName,
       silent: Boolean(payload.muted),
     };
     if (this.appId) {
@@ -293,13 +320,26 @@ class NotificationManager {
 
   buildTitle(payload) {
     const batchCount = Math.max(1, Number(payload.batchCount ?? 1));
+    let baseTitle = "";
     if (batchCount > 1 && payload.conversationType !== "dm") {
       const contextLabel = sanitizeText(payload.contextLabel, MESSAGE_NOTIFICATION_MAX_CONTEXT_LENGTH);
       if (contextLabel) {
-        return contextLabel;
+        baseTitle = contextLabel;
       }
     }
-    return sanitizeText(payload.authorName, MESSAGE_NOTIFICATION_MAX_AUTHOR_NAME_LENGTH) || this.appName;
+    if (!baseTitle) {
+      baseTitle = sanitizeText(payload.authorName, MESSAGE_NOTIFICATION_MAX_AUTHOR_NAME_LENGTH) || "Nova mensagem";
+    }
+
+    const appName = sanitizeText(this.appName, 40);
+    if (!appName) {
+      return baseTitle;
+    }
+
+    if (baseTitle.toLowerCase().includes(appName.toLowerCase())) {
+      return baseTitle;
+    }
+    return `${baseTitle} • ${appName}`;
   }
 
   buildBody(payload) {

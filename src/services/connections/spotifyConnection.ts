@@ -1,3 +1,5 @@
+import { EdgeFunctionError, invokeEdgeJson } from "../edge/edgeClient";
+
 export interface SpotifyPlaybackState {
   trackTitle: string;
   artistNames: string;
@@ -62,6 +64,9 @@ const SPOTIFY_CONNECTION_STORAGE_KEY_PREFIX = "messly:spotify-connection:";
 const SPOTIFY_RATE_LIMIT_STORAGE_KEY_PREFIX = "messly:spotify-rate-limit:";
 export const SPOTIFY_CONNECTION_UPDATED_EVENT = "messly:spotify-connection-updated";
 const FALLBACK_USER_SCOPE = "guest";
+const SPOTIFY_CONNECTIONS_EDGE_FUNCTION = "spotify-connections";
+const SPOTIFY_WEB_CALLBACK_FALLBACK_URL = "https://messly.site/callback";
+const SPOTIFY_DESKTOP_PRESENCE_BRIDGE_ENABLED = String(import.meta.env.VITE_SPOTIFY_DESKTOP_BRIDGE ?? "").trim() === "1";
 
 const SPOTIFY_AUTHORIZE_URL = "https://accounts.spotify.com/authorize";
 const SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token";
@@ -133,6 +138,19 @@ interface SpotifyTokenResponse {
   error?: string;
   error_description?: string;
 }
+
+interface SpotifyEdgeBeginOauthResponse {
+  authorizeUrl?: unknown;
+  state?: unknown;
+  redirectUri?: unknown;
+  expiresAt?: unknown;
+}
+
+interface SpotifyEdgeConnectionResponse {
+  connection?: unknown;
+}
+
+type SpotifyEdgeSyncResponse = SpotifyEdgeConnectionResponse;
 
 interface SpotifyPlaybackApiArtist {
   name?: string;
@@ -268,6 +286,9 @@ function getSpotifyConnectionRuntimeState(): SpotifyConnectionRuntimeState {
 const spotifyPollers = getSpotifyConnectionRuntimeState().pollers;
 
 function isDesktopSpotifyPresenceBridgeAvailable(): boolean {
+  if (!SPOTIFY_DESKTOP_PRESENCE_BRIDGE_ENABLED) {
+    return false;
+  }
   // In Electron desktop runtime, Spotify networking/polling is delegated to main process via IPC.
   if (typeof window === "undefined") {
     return false;
@@ -435,6 +456,118 @@ function readRetryAfterMs(response: Response): number | null {
 
 function isSpotifyApiError(value: unknown): value is SpotifyApiError {
   return Boolean(value) && typeof value === "object" && "code" in (value as Record<string, unknown>);
+}
+
+function readEdgeRetryAfterMs(error: EdgeFunctionError): number | undefined {
+  const details = error.details;
+  if (details && typeof details === "object" && "retryAfterMs" in (details as Record<string, unknown>)) {
+    const raw = Number((details as { retryAfterMs?: unknown }).retryAfterMs ?? 0);
+    if (Number.isFinite(raw) && raw > 0) {
+      return Math.round(raw);
+    }
+  }
+  return undefined;
+}
+
+function normalizeSpotifyEdgeError(error: unknown): never {
+  if (error instanceof EdgeFunctionError) {
+    const status = Number(error.status ?? 0);
+    const code = String(error.code ?? "").trim().toUpperCase();
+    const message = String(error.message ?? "").trim() || "Falha ao sincronizar a conexao Spotify.";
+
+    if (status === 401 || status === 403 || code === "UNAUTHENTICATED" || code === "INVALID_TOKEN") {
+      throw createSpotifyApiError("spotify_unauthorized", message);
+    }
+
+    if (status === 429 || code === "RATE_LIMITED" || code === "SPOTIFY_RATE_LIMITED") {
+      throw createSpotifyApiError("spotify_rate_limited", message, {
+        retryAfterMs: readEdgeRetryAfterMs(error),
+      });
+    }
+
+    throw createSpotifyApiError("spotify_api_error", message);
+  }
+
+  if (error instanceof Error) {
+    throw createSpotifyApiError("spotify_api_error", error.message || "Falha ao sincronizar a conexao Spotify.");
+  }
+
+  throw createSpotifyApiError("spotify_api_error", "Falha ao sincronizar a conexao Spotify.");
+}
+
+async function invokeSpotifyConnectionsEdge<TRequest extends Record<string, unknown>, TResponse>(
+  payload: TRequest,
+  options: {
+    signal?: AbortSignal;
+    timeoutMs?: number;
+  } = {},
+): Promise<TResponse> {
+  try {
+    return await invokeEdgeJson<TRequest, TResponse>(SPOTIFY_CONNECTIONS_EDGE_FUNCTION, payload, {
+      requireAuth: true,
+      retries: 0,
+      timeoutMs: options.timeoutMs ?? 15_000,
+      signal: options.signal,
+    });
+  } catch (error) {
+    normalizeSpotifyEdgeError(error);
+  }
+}
+
+function parseSpotifyEdgeBeginResponse(raw: SpotifyEdgeBeginOauthResponse): {
+  authorizeUrl: string;
+  state: string;
+  redirectUri: string;
+} {
+  const authorizeUrl = String(raw?.authorizeUrl ?? "").trim();
+  const state = String(raw?.state ?? "").trim();
+  const redirectUri = String(raw?.redirectUri ?? "").trim() || getSpotifyRedirectUri();
+
+  if (!authorizeUrl) {
+    throw new Error("Nao foi possivel iniciar a autenticacao com Spotify.");
+  }
+  if (!state) {
+    throw new Error("Nao foi possivel validar o estado de autenticacao do Spotify.");
+  }
+
+  return {
+    authorizeUrl,
+    state,
+    redirectUri,
+  };
+}
+
+function normalizeSpotifyEdgeConnection(connectionRaw: unknown): SpotifyConnectionState {
+  return normalizeConnection(connectionRaw);
+}
+
+export async function completeSpotifyOAuthCallbackCode(
+  userId: string | null | undefined,
+  code: string,
+  state: string,
+): Promise<SpotifyConnectionState> {
+  const scopedUserId = resolveUserScope(userId);
+  const normalizedCode = String(code ?? "").trim();
+  const normalizedState = String(state ?? "").trim();
+  if (!normalizedCode || !normalizedState) {
+    throw new Error("Codigo de autorizacao do Spotify invalido.");
+  }
+
+  const response = await invokeSpotifyConnectionsEdge<
+    {
+      action: "complete_oauth";
+      code: string;
+      state: string;
+    },
+    SpotifyEdgeConnectionResponse
+  >({
+    action: "complete_oauth",
+    code: normalizedCode,
+    state: normalizedState,
+  });
+
+  const nextConnection = normalizeSpotifyEdgeConnection(response?.connection ?? null);
+  return writeSpotifyConnection(scopedUserId, nextConnection);
 }
 
 function isAbortError(value: unknown): boolean {
@@ -733,11 +866,17 @@ function normalizeConnection(raw: unknown): SpotifyConnectionState {
   const hasDesktopOAuthIdentity =
     authStateRaw === "oauth" &&
     isDesktopSpotifyPresenceBridgeAvailable();
+  const hasServerManagedOAuthIdentity =
+    authStateRaw === "oauth" &&
+    hasAnyIdentity;
   // Legacy mock connections (without OAuth token) are considered disconnected unless
   // they were explicitly restored from the persisted profile payload.
   // Desktop bridge snapshots are tokenless in renderer by design, but still valid OAuth.
-  const connected = requestedConnected && (Boolean(token) || hasDetachedIdentity || hasDesktopOAuthIdentity);
-  const playback = token || hasDesktopOAuthIdentity ? normalizePlayback(casted.playback) : null;
+  const connected = requestedConnected &&
+    (Boolean(token) || hasDetachedIdentity || hasDesktopOAuthIdentity || hasServerManagedOAuthIdentity);
+  const playback = token || hasDesktopOAuthIdentity || hasServerManagedOAuthIdentity
+    ? normalizePlayback(casted.playback)
+    : null;
   const accountName = connected ? String(casted.accountName ?? "").trim() || SPOTIFY_DEFAULT_ACCOUNT_NAME : "";
   const accountId = connected ? String(casted.accountId ?? "").trim() : "";
   const accountUrl = connected ? String(casted.accountUrl ?? "").trim() : "";
@@ -748,7 +887,9 @@ function normalizeConnection(raw: unknown): SpotifyConnectionState {
   return {
     v: 1,
     provider: "spotify",
-    authState: connected && (Boolean(token) || hasDesktopOAuthIdentity) ? "oauth" : "detached",
+    authState: connected && (Boolean(token) || hasDesktopOAuthIdentity || hasServerManagedOAuthIdentity)
+      ? "oauth"
+      : "detached",
     connected,
     accountName,
     accountId,
@@ -769,17 +910,16 @@ function getSpotifyClientId(): string {
 
 function buildWebFallbackRedirectUri(): string {
   if (typeof window === "undefined") {
-    return "";
+    return SPOTIFY_WEB_CALLBACK_FALLBACK_URL;
   }
 
   try {
     const currentUrl = new URL(window.location.href);
     currentUrl.search = "";
     currentUrl.hash = "";
-    // Usa a raiz do app ("/") como redirect padrão em vez da antiga página removida.
-    return `${currentUrl.origin}/`;
+    return `${currentUrl.origin}/callback`;
   } catch {
-    return "";
+    return SPOTIFY_WEB_CALLBACK_FALLBACK_URL;
   }
 }
 
@@ -789,26 +929,16 @@ function getSpotifyRedirectUri(): string {
     return fromEnv;
   }
 
-  // Em desktop, usamos o deep link padrão registrado no protocolo do app.
-  if (isDesktopSpotifyOAuthBridgeAvailable()) {
-    return "messly://callback";
-  }
-
   return buildWebFallbackRedirectUri();
 }
 
-function ensureSpotifyOAuthConfig(): { clientId: string; redirectUri: string } {
-  const clientId = getSpotifyClientId();
-  if (!clientId) {
-    throw new Error("Configurar VITE_SPOTIFY_CLIENT_ID no ambiente para habilitar o Spotify.");
-  }
-
+function ensureSpotifyOAuthConfig(): { redirectUri: string } {
   const redirectUri = getSpotifyRedirectUri();
   if (!redirectUri) {
     throw new Error("Nao foi possivel resolver o redirect URI do Spotify.");
   }
 
-  return { clientId, redirectUri };
+  return { redirectUri };
 }
 
 function encodeBase64Url(bytes: Uint8Array): string {
@@ -892,6 +1022,11 @@ function waitForSpotifyAuthCode(popup: Window, redirectUri: string, expectedStat
 
   return new Promise((resolve, reject) => {
     let isDone = false;
+    const clearHandlers = (): void => {
+      window.clearInterval(intervalId);
+      window.clearTimeout(timeoutId);
+      window.removeEventListener("message", handleMessage);
+    };
     const closePopup = (): void => {
       try {
         if (!popup.closed) {
@@ -907,39 +1042,14 @@ function waitForSpotifyAuthCode(popup: Window, redirectUri: string, expectedStat
         return;
       }
       isDone = true;
-      window.clearInterval(intervalId);
-      window.clearTimeout(timeoutId);
+      clearHandlers();
       callback();
     };
 
-    const timeoutId = window.setTimeout(() => {
-      finish(() => {
-        setTimeout(closePopup, 1500);
-        reject(new Error("Tempo esgotado ao conectar com o Spotify. Tente novamente."));
-      });
-    }, SPOTIFY_POPUP_TIMEOUT_MS);
-
-    const intervalId = window.setInterval(() => {
-      if (popup.closed) {
-        finish(() => reject(new Error("Conexao com Spotify cancelada.")));
-        return;
-      }
-
-      let popupHref = "";
-      try {
-        popupHref = popup.location.href;
-      } catch {
-        // Ignore cross-origin reads until redirect reaches app origin.
-        return;
-      }
-
-      if (!popupHref || popupHref === "about:blank") {
-        return;
-      }
-
+    const resolveCallbackUrl = (rawUrl: string): void => {
       let popupUrl: URL;
       try {
-        popupUrl = new URL(popupHref);
+        popupUrl = new URL(String(rawUrl ?? ""));
       } catch {
         return;
       }
@@ -972,6 +1082,53 @@ function waitForSpotifyAuthCode(popup: Window, redirectUri: string, expectedStat
       }
 
       resolve(authCode);
+    };
+
+    const handleMessage = (event: MessageEvent): void => {
+      if (event.origin !== redirectUrl.origin) {
+        return;
+      }
+
+      const payload = event.data as { type?: unknown; url?: unknown } | null;
+      if (!payload || typeof payload !== "object") {
+        return;
+      }
+
+      if (String(payload.type ?? "").trim() !== "messly:spotify:oauth-callback") {
+        return;
+      }
+
+      resolveCallbackUrl(String(payload.url ?? ""));
+    };
+
+    window.addEventListener("message", handleMessage);
+
+    const timeoutId = window.setTimeout(() => {
+      finish(() => {
+        setTimeout(closePopup, 1500);
+        reject(new Error("Tempo esgotado ao conectar com o Spotify. Tente novamente."));
+      });
+    }, SPOTIFY_POPUP_TIMEOUT_MS);
+
+    const intervalId = window.setInterval(() => {
+      if (popup.closed) {
+        finish(() => reject(new Error("Conexao com Spotify cancelada.")));
+        return;
+      }
+
+      let popupHref = "";
+      try {
+        popupHref = popup.location.href;
+      } catch {
+        // Ignore cross-origin reads until redirect reaches app origin.
+        return;
+      }
+
+      if (!popupHref || popupHref === "about:blank") {
+        return;
+      }
+
+      resolveCallbackUrl(popupHref);
     }, 350);
   });
 }
@@ -1635,10 +1792,7 @@ function stopSpotifyPolling(userId: string): void {
 }
 
 export function isSpotifyOAuthConfigured(): boolean {
-  if (isDesktopSpotifyPresenceBridgeAvailable()) {
-    return true;
-  }
-  return Boolean(getSpotifyClientId());
+  return Boolean(getSpotifyRedirectUri());
 }
 
 export function getSpotifyOAuthRedirectUri(): string {
@@ -1831,12 +1985,11 @@ function findMatchingOAuthConnectionAcrossScopes(
   targetScope: string,
   targetIdentity: SpotifyConnectionState,
 ): SpotifyConnectionState | null {
-  const allowDesktopRuntime = isDesktopSpotifyPresenceBridgeAvailable();
   const candidates = readStoredSpotifyConnectionEntries()
     .filter(({ scope, connection }) =>
       scope !== targetScope &&
       connection.connected &&
-      (Boolean(connection.token) || (allowDesktopRuntime && connection.authState === "oauth")) &&
+      (Boolean(connection.token) || connection.authState === "oauth") &&
       hasMatchingSpotifyIdentity(connection, targetIdentity)
     )
     .sort((left, right) => Date.parse(right.connection.updatedAt) - Date.parse(left.connection.updatedAt));
@@ -1874,7 +2027,7 @@ export function hydrateSpotifyConnectionFromProfile(
   const currentConnection = readSpotifyConnection(scopedUserId);
 
   if (!persistedConnection) {
-    if (!currentConnection.connected || currentConnection.token) {
+    if (!currentConnection.connected || currentConnection.authState === "oauth" || currentConnection.token) {
       return currentConnection;
     }
     return writeSpotifyConnection(scopedUserId, createDefaultSpotifyConnection());
@@ -1895,15 +2048,14 @@ export function hydrateSpotifyConnectionFromProfile(
 
   const runtimeSourceConnection =
     currentConnection.connected &&
-      (Boolean(currentConnection.token) || isDesktopSpotifyPresenceBridgeAvailable()) &&
+      (Boolean(currentConnection.token) || currentConnection.authState === "oauth" || isDesktopSpotifyPresenceBridgeAvailable()) &&
       hasMatchingSpotifyIdentity(currentConnection, normalizedPersistedConnection)
       ? currentConnection
       : findMatchingOAuthConnectionAcrossScopes(scopedUserId, normalizedPersistedConnection);
 
   const runtimeHasLiveOAuth = Boolean(
     runtimeSourceConnection &&
-      (runtimeSourceConnection.token ||
-        (isDesktopSpotifyPresenceBridgeAvailable() && runtimeSourceConnection.authState === "oauth")),
+      (runtimeSourceConnection.token || runtimeSourceConnection.authState === "oauth"),
   );
   const shouldPreserveLocalRuntime = Boolean(
     runtimeSourceConnection?.connected && runtimeHasLiveOAuth,
@@ -1964,92 +2116,74 @@ function persistSpotifyRateLimitedState(
 
 export async function connectSpotifyOAuth(userId: string | null | undefined): Promise<SpotifyConnectionState> {
   const scopedUserId = resolveUserScope(userId);
-  if (isDesktopSpotifyPresenceBridgeAvailable() && typeof window !== "undefined") {
-    bindDesktopSpotifyPresenceUpdates();
-    const connectInMain = window.electronAPI?.spotifyPresenceConnect;
-    if (typeof connectInMain !== "function") {
-      throw new Error("Spotify bridge indisponivel no desktop.");
-    }
-    const { clientId, redirectUri } = ensureSpotifyOAuthConfig();
-    const response = await connectInMain({
-      scope: scopedUserId,
-      clientId,
-      redirectUri,
-    });
-    const nextConnection = applyDesktopConnectionSnapshot(scopedUserId, response?.connection ?? null, {
-      suppressDesktopSync: true,
-    });
-    const runtime = getSpotifyDesktopBridgeRuntimeState();
-    runtime.scopeSnapshots.set(scopedUserId, {
-      fetchedAt: Date.now(),
-      requestedAt: Date.now(),
-    });
-    return nextConnection;
-  }
-
-  const { clientId, redirectUri } = ensureSpotifyOAuthConfig();
+  const { redirectUri: fallbackRedirectUri } = ensureSpotifyOAuthConfig();
   const currentConnection = readSpotifyConnection(scopedUserId);
   const showOnProfile = currentConnection.connected ? currentConnection.showOnProfile : true;
   const showAsStatus = currentConnection.connected ? currentConnection.showAsStatus : true;
+  const useDesktopDeepLink = isDesktopSpotifyOAuthBridgeAvailable();
 
-  let shouldUseDesktopDeepLink = false;
-  try {
-    const redirectUrl = new URL(redirectUri);
-    shouldUseDesktopDeepLink =
-      redirectUrl.protocol.toLowerCase() === "messly:" && isDesktopSpotifyOAuthBridgeAvailable();
-  } catch {
-    shouldUseDesktopDeepLink = false;
-  }
+  const beginResponse = await invokeSpotifyConnectionsEdge<
+    {
+      action: "begin_oauth";
+      clientContext: "web" | "desktop";
+    },
+    SpotifyEdgeBeginOauthResponse
+  >({
+    action: "begin_oauth",
+    clientContext: useDesktopDeepLink ? "desktop" : "web",
+  });
 
-  let token = shouldUseDesktopDeepLink
-    ? await requestSpotifyAccessTokenViaDeepLink(clientId, redirectUri)
-    : await requestSpotifyAccessTokenViaPopup(clientId, redirectUri);
-  let profile = await fetchSpotifyProfile(token.accessToken);
-  let playback: SpotifyPlaybackState | null = null;
+  const begin = parseSpotifyEdgeBeginResponse(beginResponse);
+  const effectiveRedirectUri = begin.redirectUri || fallbackRedirectUri;
 
-  try {
-    playback = (await fetchSpotifyPlayback(token.accessToken)).playback;
-  } catch (error) {
-    if (isSpotifyApiError(error) && error.code === "spotify_unauthorized") {
-      token = await refreshSpotifyAccessToken(token.refreshToken, clientId);
-      profile = await fetchSpotifyProfile(token.accessToken);
-      playback = (await fetchSpotifyPlayback(token.accessToken)).playback;
+  let authorizationCode = "";
+  if (useDesktopDeepLink) {
+    if (typeof window === "undefined" || typeof window.electronAPI?.openExternalUrl !== "function") {
+      throw new Error("Integracao de navegador externo indisponivel no desktop.");
     }
+    await window.electronAPI.openExternalUrl({ url: begin.authorizeUrl });
+    authorizationCode = await waitForSpotifyAuthCodeFromDeepLink("messly://callback", begin.state);
+  } else {
+    const popup = openSpotifyAuthPopup(begin.authorizeUrl);
+    if (!popup) {
+      throw new Error("Nao foi possivel abrir a janela de autenticacao do Spotify.");
+    }
+    authorizationCode = await waitForSpotifyAuthCode(popup, effectiveRedirectUri, begin.state);
   }
 
-  const nextConnection = writeSpotifyConnection(
-    scopedUserId,
-    normalizeConnection({
-      connected: true,
-      accountName: profile.accountName,
-      accountId: profile.accountId,
-      accountUrl: profile.accountUrl,
-      accountProduct: profile.accountProduct,
-      showOnProfile,
-      showAsStatus,
-      playback,
-      token,
-      updatedAt: new Date().toISOString(),
-    }),
-  );
+  const completedResponse = await invokeSpotifyConnectionsEdge<
+    {
+      action: "complete_oauth";
+      code: string;
+      state: string;
+      showOnProfile: boolean;
+      showAsStatus: boolean;
+    },
+    SpotifyEdgeConnectionResponse
+  >({
+    action: "complete_oauth",
+    code: authorizationCode,
+    state: begin.state,
+    showOnProfile,
+    showAsStatus,
+  });
 
-  return nextConnection;
+  const nextConnection = normalizeSpotifyEdgeConnection(completedResponse?.connection ?? null);
+  return writeSpotifyConnection(scopedUserId, nextConnection);
 }
 
 export async function disconnectSpotifyOAuth(userId: string | null | undefined): Promise<SpotifyConnectionState> {
   const scopedUserId = resolveUserScope(userId);
-  if (isDesktopSpotifyPresenceBridgeAvailable() && typeof window !== "undefined") {
-    bindDesktopSpotifyPresenceUpdates();
-    const disconnectInMain = window.electronAPI?.spotifyPresenceDisconnect;
-    if (typeof disconnectInMain !== "function") {
-      throw new Error("Spotify bridge indisponivel no desktop.");
-    }
-    const response = await disconnectInMain({ scope: scopedUserId });
-    return applyDesktopConnectionSnapshot(scopedUserId, response?.connection ?? null, {
-      suppressDesktopSync: true,
-    });
-  }
-  return writeSpotifyConnection(scopedUserId, createDefaultSpotifyConnection());
+  const response = await invokeSpotifyConnectionsEdge<
+    {
+      action: "disconnect";
+    },
+    SpotifyEdgeConnectionResponse
+  >({
+    action: "disconnect",
+  });
+  const nextConnection = normalizeSpotifyEdgeConnection(response?.connection ?? createDefaultSpotifyConnection());
+  return writeSpotifyConnection(scopedUserId, nextConnection);
 }
 
 export async function setSpotifyConnectionVisibility(
@@ -2060,34 +2194,25 @@ export async function setSpotifyConnectionVisibility(
   },
 ): Promise<SpotifyConnectionState> {
   const scopedUserId = resolveUserScope(userId);
-  if (isDesktopSpotifyPresenceBridgeAvailable() && typeof window !== "undefined") {
-    bindDesktopSpotifyPresenceUpdates();
-    const setVisibilityInMain = window.electronAPI?.spotifyPresenceSetVisibility;
-    if (typeof setVisibilityInMain !== "function") {
-      throw new Error("Spotify bridge indisponivel no desktop.");
-    }
-    const response = await setVisibilityInMain({
-      scope: scopedUserId,
-      showOnProfile: patch.showOnProfile,
-      showAsStatus: patch.showAsStatus,
-    });
-    return applyDesktopConnectionSnapshot(scopedUserId, response?.connection ?? null, {
-      suppressDesktopSync: true,
-    });
-  }
-
   const currentConnection = readSpotifyConnection(scopedUserId);
   if (!currentConnection.connected) {
     return currentConnection;
   }
-
-  return writeSpotifyConnection(scopedUserId, {
-    ...currentConnection,
-    showOnProfile:
-      typeof patch.showOnProfile === "boolean" ? patch.showOnProfile : currentConnection.showOnProfile,
-    showAsStatus: typeof patch.showAsStatus === "boolean" ? patch.showAsStatus : currentConnection.showAsStatus,
-    updatedAt: new Date().toISOString(),
+  const response = await invokeSpotifyConnectionsEdge<
+    {
+      action: "set_visibility";
+      showOnProfile?: boolean;
+      showAsStatus?: boolean;
+    },
+    SpotifyEdgeConnectionResponse
+  >({
+    action: "set_visibility",
+    ...(typeof patch.showOnProfile === "boolean" ? { showOnProfile: patch.showOnProfile } : {}),
+    ...(typeof patch.showAsStatus === "boolean" ? { showAsStatus: patch.showAsStatus } : {}),
   });
+
+  const nextConnection = normalizeSpotifyEdgeConnection(response?.connection ?? currentConnection);
+  return writeSpotifyConnection(scopedUserId, nextConnection);
 }
 
 export async function syncSpotifyConnection(
@@ -2164,119 +2289,57 @@ export async function syncSpotifyConnection(
     });
   }
 
-  if (!currentConnection.connected || !currentConnection.token) {
-    return {
-      connection: currentConnection,
-      playbackKey: buildSpotifyPlaybackKey(currentConnection.playback),
-      playbackStatus: currentConnection.playback ? "playing" : "idle",
-      latencyMs: 0,
-      didConnectionChange: false,
-    };
-  }
-
-  const { clientId } = ensureSpotifyOAuthConfig();
-
-  let nextToken = currentConnection.token;
   try {
-    nextToken = await getFreshSpotifyToken(currentConnection, clientId);
-  } catch {
-    const disconnected = writeSpotifyConnection(scopedUserId, createDefaultSpotifyConnection());
+    const response = await invokeSpotifyConnectionsEdge<
+      {
+        action: "sync";
+      },
+      SpotifyEdgeSyncResponse
+    >(
+      {
+        action: "sync",
+      },
+      {
+        signal: options.signal,
+        timeoutMs: 12_000,
+      },
+    );
+
+    const nextConnection = normalizeSpotifyEdgeConnection(response?.connection ?? currentConnection);
+    const didConnectionChange =
+      buildSpotifyConnectionFingerprint(currentConnection) !== buildSpotifyConnectionFingerprint(nextConnection);
+    const persistedConnection = didConnectionChange
+      ? writeSpotifyConnection(scopedUserId, nextConnection)
+      : currentConnection;
+
     return {
-      connection: disconnected,
-      playbackKey: "idle",
-      playbackStatus: "idle",
+      connection: persistedConnection,
+      playbackKey: buildSpotifyPlaybackKey(persistedConnection.playback),
+      playbackStatus: persistedConnection.playback?.isPlaying ? "playing" : persistedConnection.playback ? "idle" : "no_device",
       latencyMs: 0,
-      didConnectionChange: true,
+      didConnectionChange,
     };
-  }
-
-  let profile = {
-    accountName: currentConnection.accountName || SPOTIFY_DEFAULT_ACCOUNT_NAME,
-    accountId: currentConnection.accountId,
-    accountUrl: currentConnection.accountUrl,
-    accountProduct: currentConnection.accountProduct,
-  };
-  let playbackResult: SpotifyPlaybackFetchResult = {
-    playback: null,
-    playbackKey: "idle",
-    status: "idle",
-    latencyMs: 0,
-  };
-
-  try {
-    playbackResult = await fetchSpotifyPlayback(nextToken.accessToken, options.signal);
   } catch (error) {
-    if (isSpotifyApiError(error) && error.code === "spotify_unauthorized") {
-      try {
-        nextToken = await refreshSpotifyAccessToken(nextToken.refreshToken, clientId);
-        playbackResult = await fetchSpotifyPlayback(nextToken.accessToken, options.signal);
-      } catch (refreshError) {
-        if (isSpotifyApiError(refreshError) && refreshError.code === "spotify_rate_limited") {
-          const persistedConnection = persistSpotifyRateLimitedState(scopedUserId, currentConnection, {
-            token: nextToken,
-          });
-          throw Object.assign(refreshError, {
-            persistedConnection,
-          });
-        }
-        const disconnected = writeSpotifyConnection(scopedUserId, createDefaultSpotifyConnection());
-        return {
-          connection: disconnected,
-          playbackKey: "idle",
-          playbackStatus: "idle",
-          latencyMs: 0,
-          didConnectionChange: true,
-        };
-      }
-    } else if (isSpotifyApiError(error) && error.code === "spotify_rate_limited") {
-      const persistedConnection = persistSpotifyRateLimitedState(scopedUserId, currentConnection, {
-        token: nextToken,
-      });
+    if (isSpotifyApiError(error) && error.code === "spotify_rate_limited") {
+      const persistedConnection = persistSpotifyRateLimitedState(scopedUserId, currentConnection);
       throw Object.assign(error, {
         persistedConnection,
       });
-    } else if (isSpotifyApiError(error) && error.code === "spotify_request_aborted") {
-      throw error;
-    } else {
-      playbackResult = {
-        playback: null,
+    }
+
+    if (isSpotifyApiError(error) && error.code === "spotify_unauthorized") {
+      const disconnected = writeSpotifyConnection(scopedUserId, createDefaultSpotifyConnection());
+      return {
+        connection: disconnected,
         playbackKey: "idle",
-        status: "idle",
+        playbackStatus: "idle",
         latencyMs: 0,
+        didConnectionChange: true,
       };
     }
+
+    throw error;
   }
-
-  if (!profile.accountName || !profile.accountId) {
-    try {
-      profile = await fetchSpotifyProfile(nextToken.accessToken);
-    } catch {
-      // Keep cached identity fields when profile endpoint is temporarily unavailable.
-    }
-  }
-
-  const nextConnection = normalizeConnection({
-    ...currentConnection,
-    connected: true,
-    accountName: profile.accountName || currentConnection.accountName || SPOTIFY_DEFAULT_ACCOUNT_NAME,
-    accountId: profile.accountId || currentConnection.accountId,
-    accountUrl: profile.accountUrl || currentConnection.accountUrl,
-    accountProduct: profile.accountProduct || currentConnection.accountProduct,
-    playback: playbackResult.playback,
-    token: nextToken,
-    updatedAt: new Date().toISOString(),
-  });
-
-  const didConnectionChange =
-    buildSpotifyConnectionFingerprint(currentConnection) !== buildSpotifyConnectionFingerprint(nextConnection);
-
-  return {
-    connection: didConnectionChange ? writeSpotifyConnection(scopedUserId, nextConnection) : currentConnection,
-    playbackKey: playbackResult.playbackKey,
-    playbackStatus: playbackResult.status,
-    latencyMs: playbackResult.latencyMs,
-    didConnectionChange,
-  };
 }
 
 export function subscribeSpotifyConnection(

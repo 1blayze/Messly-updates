@@ -26,10 +26,12 @@ function preloadAppShell(): Promise<AppShellModule> {
 const AppShell = lazy(preloadAppShell);
 const RegisterPage = lazy(() => import("../auth/RegisterPage"));
 const VerifyEmailPage = lazy(() => import("../auth/VerifyEmailPage"));
+const SpotifyCallbackPage = lazy(() => import("../auth/SpotifyCallbackPage"));
 const STARTUP_FONTS_TIMEOUT_MS = 900;
 const STARTUP_READY_MAX_RETRIES = 10;
 const STARTUP_LAYOUT_STABILITY_DELTA = 1;
 const APP_BOOTSTRAP_STALL_TIMEOUT_MS = 12_000;
+const SETTINGS_AUTO_OPEN_SECTION_KEY = "messly:settings:auto-open-section";
 
 function nextFrame(): Promise<void> {
   return new Promise((resolve) => {
@@ -316,6 +318,13 @@ function VerifyRoute() {
   return <AuthBootstrapSplash />;
 }
 
+function SettingsConnectionsRoute() {
+  if (typeof window !== "undefined") {
+    window.sessionStorage.setItem(SETTINGS_AUTO_OPEN_SECTION_KEY, "connections");
+  }
+  return <AppRoute />;
+}
+
 export default function AppRoutes() {
   const { user, isLoading, authReady, hasSessionHint, sessionHintResolved } = useAuthSession();
   const bootstrap = useAppBootstrapSnapshot();
@@ -421,6 +430,17 @@ export default function AppRoutes() {
         <Route path="/auth/login" element={<LoginRoute />} />
         <Route path="/auth/register" element={<RegisterRoute />} />
         <Route path="/auth/verify" element={<VerifyRoute />} />
+        <Route
+          path="/callback"
+          element={(
+            <AuthSurface>
+              <RouteLoader>
+                <SpotifyCallbackPage />
+              </RouteLoader>
+            </AuthSurface>
+          )}
+        />
+        <Route path="/settings/connections" element={<SettingsConnectionsRoute />} />
         <Route path="/app" element={<AppRoute />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

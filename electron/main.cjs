@@ -40,6 +40,12 @@ if (typeof app.setName === "function") {
   app.setName(APP_NAME);
 }
 
+if (process.platform === "win32" && typeof app.setAppUserModelId === "function") {
+  try {
+    app.setAppUserModelId(getWindowsNotificationAppId());
+  } catch {}
+}
+
 if (app.commandLine && typeof app.commandLine.appendSwitch === "function") {
   app.commandLine.appendSwitch("enable-gpu-rasterization");
   app.commandLine.appendSwitch("enable-zero-copy");

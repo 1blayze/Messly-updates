@@ -390,6 +390,32 @@ internal sealed class PackageInstaller
 
   private static void ReplaceDirectory(string sourceDirectory, string targetDirectory)
   {
+    Exception? lastError = null;
+    const int maxAttempts = 4;
+
+    for (var attempt = 1; attempt <= maxAttempts; attempt++)
+    {
+      try
+      {
+        ReplaceDirectoryCore(sourceDirectory, targetDirectory);
+        return;
+      }
+      catch (Exception error) when (error is IOException || error is UnauthorizedAccessException)
+      {
+        lastError = error;
+        if (attempt >= maxAttempts)
+        {
+          break;
+        }
+        Thread.Sleep(220 * attempt);
+      }
+    }
+
+    throw new IOException($"Failed to replace directory '{targetDirectory}'.", lastError);
+  }
+
+  private static void ReplaceDirectoryCore(string sourceDirectory, string targetDirectory)
+  {
     var backupDirectory = targetDirectory + ".backup";
     if (Directory.Exists(backupDirectory))
     {

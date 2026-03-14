@@ -24,6 +24,7 @@ class NotificationsService {
   private unsubscribeStore: (() => void) | null = null;
 
   private readonly inFlightIds = new Set<string>();
+  private readonly inFlightDedupKeysByNotificationId = new Map<string, string[]>();
 
   private retryTimerId: number | null = null;
 
@@ -76,6 +77,7 @@ class NotificationsService {
     this.unsubscribeStore = null;
     this.clearRetryTimer();
     this.inFlightIds.clear();
+    this.inFlightDedupKeysByNotificationId.clear();
     this.dedupStore.clear();
     this.batchingService.clear();
     notificationSoundService.dispose();
@@ -103,9 +105,17 @@ class NotificationsService {
     }, NOTIFICATION_RETRY_DELAY_MS);
   }
 
-  private releaseInFlight(notificationIds: readonly string[]): void {
+  private releaseInFlight(notificationIds: readonly string[], options: { unmarkDedup?: boolean } = {}): void {
+    const shouldUnmarkDedup = Boolean(options.unmarkDedup);
     notificationIds.forEach((notificationId) => {
+      if (shouldUnmarkDedup) {
+        const dedupKeys = this.inFlightDedupKeysByNotificationId.get(notificationId);
+        if (dedupKeys && dedupKeys.length > 0) {
+          this.dedupStore.unmark(dedupKeys);
+        }
+      }
       this.inFlightIds.delete(notificationId);
+      this.inFlightDedupKeysByNotificationId.delete(notificationId);
     });
   }
 
@@ -115,6 +125,7 @@ class NotificationsService {
       return;
     }
     this.inFlightIds.delete(normalizedNotificationId);
+    this.inFlightDedupKeysByNotificationId.delete(normalizedNotificationId);
     messlyStore.dispatch(notificationsActions.notificationDelivered(normalizedNotificationId));
   }
 
@@ -148,7 +159,7 @@ class NotificationsService {
           reason: "notify_message_function_missing",
         });
       }
-      this.releaseInFlight(batch.notificationIds);
+      this.releaseInFlight(batch.notificationIds, { unmarkDedup: true });
       this.scheduleRetry("bridge-unavailable");
       return;
     }
@@ -175,7 +186,7 @@ class NotificationsService {
 
       if (!result?.ok) {
         if (normalizedReason === "notification_unavailable" || normalizedReason === "not_supported") {
-          this.releaseInFlight(batch.notificationIds);
+          this.releaseInFlight(batch.notificationIds, { unmarkDedup: true });
           this.scheduleRetry(normalizedReason || "main-not-ready");
           return;
         }
@@ -195,7 +206,7 @@ class NotificationsService {
         conversationId: batch.payload.conversationId,
         messageId: batch.payload.messageId,
       });
-      this.releaseInFlight(batch.notificationIds);
+      this.releaseInFlight(batch.notificationIds, { unmarkDedup: true });
       this.scheduleRetry("dispatch-failed");
     }
   }
@@ -271,7 +282,8 @@ class NotificationsService {
         continue;
       }
 
-      if (this.dedupStore.checkAndMark(this.buildDedupKeys(notification))) {
+      const dedupKeys = this.buildDedupKeys(notification);
+      if (this.dedupStore.checkAndMark(dedupKeys)) {
         logNotificationDebug("deduplicated", {
           notificationId: notification.id,
           conversationId: notification.conversationId,
@@ -283,6 +295,7 @@ class NotificationsService {
       }
 
       this.inFlightIds.add(notification.id);
+      this.inFlightDedupKeysByNotificationId.set(notification.id, dedupKeys);
       this.batchingService.enqueue({
         notificationId: notification.id,
         payload: this.payloadBuilder.build(notification),

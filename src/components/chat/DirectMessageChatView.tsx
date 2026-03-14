@@ -1,4 +1,4 @@
-import { memo, type CSSProperties, type ChangeEvent, type MouseEvent as ReactMouseEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, memo, type CSSProperties, type ChangeEvent, type MouseEvent as ReactMouseEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { gsap } from "gsap";
 import { ScrollToPlugin } from "gsap/ScrollToPlugin";
@@ -10,6 +10,7 @@ import Tooltip from "../ui/Tooltip";
 import UserProfilePopover, { type UserProfileMutualFriendItem } from "../UserProfilePopover/UserProfilePopover";
 import EmojiButton from "./EmojiButton";
 import EmojiPopover from "./EmojiPopover";
+import MessageDateDivider from "./MessageDateDivider";
 import { getAttachmentUrl, getBannerUrl, getDefaultBannerUrl, getNameAvatarUrl, isDefaultBannerUrl } from "../../services/cdn/mediaUrls";
 import {
   PRESENCE_LABELS,
@@ -299,6 +300,7 @@ interface MediaAttachmentGroup {
 interface MessageRenderEntry {
   message: ChatMessageItem;
   showHeader: boolean;
+  dateDividerLabel: string | null;
   mediaGroup: MediaAttachmentGroup | null;
   skipRender: boolean;
 }
@@ -1142,6 +1144,46 @@ export function shouldShowAuthorHeader(
 
   const timeDiff = Math.abs(toTimestamp(currentMessage.createdAt) - toTimestamp(previousMessage.createdAt));
   return timeDiff > GROUP_BREAK_MS;
+}
+
+function getLocalDateKey(timestamp: string): string {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function isSameLocalCalendarDay(leftTimestamp: string, rightTimestamp: string): boolean {
+  const left = getLocalDateKey(leftTimestamp);
+  const right = getLocalDateKey(rightTimestamp);
+  return Boolean(left) && left === right;
+}
+
+function formatMessageDateDividerLabel(timestamp: string, now = new Date()): string {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  const messageDayStart = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  const nowDayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const diffDays = Math.round((nowDayStart - messageDayStart) / (24 * 60 * 60 * 1000));
+  if (diffDays === 0) {
+    return "Hoje";
+  }
+  if (diffDays === 1) {
+    return "Ontem";
+  }
+
+  return new Intl.DateTimeFormat("pt-BR", {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+  }).format(date);
 }
 
 function formatMessageTime(timestamp: string): string {
@@ -2173,6 +2215,9 @@ function shouldMergeMediaMessages(previous: ChatMessageItem, current: ChatMessag
   if ((previous.replyToId ?? "") !== (current.replyToId ?? "")) {
     return false;
   }
+  if (!isSameLocalCalendarDay(previous.createdAt, current.createdAt)) {
+    return false;
+  }
   const timeDiff = Math.abs(toTimestamp(current.createdAt) - toTimestamp(previous.createdAt));
   return timeDiff <= MEDIA_GROUP_WINDOW_MS;
 }
@@ -2181,6 +2226,13 @@ function buildMessageRenderData(messages: ChatMessageItem[]): MessageRenderData 
   const entries: MessageRenderEntry[] = messages.map((message, index) => ({
     message,
     showHeader: shouldShowAuthorHeader(message, index > 0 ? messages[index - 1] : null),
+    dateDividerLabel: (() => {
+      const previousMessage = index > 0 ? messages[index - 1] : null;
+      if (!previousMessage || !isSameLocalCalendarDay(message.createdAt, previousMessage.createdAt)) {
+        return formatMessageDateDividerLabel(message.createdAt) || null;
+      }
+      return null;
+    })(),
     mediaGroup: null,
     skipRender: false,
   }));
@@ -8168,7 +8220,10 @@ export default function DirectMessageChatView({
             />
           ) : null}
 
-          {visibleMessageRenderEntries.map(({ message, showHeader, mediaGroup }) => {
+          {visibleMessageRenderEntries.map(({ message, showHeader, mediaGroup, dateDividerLabel }) => {
+            const dateDividerNode = dateDividerLabel ? (
+              <MessageDateDivider label={dateDividerLabel} dateTime={message.createdAt} />
+            ) : null;
             const isFromCurrentUser = isCurrentUserSender(message.senderId);
             const sender = getParticipantById(message.senderId);
             const senderAvatar = isFromCurrentUser ? currentAvatarSrc : targetAvatarSrc;
@@ -8177,23 +8232,25 @@ export default function DirectMessageChatView({
               const callTitle = getCallEventTitle(message);
               const callMeta = getCallEventMeta(message);
               return (
-                <div
-                  key={message.id}
-                  data-message-id={message.id}
-                  ref={(element) => {
-                    if (element) {
-                      messageRefs.current.set(message.id, element);
-                    } else {
-                      messageRefs.current.delete(message.id);
-                    }
-                  }}
-                  className="dm-chat__call-event-row"
-                >
-                  <article className="dm-chat__call-event" role="note" aria-label={callTitle}>
-                    <p className="dm-chat__call-event-title">{callTitle}</p>
-                    <p className="dm-chat__call-event-meta">{callMeta}</p>
-                  </article>
-                </div>
+                <Fragment key={message.id}>
+                  {dateDividerNode}
+                  <div
+                    data-message-id={message.id}
+                    ref={(element) => {
+                      if (element) {
+                        messageRefs.current.set(message.id, element);
+                      } else {
+                        messageRefs.current.delete(message.id);
+                      }
+                    }}
+                    className="dm-chat__call-event-row"
+                  >
+                    <article className="dm-chat__call-event" role="note" aria-label={callTitle}>
+                      <p className="dm-chat__call-event-title">{callTitle}</p>
+                      <p className="dm-chat__call-event-meta">{callMeta}</p>
+                    </article>
+                  </div>
+                </Fragment>
               );
             }
             const resolvedAttachmentUrl = resolveRenderedAttachmentUrl(message);
@@ -8258,14 +8315,15 @@ export default function DirectMessageChatView({
             const renderedTextContent = message.deletedAt ? "Mensagem excluida" : message.content;
 
             return (
-              <div
-                key={message.id}
-                className={`dm-chat__message-wrapper dm-chat__message-item${
-                  effectiveShowHeader ? " dm-chat__message-wrapper--with-header dm-chat__message-item--with-header" : " dm-chat__message-wrapper--grouped dm-chat__message-item--grouped"
-                }${
-                  replyPreview ? " dm-chat__message-wrapper--with-reply dm-chat__message-item--with-reply" : ""
-                }${highlightMessageId === message.id ? " dm-chat__message--highlight" : ""}`}
-              >
+              <Fragment key={message.id}>
+                {dateDividerNode}
+                <div
+                  className={`dm-chat__message-wrapper dm-chat__message-item${
+                    effectiveShowHeader ? " dm-chat__message-wrapper--with-header dm-chat__message-item--with-header" : " dm-chat__message-wrapper--grouped dm-chat__message-item--grouped"
+                  }${
+                    replyPreview ? " dm-chat__message-wrapper--with-reply dm-chat__message-item--with-reply" : ""
+                  }${highlightMessageId === message.id ? " dm-chat__message--highlight" : ""}`}
+                >
                 {replyPreview ? (
                   <button
                     type="button"
@@ -8535,7 +8593,8 @@ export default function DirectMessageChatView({
                     </div>
                   ) : null}
                 </article>
-            </div>
+                </div>
+              </Fragment>
             );
           })}
 
