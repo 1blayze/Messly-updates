@@ -504,7 +504,13 @@ function normalizeSpotifyEdgeError(error: unknown): never {
     }
 
     if (status === 401 || status === 403 || code === "UNAUTHENTICATED" || code === "INVALID_TOKEN") {
-      throw createSpotifyApiError("spotify_unauthorized", message);
+      try {
+        await authService.logout();
+      } catch {
+        // Best effort: só garantimos limpar sessão local.
+        await authService.clearLocalSession().catch(() => undefined);
+      }
+      throw createSpotifyApiError("spotify_unauthorized", "Sessao invalida ou expirada. Entre novamente.");
     }
 
     if (status === 429 || code === "RATE_LIMITED" || code === "SPOTIFY_RATE_LIMITED") {
