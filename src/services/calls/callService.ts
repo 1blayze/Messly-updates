@@ -547,6 +547,7 @@ export class CallService {
   private readonly mediaManager: MediaDeviceManager;
   private readonly reconnectManager: ReconnectManager;
   private connectionState: RTCPeerConnectionState = "new";
+  private remoteAudioWatchdog: ReturnType<typeof setTimeout> | null = null;
   private statsSnapshot: VoiceStatsSnapshot | null = null;
   private readonly consumeRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly consumeRetryAttempts = new Map<string, number>();
@@ -910,6 +911,10 @@ export class CallService {
 
     await this.callGraphLock.runExclusive(async () => {
       this.sessionManager.transition("disconnecting", "call.close");
+      if (this.remoteAudioWatchdog) {
+        clearTimeout(this.remoteAudioWatchdog);
+        this.remoteAudioWatchdog = null;
+      }
       this.clearConsumeRetries();
       this.closeSocket(1000, "CALL_CLOSE");
       this.rejectPendingReply(new Error("Socket de voz fechado."));
@@ -1136,6 +1141,7 @@ export class CallService {
     this.statsSnapshot = null;
 
     await this.transportManager.setup(routerRtpCapabilities, sendTransport, recvTransport);
+    this.scheduleRemoteAudioWatchdog();
 
     const producerRows = Array.isArray(auth.producers) ? auth.producers : [];
     for (const row of producerRows) {
@@ -1650,6 +1656,23 @@ export class CallService {
     }
     this.consumeRetryTimers.clear();
     this.consumeRetryAttempts.clear();
+  }
+
+  private scheduleRemoteAudioWatchdog(): void {
+    if (this.remoteAudioWatchdog) {
+      clearTimeout(this.remoteAudioWatchdog);
+    }
+    // Se não recebermos áudio remoto em alguns segundos, registrar diagnóstico para depurar chamadas mudas.
+    this.remoteAudioWatchdog = setTimeout(() => {
+      const audioConsumers = this.consumerManager.getAudioConsumerCount();
+      const remoteStream = this.consumerManager.getRemoteStream();
+      const hasLiveAudioTrack = remoteStream?.getAudioTracks().some((track) => track.readyState === "live") ?? false;
+      this.debugLog("voice_audio_receive_status", {
+        audioConsumers,
+        hasLiveAudioTrack,
+        lifecycle: this.sessionManager.getLifecycle(),
+      });
+    }, 10_000);
   }
 
   private requireSession(): VoiceSession {
