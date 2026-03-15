@@ -303,6 +303,11 @@ async function invokeEdgeRequest<TResponse>(
 
       return parsedPayload as TResponse;
     } catch (error) {
+      if (isUnauthorizedEdgeError(error)) {
+        // Ensure we don't keep reusing a token that Edge just rejected.
+        authService.invalidateEdgeAccessTokenValidationCache();
+      }
+
       if (isUnauthorizedEdgeError(error) && !didRefreshSupabaseSession) {
         didRefreshSupabaseSession = true;
         try {

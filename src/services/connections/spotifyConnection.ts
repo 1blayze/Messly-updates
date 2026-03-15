@@ -548,16 +548,30 @@ async function invokeSpotifyConnectionsEdge<TRequest extends Record<string, unkn
     }
   };
 
-	try {
-	  return await run();
-	} catch (error) {
-	  if (error instanceof EdgeFunctionError) {
-	    const status = Number(error.status ?? 0);
-	    const code = String(error.code ?? "").trim().toUpperCase();
-	    if (status === 401 || status === 403 || code === "UNAUTHENTICATED" || code === "INVALID_TOKEN") {
-	      throw createSpotifyApiError("spotify_unauthorized", "Sessao invalida ou expirada. Entre novamente.");
-	    }
-	  }
+  try {
+    return await run();
+  } catch (error) {
+    if (error instanceof EdgeFunctionError) {
+      const status = Number(error.status ?? 0);
+      const code = String(error.code ?? "").trim().toUpperCase();
+      const isUnauthorized =
+        status === 401 ||
+        status === 403 ||
+        code === "UNAUTHENTICATED" ||
+        code === "UNAUTHORIZED" ||
+        code === "INVALID_TOKEN";
+
+      if (isUnauthorized) {
+        // Edge can reject an expired JWT before the client refreshes. Try a single refresh+retry.
+        try {
+          await authService.refreshSession();
+          return await run();
+        } catch {
+          // Fall through to the unauthorized error below.
+        }
+        throw createSpotifyApiError("spotify_unauthorized", "Sessao invalida ou expirada. Entre novamente.");
+      }
+    }
     // Se o token tiver expirado na borda, tente uma vez renovar a sessao e repetir.
     const edgeError = error instanceof Error ? error : new Error(String(error));
     const message = edgeError.message.toLowerCase();

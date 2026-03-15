@@ -493,6 +493,10 @@ class AuthService {
     return !shouldPreferDirectSupabaseSignup();
   }
 
+  invalidateEdgeAccessTokenValidationCache(): void {
+    lastValidatedEdgeAccessToken = null;
+  }
+
   private canReuseValidatedEdgeAccessToken(accessTokenRaw: string | null | undefined): boolean {
     const accessToken = String(accessTokenRaw ?? "").trim();
     if (!accessToken || !lastValidatedEdgeAccessToken) {
