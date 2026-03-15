@@ -3358,7 +3358,16 @@ export default function DirectMessageChatView({
               limit: INITIAL_PAGE_SIZE,
             });
       const fetchElapsedMs = performance.now() - fetchStartedAt;
-      const { deletedIds, visibleMessages: serverMessages } = normalizeListedMessages(listed.messages ?? []);
+      const {
+        normalizedMessages: listedNormalizedMessages,
+        deletedIds,
+        visibleMessages: serverMessages,
+      } = normalizeListedMessages(listed.messages ?? []);
+
+      for (const listedMessage of listedNormalizedMessages) {
+        void consumeVoiceSignalMessage(listedMessage);
+      }
+
       const knownDeletedMessageIds = new Set(deletedMessageIdsRef.current);
       let hasNewDeletedMessageId = false;
       deletedIds.forEach((id) => {
@@ -3434,7 +3443,7 @@ export default function DirectMessageChatView({
       setLoadError("Nao foi possivel carregar as mensagens.");
       incrementMetric("chat_load_failure_total", 1);
     }
-  }, [conversationId, markConversationAsRead]);
+  }, [consumeVoiceSignalMessage, conversationId, markConversationAsRead]);
 
   const loadOlderMessages = useCallback(async (): Promise<void> => {
     if (!nextCursor || isLoadingOlderRef.current || !hasMoreBefore) {
