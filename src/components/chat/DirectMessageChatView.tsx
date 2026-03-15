@@ -3192,6 +3192,7 @@ export default function DirectMessageChatView({
         clientId: createClientMessageId(),
         type: "text",
         content: signalPayload,
+        preferDirect: true,
       });
     },
     [conversationId, currentUser.userId, currentUserId, voiceRoomId],

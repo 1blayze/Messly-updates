@@ -184,6 +184,7 @@ export interface SendChatMessageInput {
   replyToSnapshot?: ReplySnapshot | null;
   attachment?: ChatAttachmentMetadata | null;
   payload?: ChatMessagePayload | null;
+  preferDirect?: boolean;
 }
 
 function normalizeCacheAccountId(accountIdRaw: string | null | undefined): string {
@@ -1741,6 +1742,10 @@ function syncCachedConversationDeleteAfterMutation(message: ChatMessageServer): 
 }
 
 export async function sendChatMessage(payload: SendChatMessageInput): Promise<ChatMessageServer> {
+  if (payload.preferDirect && isDirectSendFallbackCandidate(payload)) {
+    return syncCachedConversationMessageAfterMutation(await sendChatMessageDirect(payload));
+  }
+
   if (shouldPreferDirectChatAccess() && isDirectSendFallbackCandidate(payload)) {
     return syncCachedConversationMessageAfterMutation(await sendChatMessageDirect(payload));
   }
