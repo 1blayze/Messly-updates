@@ -943,6 +943,12 @@ export class CallService {
     ]);
 
     const entries = [...toStatsEntries(sendStatsReport), ...toStatsEntries(recvStatsReport)];
+    if (entries.length === 0) {
+      this.debugLog("voice_stats_empty", {
+        sendTransportId: sendTransport?.id ?? null,
+        recvTransportId: recvTransport?.id ?? null,
+      });
+    }
 
     let outboundBytesTotal = 0;
     let outboundBytesSamples = 0;
@@ -993,6 +999,11 @@ export class CallService {
       ?? candidatePairs.find((entry) => entry.nominated === true && String(entry.state ?? "").trim().toLowerCase() === "succeeded")
       ?? candidatePairs.find((entry) => String(entry.state ?? "").trim().toLowerCase() === "succeeded")
       ?? null;
+    if (!selectedPair) {
+      this.debugLog("voice_stats_no_candidate_pair", {
+        candidatePairs: candidatePairs.length,
+      });
+    }
 
     const localCandidateId = toId(selectedPair?.localCandidateId);
     const remoteCandidateId = toId(selectedPair?.remoteCandidateId);
