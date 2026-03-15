@@ -415,6 +415,26 @@ function readVoiceCallMediaPreferences(userIdRaw: string | null | undefined): Vo
   }
 }
 
+function buildVoiceRoomId(
+  localUserIdRaw: string | null | undefined,
+  remoteUserIdRaw: string | null | undefined,
+  fallbackRoomIdRaw: string | null | undefined,
+): string {
+  const localUserId = String(localUserIdRaw ?? "").trim().toLowerCase();
+  const remoteUserId = String(remoteUserIdRaw ?? "").trim().toLowerCase();
+  const fallbackRoomId = String(fallbackRoomIdRaw ?? "").trim();
+
+  if (localUserId && remoteUserId && localUserId !== remoteUserId) {
+    const orderedPair = [localUserId, remoteUserId].sort((left, right) => left.localeCompare(right));
+    const candidate = `dm:${orderedPair[0]}:${orderedPair[1]}`;
+    if (candidate.length <= 120) {
+      return candidate;
+    }
+  }
+
+  return fallbackRoomId;
+}
+
 export interface DirectMessageChatParticipant {
   userId: string;
   displayName: string;
@@ -1916,6 +1936,10 @@ export default function DirectMessageChatView({
   const currentAvatarSrc = (currentUser.avatarSrc || "").trim() || currentFallbackAvatar;
   const safeTargetDisplayName = targetDisplayNameForFallback;
   const safeTargetUsername = normalizedTargetUsername || "usuario";
+  const voiceRoomId = useMemo(
+    () => buildVoiceRoomId(currentUser.userId, targetUser.userId, conversationId),
+    [conversationId, currentUser.userId, targetUser.userId],
+  );
   const normalizedCurrentSidebarUserId = String(currentUserId ?? "").trim();
   const normalizedTargetSidebarUserId = String(targetUser.userId ?? "").trim();
   const currentSidebarDisplayName =
@@ -3158,7 +3182,7 @@ export default function DirectMessageChatView({
       const signalPayload = encodeVoiceCallSignal({
         version: 1,
         action,
-        roomId: conversationId,
+        roomId: voiceRoomId,
         senderUserId,
         sentAt: Date.now(),
       });
@@ -3170,7 +3194,7 @@ export default function DirectMessageChatView({
         content: signalPayload,
       });
     },
-    [conversationId, currentUser.userId, currentUserId],
+    [conversationId, currentUser.userId, currentUserId, voiceRoomId],
   );
 
   const consumeVoiceSignalMessage = useCallback(
@@ -3180,7 +3204,7 @@ export default function DirectMessageChatView({
       }
 
       const signal = parseVoiceCallSignalContent(message.content);
-      if (!signal || signal.roomId !== conversationId) {
+      if (!signal || signal.roomId !== voiceRoomId) {
         return false;
       }
 
@@ -3223,7 +3247,7 @@ export default function DirectMessageChatView({
 
       return true;
     },
-    [conversationId, currentUser.userId, currentUserId, markConversationAsRead],
+    [currentUser.userId, currentUserId, markConversationAsRead, voiceRoomId],
   );
 
   useEffect(() => {
@@ -5099,7 +5123,7 @@ export default function DirectMessageChatView({
     ]);
 
     const voiceCallClient = new VoiceCallClient({
-      roomId: conversationId,
+      roomId: voiceRoomId,
       self: localIdentity,
       peerDirectory: {
         [remoteIdentity.userId]: remoteIdentity,
@@ -5149,7 +5173,6 @@ export default function DirectMessageChatView({
         void stopVoiceCallSession();
       });
   }, [
-    conversationId,
     currentFallbackAvatar,
     currentUser.avatarSrc,
     currentUser.displayName,
@@ -5161,6 +5184,7 @@ export default function DirectMessageChatView({
     stopVoiceCallSession,
     targetAvatarSrc,
     targetUser.userId,
+    voiceRoomId,
   ]);
 
   const handleToggleVoiceMute = useCallback(() => {
