@@ -63,6 +63,7 @@ export interface PersistedSpotifyConnectionState {
 
 const SPOTIFY_CONNECTION_STORAGE_KEY_PREFIX = "messly:spotify-connection:";
 const SPOTIFY_RATE_LIMIT_STORAGE_KEY_PREFIX = "messly:spotify-rate-limit:";
+const SPOTIFY_UNAUTH_STORAGE_KEY_PREFIX = "messly:spotify-unauth-until:";
 export const SPOTIFY_CONNECTION_UPDATED_EVENT = "messly:spotify-connection-updated";
 const FALLBACK_USER_SCOPE = "guest";
 const SPOTIFY_CONNECTIONS_EDGE_FUNCTION = "spotify-connections";
@@ -841,6 +842,10 @@ function buildSpotifyRateLimitStorageKey(userId: string): string {
   return `${SPOTIFY_RATE_LIMIT_STORAGE_KEY_PREFIX}${resolveUserScope(userId)}`;
 }
 
+function buildSpotifyUnauthStorageKey(userId: string): string {
+  return `${SPOTIFY_UNAUTH_STORAGE_KEY_PREFIX}${resolveUserScope(userId)}`;
+}
+
 function readSpotifyRateLimitUntil(userId: string): number {
   if (typeof window === "undefined") {
     return 0;
@@ -866,6 +871,36 @@ function writeSpotifyRateLimitUntil(userId: string, untilMs: number): void {
       return;
     }
     window.localStorage.setItem(buildSpotifyRateLimitStorageKey(userId), String(Math.round(untilMs)));
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
+function readSpotifyUnauthUntil(userId: string): number {
+  if (typeof window === "undefined") {
+    return 0;
+  }
+
+  try {
+    const raw = window.localStorage.getItem(buildSpotifyUnauthStorageKey(userId));
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) && parsed > Date.now() ? parsed : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function writeSpotifyUnauthUntil(userId: string, untilMs: number): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    if (!Number.isFinite(untilMs) || untilMs <= Date.now()) {
+      window.localStorage.removeItem(buildSpotifyUnauthStorageKey(userId));
+      return;
+    }
+    window.localStorage.setItem(buildSpotifyUnauthStorageKey(userId), String(Math.round(untilMs)));
   } catch {
     // Ignore storage failures.
   }
@@ -2348,6 +2383,7 @@ export async function syncSpotifyConnection(
   }
 
   const rateLimitedUntil = readSpotifyRateLimitUntil(scopedUserId);
+  const unauthorizedUntil = readSpotifyUnauthUntil(scopedUserId);
   const currentConnection = readSpotifyConnection(scopedUserId);
 
   // Avoid noisy 401 loops when the app no longer has a valid user session.
@@ -2356,6 +2392,18 @@ export async function syncSpotifyConnection(
   const validatedEdgeToken = String(await authService.getValidatedEdgeAccessToken() ?? "").trim();
   const hasMatchingAuthScope = Boolean(authenticatedUserId) && authenticatedUserId === scopedUserId;
   if (!hasMatchingAuthScope || !validatedEdgeToken) {
+    const disconnectedConnection = createDefaultSpotifyConnection();
+    return {
+      connection: writeSpotifyConnection(scopedUserId, disconnectedConnection),
+      playbackKey: "idle",
+      playbackStatus: "idle",
+      latencyMs: 0,
+      didConnectionChange: buildSpotifyConnectionFingerprint(currentConnection) !==
+        buildSpotifyConnectionFingerprint(disconnectedConnection),
+    };
+  }
+
+  if (unauthorizedUntil > Date.now()) {
     const disconnectedConnection = createDefaultSpotifyConnection();
     return {
       connection: writeSpotifyConnection(scopedUserId, disconnectedConnection),
@@ -2408,6 +2456,7 @@ export async function syncSpotifyConnection(
     const persistedConnection = didConnectionChange
       ? writeSpotifyConnection(scopedUserId, nextConnection)
       : currentConnection;
+    writeSpotifyUnauthUntil(scopedUserId, 0);
 
     return {
       connection: persistedConnection,
@@ -2425,6 +2474,7 @@ export async function syncSpotifyConnection(
     }
 
     if (isSpotifyApiError(error) && error.code === "spotify_unauthorized") {
+      writeSpotifyUnauthUntil(scopedUserId, Date.now() + 10 * 60 * 1000); // 10 minutes cooldown
       const disconnected = writeSpotifyConnection(scopedUserId, createDefaultSpotifyConnection());
       return {
         connection: disconnected,
