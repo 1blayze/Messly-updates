@@ -132,7 +132,11 @@ export class ConsumerManager {
       this.removeConsumerByProducerId(producerId, "transport-close");
     });
 
-    await this.request("CONSUMER_RESUME", { consumerId }, "CONSUMER_RESUMED").catch(() => undefined);
+    // Server-side consumers start paused. If resume fails, surface the error so the caller can retry.
+    await this.request("CONSUMER_RESUME", { consumerId }, "CONSUMER_RESUMED").catch((error) => {
+      this.removeConsumerByProducerId(producerId, "resume-failed");
+      throw error instanceof Error ? error : new Error(String(error ?? "Failed to resume consumer."));
+    });
   }
 
   removeProducer(producerIdRaw: unknown): void {
