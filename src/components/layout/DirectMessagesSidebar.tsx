@@ -184,7 +184,6 @@ interface BroadcastChatMessageItem {
   deletedAt?: string | null;
   replyToId?: string | null;
   replyToSnapshot?: Record<string, unknown> | null;
-  callId?: string | null;
   payload?: Record<string, unknown> | null;
   attachment?: {
     fileKey: string;
@@ -499,7 +498,6 @@ function mapBroadcastMessageToServerMessage(
       message.replyToSnapshot && typeof message.replyToSnapshot === "object" && !Array.isArray(message.replyToSnapshot)
         ? { ...message.replyToSnapshot }
         : null,
-    call_id: String(message.callId ?? "").trim() || null,
     payload:
       message.payload && typeof message.payload === "object" && !Array.isArray(message.payload)
         ? { ...message.payload }

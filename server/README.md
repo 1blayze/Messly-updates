@@ -14,8 +14,6 @@ Gateway realtime distribuido para `wss://gateway.messly.site/gateway`, preparado
 - `server/src/presence`: presenca agregada por usuario/dispositivo
 - `server/src/pubsub`: bus distribuido, roteamento e bridge de eventos do banco
 - `server/src/ws`: registry local e typing local da instancia
-- `server/src/voice`: servidor de voz (estado da call, participantes, resume/rejoin)
-- `server/src/sfu`: SFU baseado em mediasoup (publish/subscribe de audio, video e screen share)
 
 ## Endpoints
 
@@ -24,7 +22,6 @@ Gateway realtime distribuido para `wss://gateway.messly.site/gateway`, preparado
 - `GET /healthz`
 - `GET /metrics`
 - `WS /gateway`
-- `WS /voice`
 
 ## Variaveis obrigatorias
 
@@ -50,17 +47,6 @@ Gateway realtime distribuido para `wss://gateway.messly.site/gateway`, preparado
 - `R2_ACCESS_KEY_ID`
 - `R2_SECRET_ACCESS_KEY`
 - `MESSLY_CDN_URL`
-- `MESSLY_SFU_LISTEN_IP`
-- `MESSLY_SFU_ANNOUNCED_IP` (opcional em dev local)
-- `MESSLY_SFU_RTC_MIN_PORT`
-- `MESSLY_SFU_RTC_MAX_PORT`
-- `MESSLY_SFU_ENABLE_UDP`
-- `MESSLY_SFU_ENABLE_TCP`
-- `MESSLY_SFU_PREFER_UDP`
-- `MESSLY_SFU_INITIAL_OUTGOING_BITRATE`
-- `MESSLY_SFU_MAX_INCOMING_BITRATE`
-- `MESSLY_VOICE_PARTICIPANT_RESUME_TTL_MS`
-- `MESSLY_VOICE_EMPTY_CALL_TTL_MS`
 
 ## Verificacao
 

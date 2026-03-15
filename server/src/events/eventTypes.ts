@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-export type ScopeType = "dm" | "guild" | "channel" | "voice";
+export type ScopeType = "dm" | "guild" | "channel";
 
 export type PresenceStatus = "online" | "idle" | "dnd" | "offline" | "invisible";
 

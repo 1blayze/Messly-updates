@@ -34,22 +34,6 @@ as $$
   );
 $$;
 
-create or replace function public.can_access_call(p_call_id uuid, p_user_id uuid)
-returns boolean
-language sql
-stable
-security definer
-set search_path = public, pg_temp
-as $$
-  select exists (
-    select 1
-    from public.call_sessions cs
-    join public.conversations c on c.id = cs.conversation_id
-    where cs.id = p_call_id
-      and (c.user1_id = p_user_id or c.user2_id = p_user_id)
-  );
-$$;
-
 create or replace function public.is_message_author(p_message_id uuid, p_user_id uuid)
 returns boolean
 language sql
@@ -67,11 +51,9 @@ $$;
 
 revoke all on function public.is_conversation_member(uuid, uuid) from public;
 revoke all on function public.can_access_message(uuid, uuid) from public;
-revoke all on function public.can_access_call(uuid, uuid) from public;
 revoke all on function public.is_message_author(uuid, uuid) from public;
 grant execute on function public.is_conversation_member(uuid, uuid) to authenticated;
 grant execute on function public.can_access_message(uuid, uuid) to authenticated;
-grant execute on function public.can_access_call(uuid, uuid) to authenticated;
 grant execute on function public.is_message_author(uuid, uuid) to authenticated;
 
 -- ---------------------------------------------------------
@@ -81,13 +63,6 @@ do $$
 begin
   if to_regclass('public.presence') is not null and to_regclass('public.user_presence') is null then
     alter table public.presence rename to user_presence;
-  end if;
-end $$;
-
-do $$
-begin
-  if to_regclass('public.call_signals') is not null and to_regclass('public.call_signaling') is null then
-    alter table public.call_signals rename to call_signaling;
   end if;
 end $$;
 
@@ -155,82 +130,7 @@ begin
   end if;
 end $$;
 
-do $$
-begin
-  if to_regclass('public.call_signaling') is not null then
-    if exists (
-      select 1
-      from pg_constraint
-      where conrelid = 'public.call_signaling'::regclass
-        and conname = 'call_signals_pkey'
-    ) then
-      alter table public.call_signaling rename constraint call_signals_pkey to call_signaling_pkey;
-    end if;
-
-    if exists (
-      select 1
-      from pg_constraint
-      where conrelid = 'public.call_signaling'::regclass
-        and conname = 'call_signals_distinct_participants_chk'
-    ) then
-      alter table public.call_signaling
-        rename constraint call_signals_distinct_participants_chk to call_signaling_distinct_participants_chk;
-    end if;
-
-    if exists (
-      select 1
-      from pg_constraint
-      where conrelid = 'public.call_signaling'::regclass
-        and conname = 'call_signals_payload_object_chk'
-    ) then
-      alter table public.call_signaling
-        rename constraint call_signals_payload_object_chk to call_signaling_payload_object_chk;
-    end if;
-
-    if exists (
-      select 1
-      from pg_constraint
-      where conrelid = 'public.call_signaling'::regclass
-        and conname = 'call_signals_type_check'
-    ) then
-      alter table public.call_signaling rename constraint call_signals_type_check to call_signaling_type_check;
-    end if;
-
-    if exists (
-      select 1
-      from pg_constraint
-      where conrelid = 'public.call_signaling'::regclass
-        and conname = 'call_signals_call_id_fkey'
-    ) then
-      alter table public.call_signaling rename constraint call_signals_call_id_fkey to call_signaling_call_id_fkey;
-    end if;
-
-    if exists (
-      select 1
-      from pg_constraint
-      where conrelid = 'public.call_signaling'::regclass
-        and conname = 'call_signals_from_user_id_fkey'
-    ) then
-      alter table public.call_signaling
-        rename constraint call_signals_from_user_id_fkey to call_signaling_from_user_id_fkey;
-    end if;
-
-    if exists (
-      select 1
-      from pg_constraint
-      where conrelid = 'public.call_signaling'::regclass
-        and conname = 'call_signals_to_user_id_fkey'
-    ) then
-      alter table public.call_signaling
-        rename constraint call_signals_to_user_id_fkey to call_signaling_to_user_id_fkey;
-    end if;
-  end if;
-end $$;
-
 alter index if exists public.presence_updated_at_idx rename to user_presence_updated_at_idx;
-alter index if exists public.call_signals_call_id_idx rename to call_signaling_call_id_idx;
-alter index if exists public.call_signals_from_user_id_idx rename to call_signaling_from_user_id_idx;
-alter index if exists public.call_signals_to_user_id_idx rename to call_signaling_to_user_id_idx;
 alter index if exists public.friend_requests_addressee_idx rename to friend_requests_receiver_idx;
 alter index if exists public.friend_requests_requester_idx rename to friend_requests_sender_idx;
 alter index if exists public.message_reads_user_id_idx rename to message_reads_user_idx;
@@ -416,8 +316,6 @@ create index if not exists user_presence_user_idx
 -- RLS: enforce for all listed tables
 -- ---------------------------------------------------------
 alter table if exists public.attachments enable row level security;
-alter table if exists public.call_sessions enable row level security;
-alter table if exists public.call_signaling enable row level security;
 alter table if exists public.conversations enable row level security;
 alter table if exists public.friend_requests enable row level security;
 alter table if exists public.message_reads enable row level security;
@@ -428,8 +326,6 @@ alter table if exists public.user_blocks enable row level security;
 alter table if exists public.user_sessions enable row level security;
 
 alter table if exists public.attachments force row level security;
-alter table if exists public.call_sessions force row level security;
-alter table if exists public.call_signaling force row level security;
 alter table if exists public.conversations force row level security;
 alter table if exists public.friend_requests force row level security;
 alter table if exists public.message_reads force row level security;
@@ -450,8 +346,6 @@ begin
     where schemaname = 'public'
       and tablename in (
         'attachments',
-        'call_sessions',
-        'call_signaling',
         'conversations',
         'friend_requests',
         'message_reads',
@@ -797,81 +691,6 @@ using (
   and auth.uid() = user_id
 );
 
--- call_sessions
-create policy call_sessions_select_member
-on public.call_sessions
-for select
-to authenticated
-using (
-  auth.uid() is not null
-  and public.is_conversation_member(conversation_id, auth.uid())
-);
-
-create policy call_sessions_insert_member
-on public.call_sessions
-for insert
-to authenticated
-with check (
-  auth.uid() is not null
-  and auth.uid() = created_by
-  and public.is_conversation_member(conversation_id, auth.uid())
-);
-
-create policy call_sessions_update_member
-on public.call_sessions
-for update
-to authenticated
-using (
-  auth.uid() is not null
-  and public.is_conversation_member(conversation_id, auth.uid())
-)
-with check (
-  auth.uid() is not null
-  and public.is_conversation_member(conversation_id, auth.uid())
-);
-
-create policy call_sessions_delete_creator
-on public.call_sessions
-for delete
-to authenticated
-using (
-  auth.uid() is not null
-  and auth.uid() = created_by
-  and public.is_conversation_member(conversation_id, auth.uid())
-);
-
--- call_signaling
-create policy call_signaling_select_member
-on public.call_signaling
-for select
-to authenticated
-using (
-  auth.uid() is not null
-  and public.can_access_call(call_id, auth.uid())
-  and (auth.uid() = from_user_id or auth.uid() = to_user_id)
-);
-
-create policy call_signaling_insert_member
-on public.call_signaling
-for insert
-to authenticated
-with check (
-  auth.uid() is not null
-  and public.can_access_call(call_id, auth.uid())
-  and auth.uid() = from_user_id
-  and from_user_id <> to_user_id
-);
-
-create policy call_signaling_delete_member
-on public.call_signaling
-for delete
-to authenticated
-using (
-  auth.uid() is not null
-  and public.can_access_call(call_id, auth.uid())
-  and (auth.uid() = from_user_id or auth.uid() = to_user_id)
-);
-
 -- ---------------------------------------------------------
 -- Explicit privileges for authenticated role
 -- ---------------------------------------------------------
@@ -880,8 +699,6 @@ grant select, insert, update, delete on public.message_reads to authenticated;
 grant select, insert, update, delete on public.user_presence to authenticated;
 grant select, insert, update, delete on public.conversations to authenticated;
 grant select, insert, update, delete on public.friend_requests to authenticated;
-grant select, insert, update, delete on public.call_sessions to authenticated;
-grant select, insert, update, delete on public.call_signaling to authenticated;
 grant select, insert, update, delete on public.attachments to authenticated;
 grant select, insert, update, delete on public.profiles to authenticated;
 grant select, insert, update, delete on public.user_blocks to authenticated;

@@ -44,7 +44,7 @@ export type GatewayPublishEventType =
   | "TYPING_STOP"
   | "SPOTIFY_UPDATE";
 
-export type GatewaySubscriptionTopicType = "conversation" | "user" | "friends" | "notifications" | "voice" | "room";
+export type GatewaySubscriptionTopicType = "conversation" | "user" | "friends" | "notifications" | "room";
 
 export interface GatewaySubscription {
   type: GatewaySubscriptionTopicType;

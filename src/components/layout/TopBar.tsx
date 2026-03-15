@@ -6,7 +6,6 @@ import "../../styles/components/TopBar.css";
 
 interface TopBarProps {
   section?: "friends" | "directMessages";
-  isCallActive?: boolean;
   onPrepareForUpdateInstall?: () => Promise<void> | void;
 }
 
@@ -80,7 +79,7 @@ function getUpdaterTooltip(state: AppUpdaterState | null, isActionPending: boole
   return "";
 }
 
-export default function TopBar({ section = "friends", isCallActive = false, onPrepareForUpdateInstall }: TopBarProps) {
+export default function TopBar({ section = "friends", onPrepareForUpdateInstall }: TopBarProps) {
   const isDesktopRuntime = typeof window !== "undefined" && Boolean(window.electronAPI);
   const [updaterState, setUpdaterState] = useState<AppUpdaterState | null>(null);
   const [isUpdaterActionPending, setIsUpdaterActionPending] = useState(false);
@@ -152,14 +151,8 @@ export default function TopBar({ section = "friends", isCallActive = false, onPr
       }
 
       if (updaterStatus === "downloaded" || updaterStatus === "ready") {
-        if (isCallActive) {
-          const confirmed = window.confirm(
-            "Você está em uma chamada. Ao atualizar, você será desconectado. Deseja continuar?",
-          );
-          if (!confirmed) {
-            return;
-          }
-          await onPrepareForUpdateInstall?.();
+        if (onPrepareForUpdateInstall) {
+          await onPrepareForUpdateInstall();
         }
 
         await api.updaterInstall?.();
@@ -176,7 +169,7 @@ export default function TopBar({ section = "friends", isCallActive = false, onPr
     } finally {
       setIsUpdaterActionPending(false);
     }
-  }, [isCallActive, isUpdaterActionPending, onPrepareForUpdateInstall, updaterState]);
+  }, [isUpdaterActionPending, onPrepareForUpdateInstall, updaterState]);
 
   const updaterStatus = normalizeUpdaterStatus(updaterState);
   const showUpdaterAction = isDesktopRuntime && (isUpdateActionVisible(updaterStatus) || Boolean(updaterActionError));

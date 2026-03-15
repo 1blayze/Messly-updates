@@ -1,15 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+﻿import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { getNameAvatarUrl, isDefaultAvatarUrl } from "../../services/cdn/mediaUrls";
 import { PRESENCE_LABELS, type PresenceState } from "../../services/presence/presenceTypes";
-import {
-  SIDEBAR_CALL_FOCUS_EVENT,
-  SIDEBAR_CALL_STATE_EVENT,
-  dispatchSidebarCallHangup,
-  dispatchSidebarCallToggleMic,
-  dispatchSidebarCallToggleSound,
-  type SidebarCallStateDetail,
-} from "../../services/calls/callUiPresence";
 import { useAuthSession } from "../../auth/AuthProvider";
 import { normalizeBannerColor } from "../../services/profile/bannerColor";
 import { createProfileTheme, type ProfileThemeInlineStyle } from "../../services/profile/profileTheme";
@@ -20,12 +12,10 @@ import {
   type SpotifyConnectionState,
 } from "../../services/connections/spotifyConnection";
 import { supabase } from "../../services/supabase";
-import MaterialSymbolIcon from "../ui/MaterialSymbolIcon";
 import UserCardMini from "../UserCardMini/UserCardMini";
 import UserProfilePopover from "../UserProfilePopover/UserProfilePopover";
 import styles from "./UserCard.module.css";
 
-const SIDEBAR_CALL_PERSIST_KEY = "messly:sidebar-call-state:v2";
 const PROFILE_PLUS_THEME_STORAGE_KEY_PREFIX = "messly:profile-plus-theme:";
 const PROFILE_PLUS_THEME_UPDATED_EVENT = "messly:profile-plus-theme-updated";
 
@@ -110,50 +100,6 @@ function formatMemberSinceDate(timestamp: string | null | undefined): string {
   }).format(date);
 }
 
-function formatTrackStateLabel(stateRaw: SidebarCallStateDetail["localAudioTrackState"]): string {
-  switch (stateRaw) {
-    case "live":
-      return "Ativa";
-    case "muted":
-      return "Mutada";
-    case "ended":
-      return "Encerrada";
-    default:
-      return "Ausente";
-  }
-}
-
-function formatAudioFlowLabel(
-  value: boolean | null,
-  trackState: SidebarCallStateDetail["localAudioTrackState"],
-): string {
-  if (value === true) {
-    return "Ativo";
-  }
-  if (value === false) {
-    if (trackState === "muted") {
-      return "Mutado";
-    }
-    if (trackState === "ended") {
-      return "Encerrado";
-    }
-    if (trackState === "missing") {
-      return "Sem stream";
-    }
-    return "Sem audio";
-  }
-  if (trackState === "muted") {
-    return "Mutado";
-  }
-  if (trackState === "ended") {
-    return "Encerrado";
-  }
-  if (trackState === "missing") {
-    return "Aguardando";
-  }
-  return "--";
-}
-
 export default function UserCard({
   userId = null,
   currentUserId = null,
@@ -166,7 +112,6 @@ export default function UserCard({
   presenceState,
   onChangePresence,
   onOpenSettings,
-  onOpenConversation,
 }: UserCardProps) {
   const { user: authUser } = useAuthSession();
   const currentAuthUid = authUser?.uid ?? "";
@@ -174,32 +119,12 @@ export default function UserCard({
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [isProfileOpen, setIsProfileOpen] = useState(false);
   const [isFullProfileOpen, setIsFullProfileOpen] = useState(false);
-  const [isVoiceDetailsOpen, setIsVoiceDetailsOpen] = useState(false);
   const [profileThemeState, setProfileThemeState] = useState<ProfilePlusThemeState>(() =>
     readProfilePlusThemeState(authUser?.uid ?? currentUserId),
   );
   const [spotifyConnection, setSpotifyConnection] = useState<SpotifyConnectionState>(() => readSpotifyConnection(userId));
-  const [sidebarCallState, setSidebarCallState] = useState<SidebarCallStateDetail>({
-    active: false,
-    conversationId: null,
-    partnerName: "",
-    mode: "audio",
-    phase: "idle",
-    averagePingMs: null,
-    lastPingMs: null,
-    packetLossPercent: null,
-    localAudioTrackState: "missing",
-    remoteAudioTrackState: "missing",
-    sendingAudio: null,
-    receivingAudio: null,
-    remoteAudioConsumers: 0,
-    micEnabled: true,
-    soundEnabled: true,
-    isPopoutOpen: false,
-    updatedAt: new Date().toISOString(),
-  });
   const fallbackMemberSinceLabel = useMemo(
-    () => formatMemberSinceDate(currentAuthCreationTime) || "Data não disponível",
+    () => formatMemberSinceDate(currentAuthCreationTime) || "Data nao disponivel",
     [currentAuthCreationTime, currentAuthUid],
   );
   const [memberSinceLabel, setMemberSinceLabel] = useState(fallbackMemberSinceLabel);
@@ -219,6 +144,7 @@ export default function UserCard({
     }
     return trimmed;
   }, [avatarSrc, fallbackAvatarSrc]);
+
   const profileTheme = useMemo(
     () =>
       createProfileTheme({
@@ -230,6 +156,7 @@ export default function UserCard({
   );
   const profileThemeInlineStyle = useMemo<ProfileThemeInlineStyle>(() => profileTheme.style, [profileTheme.style]);
   const presenceLabel = PRESENCE_LABELS[presenceState];
+
   const spotifyScope = useMemo(
     () =>
       String(currentUserId ?? "").trim() ||
@@ -250,41 +177,6 @@ export default function UserCard({
     const trackTitle = String(spotifyConnection.playback.trackTitle ?? "").trim();
     return artistNames || trackTitle;
   }, [hasActiveSpotifyPlayback, spotifyConnection.connected, spotifyConnection.playback, spotifyConnection.showAsStatus]);
-  const voiceStatusTitle = useMemo(() => {
-    if (!sidebarCallState.active) {
-      return "Aguardando chamada";
-    }
-    const modeLabel = sidebarCallState.mode === "video" ? "video" : "voz";
-    switch (sidebarCallState.phase) {
-      case "outgoing":
-        return "Chamando...";
-      case "incoming":
-        return "Chamada recebida";
-      case "connecting":
-        return "Conectando";
-      case "reconnecting":
-        return modeLabel === "video" ? "Chamada de video" : "Chamada de voz";
-      case "disconnected":
-        return modeLabel === "video" ? "Chamada de video" : "Chamada de voz";
-      case "active":
-        return modeLabel === "video" ? "Chamada de video" : "Chamada de voz";
-      default:
-        return "Aguardando chamada";
-    }
-  }, [sidebarCallState.active, sidebarCallState.mode, sidebarCallState.phase]);
-  const voiceStatusTarget = sidebarCallState.partnerName || "Aguardando";
-  const averagePingLabel = sidebarCallState.averagePingMs == null ? "-- ms" : `${Math.max(0, Math.round(sidebarCallState.averagePingMs))} ms`;
-  const lastPingLabel = sidebarCallState.lastPingMs == null ? "-- ms" : `${Math.max(0, Math.round(sidebarCallState.lastPingMs))} ms`;
-  const packetLossLabel = sidebarCallState.packetLossPercent == null ? "--%" : `${sidebarCallState.packetLossPercent.toFixed(1)}%`;
-  const sendingAudioLabel = formatAudioFlowLabel(sidebarCallState.sendingAudio, sidebarCallState.localAudioTrackState);
-  const receivingAudioLabel = formatAudioFlowLabel(sidebarCallState.receivingAudio, sidebarCallState.remoteAudioTrackState);
-  const localTrackLabel = formatTrackStateLabel(sidebarCallState.localAudioTrackState);
-  const remoteTrackLabel = formatTrackStateLabel(sidebarCallState.remoteAudioTrackState);
-  const remoteConsumersLabel = `${Math.max(0, Math.round(Number(sidebarCallState.remoteAudioConsumers) || 0))}`;
-  const shouldShowCallStrip =
-    sidebarCallState.active &&
-    sidebarCallState.phase !== "incoming" &&
-    sidebarCallState.phase !== "disconnected";
 
   useEffect(() => {
     setProfileThemeState(readProfilePlusThemeState(authUser?.uid ?? currentUserId));
@@ -294,88 +186,6 @@ export default function UserCard({
     setSpotifyConnection(readSpotifyConnection(spotifyScope));
     return subscribeSpotifyConnection(spotifyScope, setSpotifyConnection);
   }, [spotifyScope]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    try {
-      const raw = window.localStorage.getItem(SIDEBAR_CALL_PERSIST_KEY);
-      if (!raw) {
-        return;
-      }
-      const parsed = JSON.parse(raw) as {
-        detail?: SidebarCallStateDetail;
-      } | null;
-      const detail = parsed?.detail ?? null;
-      if (!detail) {
-        return;
-      }
-      const normalizedDetail: SidebarCallStateDetail = {
-        ...detail,
-        localAudioTrackState:
-          detail.localAudioTrackState === "live" ||
-          detail.localAudioTrackState === "muted" ||
-          detail.localAudioTrackState === "ended"
-            ? detail.localAudioTrackState
-            : "missing",
-        remoteAudioTrackState:
-          detail.remoteAudioTrackState === "live" ||
-          detail.remoteAudioTrackState === "muted" ||
-          detail.remoteAudioTrackState === "ended"
-            ? detail.remoteAudioTrackState
-            : "missing",
-        sendingAudio: typeof detail.sendingAudio === "boolean" ? detail.sendingAudio : null,
-        receivingAudio: typeof detail.receivingAudio === "boolean" ? detail.receivingAudio : null,
-        remoteAudioConsumers: Number.isFinite(Number(detail.remoteAudioConsumers))
-          ? Math.max(0, Math.round(Number(detail.remoteAudioConsumers)))
-          : 0,
-        micEnabled: detail.micEnabled ?? true,
-        soundEnabled: detail.soundEnabled ?? true,
-        isPopoutOpen: detail.isPopoutOpen ?? false,
-      };
-
-      const now = Date.now();
-      const detailUpdatedAt = Date.parse(String(normalizedDetail.updatedAt ?? ""));
-      const isStaleActiveState =
-        normalizedDetail.active &&
-        Number.isFinite(detailUpdatedAt) &&
-        now - detailUpdatedAt > 30_000;
-      if (isStaleActiveState) {
-        normalizedDetail.active = false;
-      }
-      if (!normalizedDetail.active) {
-        window.localStorage.removeItem(SIDEBAR_CALL_PERSIST_KEY);
-        return;
-      }
-
-      setSidebarCallState(normalizedDetail);
-    } catch {
-      // Ignore malformed persisted state.
-    }
-  }, []);
-
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    try {
-      if (!shouldShowCallStrip || !sidebarCallState.conversationId) {
-        window.localStorage.removeItem(SIDEBAR_CALL_PERSIST_KEY);
-        return;
-      }
-      window.localStorage.setItem(
-        SIDEBAR_CALL_PERSIST_KEY,
-        JSON.stringify({
-          detail: sidebarCallState,
-        }),
-      );
-    } catch {
-      // Ignore localStorage write errors.
-    }
-  }, [shouldShowCallStrip, sidebarCallState]);
 
   useEffect(() => {
     let cancelled = false;
@@ -436,7 +246,7 @@ export default function UserCard({
   };
 
   useEffect(() => {
-    if (!isProfileOpen && !isVoiceDetailsOpen) {
+    if (!isProfileOpen) {
       return;
     }
 
@@ -452,14 +262,12 @@ export default function UserCard({
 
       if (!rootRef.current?.contains(target)) {
         setIsProfileOpen(false);
-        setIsVoiceDetailsOpen(false);
       }
     };
 
     const handleKeyDown = (event: KeyboardEvent): void => {
       if (event.key === "Escape") {
         setIsProfileOpen(false);
-        setIsVoiceDetailsOpen(false);
       }
     };
 
@@ -472,7 +280,7 @@ export default function UserCard({
       document.removeEventListener("touchstart", handlePointerDown);
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [isProfileOpen, isVoiceDetailsOpen]);
+  }, [isProfileOpen]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -494,97 +302,6 @@ export default function UserCard({
       window.removeEventListener(PROFILE_PLUS_THEME_UPDATED_EVENT, handleProfileThemeUpdated as EventListener);
     };
   }, [authUser?.uid, currentUserId]);
-
-  useEffect(() => {
-    if (!shouldShowCallStrip) {
-      setIsVoiceDetailsOpen(false);
-    }
-  }, [shouldShowCallStrip]);
-
-  useEffect(() => {
-    const handleSidebarCallState = (event: Event): void => {
-      const detailRaw = (event as CustomEvent<SidebarCallStateDetail>).detail;
-      if (!detailRaw) {
-        return;
-      }
-      const detail: SidebarCallStateDetail = {
-        ...detailRaw,
-        localAudioTrackState:
-          detailRaw.localAudioTrackState === "live" ||
-          detailRaw.localAudioTrackState === "muted" ||
-          detailRaw.localAudioTrackState === "ended"
-            ? detailRaw.localAudioTrackState
-            : "missing",
-        remoteAudioTrackState:
-          detailRaw.remoteAudioTrackState === "live" ||
-          detailRaw.remoteAudioTrackState === "muted" ||
-          detailRaw.remoteAudioTrackState === "ended"
-            ? detailRaw.remoteAudioTrackState
-            : "missing",
-        sendingAudio: typeof detailRaw.sendingAudio === "boolean" ? detailRaw.sendingAudio : null,
-        receivingAudio: typeof detailRaw.receivingAudio === "boolean" ? detailRaw.receivingAudio : null,
-        remoteAudioConsumers: Number.isFinite(Number(detailRaw.remoteAudioConsumers))
-          ? Math.max(0, Math.round(Number(detailRaw.remoteAudioConsumers)))
-          : 0,
-        micEnabled: detailRaw.micEnabled ?? true,
-        soundEnabled: detailRaw.soundEnabled ?? true,
-        isPopoutOpen: detailRaw.isPopoutOpen ?? false,
-      };
-      setSidebarCallState(detail);
-      if (detail.active) {
-        return;
-      } else {
-        setIsVoiceDetailsOpen(false);
-      }
-    };
-
-    window.addEventListener(SIDEBAR_CALL_STATE_EVENT, handleSidebarCallState as EventListener);
-    return () => {
-      window.removeEventListener(SIDEBAR_CALL_STATE_EVENT, handleSidebarCallState as EventListener);
-    };
-  }, []);
-
-  useEffect(() => {
-    const handleSidebarCallFocus = (): void => {
-      const conversationId = String(sidebarCallState.conversationId ?? "").trim();
-      if (!conversationId || !onOpenConversation) {
-        return;
-      }
-      onOpenConversation(conversationId);
-    };
-
-    window.addEventListener(SIDEBAR_CALL_FOCUS_EVENT, handleSidebarCallFocus as EventListener);
-    return () => {
-      window.removeEventListener(SIDEBAR_CALL_FOCUS_EVENT, handleSidebarCallFocus as EventListener);
-    };
-  }, [onOpenConversation, sidebarCallState.conversationId]);
-
-  const handleMiniToggleMic = (): void => {
-    setSidebarCallState((current) => ({
-      ...current,
-      micEnabled: !current.micEnabled,
-      updatedAt: new Date().toISOString(),
-    }));
-    dispatchSidebarCallToggleMic();
-  };
-
-  const handleMiniToggleSound = (): void => {
-    const nextSoundEnabled = !sidebarCallState.soundEnabled;
-    const nextMicEnabled = nextSoundEnabled;
-    const shouldToggleMic = sidebarCallState.micEnabled !== nextMicEnabled;
-
-    setSidebarCallState((current) => ({
-      ...current,
-      soundEnabled: nextSoundEnabled,
-      micEnabled: nextMicEnabled,
-      updatedAt: new Date().toISOString(),
-    }));
-
-    if (shouldToggleMic) {
-      dispatchSidebarCallToggleMic();
-    }
-    dispatchSidebarCallToggleSound();
-  };
 
   useEffect(() => {
     if (!isFullProfileOpen) {
@@ -636,110 +353,7 @@ export default function UserCard({
         presenceLabel={presenceLabel}
         presenceState={presenceState}
         spotifyStatusText={miniSpotifyStatusText}
-        isMicEnabled={sidebarCallState.micEnabled}
-        isSoundEnabled={sidebarCallState.soundEnabled}
-        onToggleMic={handleMiniToggleMic}
-        onToggleSound={handleMiniToggleSound}
         onOpenSettings={handleOpenSettings}
-        callContent={shouldShowCallStrip ? (
-            <section className={styles.voiceStrip} aria-label="Status da chamada de voz">
-              {sidebarCallState.phase !== "disconnected" ? (
-                <div
-                  className={styles.voiceDetailsPopover}
-                  role="dialog"
-                  aria-label="Diagnóstico da chamada"
-                  aria-hidden={!isVoiceDetailsOpen}
-                  hidden={!isVoiceDetailsOpen}
-                >
-                  <div className={styles.voiceDetailsHeader}>
-                    <MaterialSymbolIcon name="network_check" size={18} />
-                    <p className={styles.voiceDetailsTitle}>Qualidade da chamada</p>
-                  </div>
-                  <p className={styles.voiceDetailsSubTitle}>Diagnóstico em tempo real da conexão de voz.</p>
-                  <div className={styles.voiceDetailsMetrics}>
-                    <p className={styles.voiceDetailsMetricRow}>
-                      <span className={styles.voiceDetailsMetricLabel}>Ping médio</span>
-                      <span className={styles.voiceDetailsMetricValue}>{averagePingLabel}</span>
-                    </p>
-                    <p className={styles.voiceDetailsMetricRow}>
-                      <span className={styles.voiceDetailsMetricLabel}>Último ping</span>
-                      <span className={styles.voiceDetailsMetricValue}>{lastPingLabel}</span>
-                    </p>
-                    <p className={styles.voiceDetailsMetricRow}>
-                      <span className={styles.voiceDetailsMetricLabel}>Perda de pacotes</span>
-                      <span className={styles.voiceDetailsMetricValue}>{packetLossLabel}</span>
-                    </p>
-                    <p className={styles.voiceDetailsMetricRow}>
-                      <span className={styles.voiceDetailsMetricLabel}>Enviando audio</span>
-                      <span className={styles.voiceDetailsMetricValue}>{sendingAudioLabel}</span>
-                    </p>
-                    <p className={styles.voiceDetailsMetricRow}>
-                      <span className={styles.voiceDetailsMetricLabel}>Recebendo audio</span>
-                      <span className={styles.voiceDetailsMetricValue}>{receivingAudioLabel}</span>
-                    </p>
-                    <p className={styles.voiceDetailsMetricRow}>
-                      <span className={styles.voiceDetailsMetricLabel}>Track local</span>
-                      <span className={styles.voiceDetailsMetricValue}>{localTrackLabel}</span>
-                    </p>
-                    <p className={styles.voiceDetailsMetricRow}>
-                      <span className={styles.voiceDetailsMetricLabel}>Track remota</span>
-                      <span className={styles.voiceDetailsMetricValue}>{remoteTrackLabel}</span>
-                    </p>
-                    <p className={styles.voiceDetailsMetricRow}>
-                      <span className={styles.voiceDetailsMetricLabel}>Streams remotos</span>
-                      <span className={styles.voiceDetailsMetricValue}>{remoteConsumersLabel}</span>
-                    </p>
-                  </div>
-                  <p className={styles.voiceDetailsHint}>
-                    Valores altos de ping ou perda de pacotes podem causar atrasos, cortes e reconexões.
-                  </p>
-                  <div className={styles.voiceDetailsFooter}>
-                    <span className={styles.voiceDetailsFooterLock}>
-                      <MaterialSymbolIcon name="lock" size={14} />
-                      Chamada criptografada em trânsito
-                    </span>
-                  </div>
-                </div>
-              ) : null}
-              <div className={styles.voiceStripHeader}>
-                {sidebarCallState.phase !== "disconnected" ? (
-                  <div className={styles.voiceNetworkWrap}>
-                    <button
-                    type="button"
-                    className={styles.voiceNetworkButton}
-                    aria-label={`Qualidade da conexão: ${averagePingLabel}`}
-                    data-ping={averagePingLabel}
-                    aria-expanded={isVoiceDetailsOpen}
-                    onClick={() => {
-                      setIsVoiceDetailsOpen((current) => !current);
-                    }}
-                  >
-                    <MaterialSymbolIcon name="wifi" size={18} />
-                    </button>
-                  </div>
-                ) : null}
-                <div className={styles.voiceHeaderMeta}>
-                  <p className={styles.voiceHeaderTitle}>{voiceStatusTitle}</p>
-                  <p className={styles.voiceHeaderSubtitle}>{voiceStatusTarget}</p>
-                </div>
-                <div className={styles.voiceHeaderIcons}>
-                  {sidebarCallState.phase !== "disconnected" ? (
-                    <button
-                      type="button"
-                      className={styles.voiceHangupButton}
-                      aria-label="Desconectar da chamada"
-                      title="Desconectar"
-                      onClick={() => {
-                        dispatchSidebarCallHangup();
-                      }}
-                    >
-                      <MaterialSymbolIcon name="call_end" size={22} />
-                    </button>
-                  ) : null}
-                </div>
-              </div>
-          </section>
-        ) : null}
         isProfileOpen={isProfileOpen}
         onToggleProfile={() => setIsProfileOpen((current) => !current)}
       />
@@ -776,4 +390,3 @@ export default function UserCard({
     </div>
   );
 }
-

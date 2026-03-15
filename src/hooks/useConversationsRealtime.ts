@@ -95,8 +95,7 @@ function normalizeMessageType(rawValue: unknown): ChatMessageType | null {
     normalized === "text" ||
     normalized === "image" ||
     normalized === "video" ||
-    normalized === "file" ||
-    normalized === "call_event"
+    normalized === "file"
   ) {
     return normalized;
   }

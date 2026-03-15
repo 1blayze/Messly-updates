@@ -2,7 +2,7 @@
 
 const DEV_ALLOWED_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"] as const;
 const ALLOWED_HEADERS =
-  "authorization, apikey, content-type, x-client-info, x-firebase-authorization, x-media-key, x-requested-with, x-call-timeout-secret, x-presign-expires";
+  "authorization, apikey, content-type, x-client-info, x-firebase-authorization, x-media-key, x-requested-with, x-presign-expires";
 const ALLOWED_METHODS = "GET, POST, OPTIONS";
 const CORS_MAX_AGE_SECONDS = "86400";
 

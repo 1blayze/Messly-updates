@@ -120,8 +120,7 @@ export default defineConfig(({ mode }) => {
 
             if (
               normalized.includes("/src/components/chat/DirectMessageChatView.tsx") ||
-              normalized.includes("/src/components/chat/EmojiPopover.tsx") ||
-              normalized.includes("/src/components/chat/VideoCallPanel.tsx")
+              normalized.includes("/src/components/chat/EmojiPopover.tsx")
             ) {
               return "chat-view";
             }

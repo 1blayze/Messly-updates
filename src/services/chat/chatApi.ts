@@ -9,8 +9,8 @@ import { markRuntimePerf, measureRuntimePerf } from "../observability/runtimePer
 import { supabase } from "../supabase";
 import { getRuntimeAppApiUrl, getRuntimeAuthApiUrl, getRuntimeGatewayUrl } from "../../config/runtimeApiConfig";
 
-export type ChatMessageType = "text" | "image" | "video" | "file" | "call_event";
-export type SendableChatMessageType = Exclude<ChatMessageType, "call_event">;
+export type ChatMessageType = "text" | "image" | "video" | "file";
+export type SendableChatMessageType = ChatMessageType;
 
 export interface ReplySnapshot {
   author_id?: string | null;
@@ -51,7 +51,6 @@ export interface ChatMessageServer {
   deleted_at: string | null;
   reply_to_id: string | null;
   reply_to_snapshot: ReplySnapshot | null;
-  call_id: string | null;
   payload: Record<string, unknown> | null;
   attachment: ChatAttachmentMetadata | null;
 }
@@ -124,7 +123,6 @@ interface DirectMessageRow {
   deleted_at: string | null;
   reply_to_id: string | null;
   reply_to_snapshot: ReplySnapshot | null;
-  call_id: string | null;
   payload: Record<string, unknown> | null;
 }
 
@@ -145,7 +143,7 @@ interface DirectAttachmentRow {
 
 const FUNCTION_NAME = "chat-messages";
 const DIRECT_MESSAGE_SELECT_COLUMNS =
-  "id,conversation_id,sender_id,client_id,content,type,created_at,edited_at,deleted_at,reply_to_id,reply_to_snapshot,call_id,payload";
+  "id,conversation_id,sender_id,client_id,content,type,created_at,edited_at,deleted_at,reply_to_id,reply_to_snapshot,payload";
 const DIRECT_ATTACHMENT_SELECT_COLUMNS =
   "message_id,file_key,original_key,thumb_key,mime_type,file_size,width,height,thumb_width,thumb_height,codec,duration_ms";
 const INITIAL_MESSAGES_CACHE_KEY = "messly:chat-initial-messages:v1";
@@ -472,7 +470,6 @@ function mapDirectMessageRow(
     deleted_at: row.deleted_at ?? null,
     reply_to_id: row.reply_to_id ?? null,
     reply_to_snapshot: row.reply_to_snapshot ?? null,
-    call_id: row.call_id ?? null,
     payload: row.payload ?? null,
     attachment: attachment
       ? {
@@ -528,7 +525,6 @@ function cloneChatMessage(message: ChatMessageServer): ChatMessageServer {
     deleted_at: message.deleted_at ?? null,
     reply_to_id: message.reply_to_id ?? null,
     reply_to_snapshot: replySnapshot ? { ...(replySnapshot as ReplySnapshot) } : null,
-    call_id: message.call_id ?? null,
     payload: messagePayload ? { ...messagePayload } : null,
     attachment: cloneChatAttachment(message.attachment),
   };
@@ -557,7 +553,6 @@ function normalizeChatMessageType(value: unknown): ChatMessageType {
     case "image":
     case "video":
     case "file":
-    case "call_event":
       return normalized;
     case "text":
     default:
@@ -687,7 +682,6 @@ function deserializeCachedChatMessage(value: unknown): ChatMessageServer | null 
     deleted_at: toNullableTrimmedString(message.deleted_at),
     reply_to_id: toNullableTrimmedString(message.reply_to_id),
     reply_to_snapshot: normalizeReplySnapshot(message.reply_to_snapshot),
-    call_id: toNullableTrimmedString(message.call_id),
     payload: toOptionalObject(message.payload),
     attachment: normalizeChatAttachment(message.attachment),
   };

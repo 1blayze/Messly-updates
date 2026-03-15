@@ -46,9 +46,6 @@ function resolveFallbackPreview(notification: NotificationEntity): string {
     }
     return "📎 Enviou um arquivo";
   }
-  if (normalizedMessageType === "call_event") {
-    return "📞 Atualização de chamada";
-  }
   if (normalizedMime.startsWith("image/")) {
     return "🖼️ Enviou uma imagem";
   }
@@ -60,17 +57,17 @@ function resolveFallbackPreview(notification: NotificationEntity): string {
 
 function normalizeConversationType(
   conversationTypeRaw: unknown,
-): "dm" | "group" | "channel" | "guild" | "voice" | "unknown" {
+): "dm" | "group" | "channel" | "guild" | "unknown" {
   const value = String(conversationTypeRaw ?? "").trim().toLowerCase();
-  if (value === "dm" || value === "group" || value === "channel" || value === "guild" || value === "voice") {
+  if (value === "dm" || value === "group" || value === "channel" || value === "guild") {
     return value;
   }
   return "unknown";
 }
 
-function normalizeMessageType(messageTypeRaw: unknown): "text" | "image" | "video" | "file" | "call_event" {
+function normalizeMessageType(messageTypeRaw: unknown): "text" | "image" | "video" | "file" {
   const value = String(messageTypeRaw ?? "").trim().toLowerCase();
-  if (value === "image" || value === "video" || value === "file" || value === "call_event") {
+  if (value === "image" || value === "video" || value === "file") {
     return value;
   }
   return "text";

@@ -53,9 +53,6 @@ function resolveAttachmentFallback(payload) {
     }
     return "📎 Enviou um arquivo";
   }
-  if (messageType === "call_event") {
-    return "📞 Atualização de chamada";
-  }
   if (mimeType.startsWith("image/")) {
     return "🖼️ Enviou uma imagem";
   }

@@ -20,7 +20,7 @@ export function PublicLandingPage() {
       <section className="landing-v2-hero">
         <h1 className="landing-v2-hero__title">Converse com qualquer pessoa</h1>
         <p className="landing-v2-hero__text">
-          Messly e uma plataforma moderna de mensagens e chamadas de voz para conversar com amigos, equipes e
+          Messly e uma plataforma moderna de mensagens para conversar com amigos, equipes e
           comunidades em tempo real.
         </p>
 
@@ -57,7 +57,7 @@ export function PublicTermsPage() {
         <article className="public-policy-block">
           <h2>2. Uso da plataforma</h2>
           <p>
-            O Messly oferece comunicacao em tempo real com mensagens, comunidades, chamadas e compartilhamento de
+            O Messly oferece comunicacao em tempo real com mensagens, comunidades e compartilhamento de
             arquivos. O uso deve respeitar a legislacao brasileira e as regras da plataforma.
           </p>
         </article>
@@ -118,7 +118,7 @@ export function PublicPrivacyPage() {
           <h2>2. Como os dados sao usados</h2>
           <ul>
             <li>Autenticacao e seguranca da conta.</li>
-            <li>Funcionamento de chat, chamadas e envio de arquivos.</li>
+            <li>Funcionamento de chat e envio de arquivos.</li>
             <li>Prevencao de fraude, spam e abuso.</li>
             <li>Melhoria de estabilidade e desempenho da plataforma.</li>
           </ul>

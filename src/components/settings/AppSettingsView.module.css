@@ -1294,36 +1294,6 @@
   background: var(--button-secondary-bg-hover);
 }
 
-.voiceLayout {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 10px;
-}
-
-.voiceColumn {
-  display: grid;
-  gap: 10px;
-  align-content: start;
-}
-
-.voiceBlock {
-  display: grid;
-  gap: 10px;
-  padding: 10px;
-  border-radius: 12px;
-  border: 1px solid rgba(178, 184, 194, 0.24);
-  background: #2a2d33;
-}
-
-.voiceBlockTitle {
-  margin: 0;
-  color: rgba(216, 223, 233, 0.84);
-  font-size: 10px;
-  line-height: 1.2;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  font-weight: 600;
-}
 
 .processingCoreRows {
   display: grid;
@@ -5964,10 +5934,6 @@
     min-height: 0;
   }
 
-  .voiceLayout {
-    grid-template-columns: 1fr;
-  }
-
   .audioSliderRow {
     grid-template-columns: 1fr;
   }
@@ -6071,7 +6037,6 @@
     justify-self: start;
   }
 
-  .voiceLayout,
   .audioGrid,
   .audioSliderRow {
     grid-template-columns: 1fr;

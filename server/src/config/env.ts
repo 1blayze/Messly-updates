@@ -8,16 +8,6 @@ const DEFAULT_GATEWAY_METRICS_PATH = "/metrics";
 const DEFAULT_DISPATCH_CHANNEL = "messly:gateway:dispatch";
 const DEFAULT_CONTROL_CHANNEL = "messly:gateway:control";
 const DEFAULT_BRIDGE_LEASE_KEY = "messly:gateway:bridge:leader";
-const DEFAULT_SFU_LISTEN_IP = "0.0.0.0";
-const DEFAULT_SFU_RTC_MIN_PORT = "40000";
-const DEFAULT_SFU_RTC_MAX_PORT = "49999";
-const DEFAULT_SFU_ENABLE_UDP = "true";
-const DEFAULT_SFU_ENABLE_TCP = "true";
-const DEFAULT_SFU_PREFER_UDP = "true";
-const DEFAULT_SFU_INITIAL_OUTGOING_BITRATE = "1200000";
-const DEFAULT_SFU_MAX_INCOMING_BITRATE = "6000000";
-const DEFAULT_VOICE_PARTICIPANT_RESUME_TTL_MS = "300000";
-const DEFAULT_VOICE_EMPTY_CALL_TTL_MS = "900000";
 const DEFAULT_NODE_ENV = "development";
 const DEFAULT_GATEWAY_PORT = "8788";
 const DEFAULT_GATEWAY_REDIS_URL = "redis://127.0.0.1:6379";
@@ -127,32 +117,6 @@ function toHttpBaseUrl(publicGatewayUrl: string): string {
   return parsed.toString().replace(/\/+$/, "");
 }
 
-function resolveSfuAnnouncedIp(
-  listenIpRaw: string,
-  announcedIpRaw: string | null,
-  publicGatewayUrl: string,
-): string | null {
-  const explicitAnnouncedIp = toNonEmptyString(announcedIpRaw);
-  if (explicitAnnouncedIp) {
-    return explicitAnnouncedIp;
-  }
-
-  const listenIp = String(listenIpRaw ?? "").trim();
-  if (listenIp && !isWildcardListenIp(listenIp) && !isLocalHostname(listenIp)) {
-    return null;
-  }
-
-  try {
-    const publicGatewayHost = String(new URL(publicGatewayUrl).hostname ?? "").trim();
-    if (!publicGatewayHost || isLocalHostname(publicGatewayHost)) {
-      return null;
-    }
-    return publicGatewayHost;
-  } catch {
-    return null;
-  }
-}
-
 const envSchema = z
   .object({
     NODE_ENV: z.enum(NODE_ENV_VALUES),
@@ -181,17 +145,6 @@ const envSchema = z
     MESSLY_INSTANCE_HEARTBEAT_INTERVAL_MS: z.string().trim().default("5000"),
     MESSLY_INSTANCE_HEARTBEAT_TTL_MS: z.string().trim().default("20000"),
     MESSLY_GATEWAY_REGION: z.string().trim().default("global"),
-    MESSLY_SFU_LISTEN_IP: z.string().trim().default(DEFAULT_SFU_LISTEN_IP),
-    MESSLY_SFU_ANNOUNCED_IP: z.string().trim().default(""),
-    MESSLY_SFU_RTC_MIN_PORT: z.string().trim().default(DEFAULT_SFU_RTC_MIN_PORT),
-    MESSLY_SFU_RTC_MAX_PORT: z.string().trim().default(DEFAULT_SFU_RTC_MAX_PORT),
-    MESSLY_SFU_ENABLE_UDP: z.string().trim().default(DEFAULT_SFU_ENABLE_UDP),
-    MESSLY_SFU_ENABLE_TCP: z.string().trim().default(DEFAULT_SFU_ENABLE_TCP),
-    MESSLY_SFU_PREFER_UDP: z.string().trim().default(DEFAULT_SFU_PREFER_UDP),
-    MESSLY_SFU_INITIAL_OUTGOING_BITRATE: z.string().trim().default(DEFAULT_SFU_INITIAL_OUTGOING_BITRATE),
-    MESSLY_SFU_MAX_INCOMING_BITRATE: z.string().trim().default(DEFAULT_SFU_MAX_INCOMING_BITRATE),
-    MESSLY_VOICE_PARTICIPANT_RESUME_TTL_MS: z.string().trim().default(DEFAULT_VOICE_PARTICIPANT_RESUME_TTL_MS),
-    MESSLY_VOICE_EMPTY_CALL_TTL_MS: z.string().trim().default(DEFAULT_VOICE_EMPTY_CALL_TTL_MS),
     SUPABASE_URL: z.string().trim().min(1),
     SUPABASE_PUBLISHABLE_KEY: z.string().trim().min(1),
     SUPABASE_SERVICE_ROLE_KEY: z.string().trim().min(1),
@@ -253,17 +206,6 @@ export interface GatewayEnv {
   instanceHeartbeatIntervalMs: number;
   instanceHeartbeatTtlMs: number;
   region: string;
-  sfuListenIp: string;
-  sfuAnnouncedIp: string | null;
-  sfuRtcMinPort: number;
-  sfuRtcMaxPort: number;
-  sfuEnableUdp: boolean;
-  sfuEnableTcp: boolean;
-  sfuPreferUdp: boolean;
-  sfuInitialOutgoingBitrate: number;
-  sfuMaxIncomingBitrate: number;
-  voiceParticipantResumeTtlMs: number;
-  voiceEmptyCallTtlMs: number;
   supabaseUrl: string;
   supabaseAnonKey: string;
   supabaseServiceRoleKey: string;
@@ -306,15 +248,8 @@ function parseInteger(value: string, field: string, minimum: number): number {
 function toGatewayEnv(raw: z.infer<typeof envSchema>): GatewayEnv {
   const nodeEnv = raw.NODE_ENV;
   const publicUrl = normalizeGatewayUrl(raw.MESSLY_GATEWAY_PUBLIC_URL, nodeEnv);
-  const sfuAnnouncedIp = resolveSfuAnnouncedIp(
-    raw.MESSLY_SFU_LISTEN_IP,
-    toNonEmptyString(raw.MESSLY_SFU_ANNOUNCED_IP),
-    publicUrl,
-  );
   const heartbeatIntervalMs = parseInteger(raw.MESSLY_HEARTBEAT_INTERVAL_MS, "MESSLY_HEARTBEAT_INTERVAL_MS", 5_000);
   const clientTimeoutMs = parseInteger(raw.MESSLY_CLIENT_TIMEOUT_MS, "MESSLY_CLIENT_TIMEOUT_MS", heartbeatIntervalMs * 2);
-  const sfuRtcMinPort = parseInteger(raw.MESSLY_SFU_RTC_MIN_PORT, "MESSLY_SFU_RTC_MIN_PORT", 10_000);
-  const sfuRtcMaxPort = parseInteger(raw.MESSLY_SFU_RTC_MAX_PORT, "MESSLY_SFU_RTC_MAX_PORT", sfuRtcMinPort);
 
   return {
     nodeEnv,
@@ -363,33 +298,6 @@ function toGatewayEnv(raw: z.infer<typeof envSchema>): GatewayEnv {
       2_000,
     ),
     region: raw.MESSLY_GATEWAY_REGION,
-    sfuListenIp: raw.MESSLY_SFU_LISTEN_IP,
-    sfuAnnouncedIp,
-    sfuRtcMinPort,
-    sfuRtcMaxPort,
-    sfuEnableUdp: parseBoolean(raw.MESSLY_SFU_ENABLE_UDP),
-    sfuEnableTcp: parseBoolean(raw.MESSLY_SFU_ENABLE_TCP),
-    sfuPreferUdp: parseBoolean(raw.MESSLY_SFU_PREFER_UDP),
-    sfuInitialOutgoingBitrate: parseInteger(
-      raw.MESSLY_SFU_INITIAL_OUTGOING_BITRATE,
-      "MESSLY_SFU_INITIAL_OUTGOING_BITRATE",
-      100_000,
-    ),
-    sfuMaxIncomingBitrate: parseInteger(
-      raw.MESSLY_SFU_MAX_INCOMING_BITRATE,
-      "MESSLY_SFU_MAX_INCOMING_BITRATE",
-      100_000,
-    ),
-    voiceParticipantResumeTtlMs: parseInteger(
-      raw.MESSLY_VOICE_PARTICIPANT_RESUME_TTL_MS,
-      "MESSLY_VOICE_PARTICIPANT_RESUME_TTL_MS",
-      10_000,
-    ),
-    voiceEmptyCallTtlMs: parseInteger(
-      raw.MESSLY_VOICE_EMPTY_CALL_TTL_MS,
-      "MESSLY_VOICE_EMPTY_CALL_TTL_MS",
-      60_000,
-    ),
     supabaseUrl: normalizeHttpUrl(raw.SUPABASE_URL, "SUPABASE_URL"),
     supabaseAnonKey: raw.SUPABASE_PUBLISHABLE_KEY,
     supabaseServiceRoleKey: raw.SUPABASE_SERVICE_ROLE_KEY,
@@ -486,29 +394,6 @@ export function readGatewayEnv(envSource: NodeJS.ProcessEnv = process.env): Gate
     MESSLY_RATE_LIMIT_ENABLED: withFallback(
       envSource.MESSLY_RATE_LIMIT_ENABLED,
       DEFAULT_GATEWAY_RATE_LIMIT_ENABLED,
-    ),
-    MESSLY_SFU_LISTEN_IP: withFallback(envSource.MESSLY_SFU_LISTEN_IP, DEFAULT_SFU_LISTEN_IP),
-    MESSLY_SFU_ANNOUNCED_IP: withFallback(envSource.MESSLY_SFU_ANNOUNCED_IP, ""),
-    MESSLY_SFU_RTC_MIN_PORT: withFallback(envSource.MESSLY_SFU_RTC_MIN_PORT, DEFAULT_SFU_RTC_MIN_PORT),
-    MESSLY_SFU_RTC_MAX_PORT: withFallback(envSource.MESSLY_SFU_RTC_MAX_PORT, DEFAULT_SFU_RTC_MAX_PORT),
-    MESSLY_SFU_ENABLE_UDP: withFallback(envSource.MESSLY_SFU_ENABLE_UDP, DEFAULT_SFU_ENABLE_UDP),
-    MESSLY_SFU_ENABLE_TCP: withFallback(envSource.MESSLY_SFU_ENABLE_TCP, DEFAULT_SFU_ENABLE_TCP),
-    MESSLY_SFU_PREFER_UDP: withFallback(envSource.MESSLY_SFU_PREFER_UDP, DEFAULT_SFU_PREFER_UDP),
-    MESSLY_SFU_INITIAL_OUTGOING_BITRATE: withFallback(
-      envSource.MESSLY_SFU_INITIAL_OUTGOING_BITRATE,
-      DEFAULT_SFU_INITIAL_OUTGOING_BITRATE,
-    ),
-    MESSLY_SFU_MAX_INCOMING_BITRATE: withFallback(
-      envSource.MESSLY_SFU_MAX_INCOMING_BITRATE,
-      DEFAULT_SFU_MAX_INCOMING_BITRATE,
-    ),
-    MESSLY_VOICE_PARTICIPANT_RESUME_TTL_MS: withFallback(
-      envSource.MESSLY_VOICE_PARTICIPANT_RESUME_TTL_MS,
-      DEFAULT_VOICE_PARTICIPANT_RESUME_TTL_MS,
-    ),
-    MESSLY_VOICE_EMPTY_CALL_TTL_MS: withFallback(
-      envSource.MESSLY_VOICE_EMPTY_CALL_TTL_MS,
-      DEFAULT_VOICE_EMPTY_CALL_TTL_MS,
     ),
     SUPABASE_URL: withFallback(
       firstNonEmpty(envSource.SUPABASE_URL, envSource.VITE_SUPABASE_URL),

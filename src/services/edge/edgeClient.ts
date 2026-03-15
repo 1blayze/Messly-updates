@@ -125,8 +125,8 @@ function toEdgeFunctionError(response: Response, payload: unknown): EdgeFunction
   const flatError = typeof parsed.error === "string" ? parsed.error : null;
   const code = String(nestedError?.code ?? flatError ?? parsed.code ?? `HTTP_${status}`);
   const message =
-    String(nestedError?.message ?? parsed.message ?? "Falha na chamada da Edge Function.").trim() ||
-    "Falha na chamada da Edge Function.";
+    String(nestedError?.message ?? parsed.message ?? "Falha na requisicao da Edge Function.").trim() ||
+    "Falha na requisicao da Edge Function.";
   const details = nestedError?.details ?? parsed.details;
   const requestId = nestedError?.requestId ?? parsed.requestId;
 

@@ -18,8 +18,6 @@ const addIconUrl = new URL("../../assets/icons/ui/add.svg", import.meta.url).hre
 const arrowForwardIconUrl = new URL("../../assets/icons/ui/arrow-forward.svg", import.meta.url).href;
 const blockIconUrl = new URL("../../assets/icons/ui/block.svg", import.meta.url).href;
 const browserIconUrl = new URL("../../assets/icons/ui/browser.svg", import.meta.url).href;
-const callIconUrl = new URL("../../assets/icons/ui/Call.svg", import.meta.url).href;
-const callEndIconUrl = new URL("../../assets/icons/ui/Call Silent.svg", import.meta.url).href;
 const cameraIconUrl = new URL("../../assets/icons/ui/Video.svg", import.meta.url).href;
 const chatIconUrl = new URL("../../assets/icons/ui/Chat.svg", import.meta.url).href;
 const checkIconUrl = new URL("../../assets/icons/ui/check.svg", import.meta.url).href;
@@ -76,8 +74,6 @@ const ICON_URLS: Record<string, string> = {
   badge: profileAcceptedIconUrl,
   block: blockIconUrl,
   browser: browserIconUrl,
-  call: callIconUrl,
-  call_end: callEndIconUrl,
   chat: chatIconUrl,
   check: checkIconUrl,
   check_circle: checkCircleIconUrl,

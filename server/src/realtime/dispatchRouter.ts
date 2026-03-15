@@ -18,8 +18,7 @@ function parseRoutingKey(routingKey: string): GatewaySubscription | null {
     type !== "conversation" &&
     type !== "user" &&
     type !== "friends" &&
-    type !== "notifications" &&
-    type !== "voice"
+    type !== "notifications"
   ) {
     return null;
   }

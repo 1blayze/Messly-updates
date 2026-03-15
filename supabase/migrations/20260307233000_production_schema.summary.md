@@ -9,8 +9,6 @@
 - `friend_requests` (PK: `id`; parties: `sender_id`, `receiver_id`; FKs to `profiles.id`)
 - `user_blocks` (PK: `blocker_id, blocked_id`; FKs to `profiles.id`)
 - `user_presence` (renamed from `presence`; PK: `user_id`; FK: `user_id -> profiles.id`)
-- `call_sessions` (PK: `id`; FK: `conversation_id -> conversations.id`, `created_by -> profiles.id`)
-- `call_signaling` (renamed from `call_signals`; PK: `id`; FK: `call_id -> call_sessions.id`)
 - `user_sessions` (PK: `id`; FK: `user_id -> profiles.id`)
 
 ## Constraints
@@ -32,8 +30,6 @@
 ## RLS + Policies
 RLS is enabled and forced for:
 - `attachments`
-- `call_sessions`
-- `call_signaling`
 - `conversations`
 - `friend_requests`
 - `message_reads`
@@ -54,4 +50,3 @@ Key message policies:
 - `messages`
 - `message_reads`
 - `user_presence`
-

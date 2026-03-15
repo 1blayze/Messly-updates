@@ -234,13 +234,12 @@ create table if not exists public.messages (
   sender_id uuid not null references public.profiles(id) on delete cascade,
   client_id text null,
   content text not null default '',
-  type text not null default 'text' check (type in ('text', 'image', 'video', 'file', 'call_event')),
+  type text not null default 'text' check (type in ('text', 'image', 'video', 'file')),
   created_at timestamptz not null default now(),
   edited_at timestamptz null,
   deleted_at timestamptz null,
   reply_to_id uuid null references public.messages(id) on delete set null,
   reply_to_snapshot jsonb null,
-  call_id uuid null,
   payload jsonb null,
   constraint messages_content_length_chk check (char_length(content) <= 4000),
   constraint messages_client_id_not_blank_chk check (client_id is null or btrim(client_id) <> ''),
@@ -253,9 +252,6 @@ create table if not exists public.messages (
 
 create index if not exists messages_conversation_id_idx
   on public.messages(conversation_id);
-
-create index if not exists messages_call_id_idx
-  on public.messages(call_id);
 
 create unique index if not exists messages_client_sender_uidx
   on public.messages(sender_id, client_id)
@@ -306,60 +302,6 @@ create table if not exists public.message_reads (
 -- sem índice em user_id por padrão
 
 -- ---------------------------------------------------------
--- Calls
--- ---------------------------------------------------------
-create table if not exists public.call_sessions (
-  id uuid primary key default gen_random_uuid(),
-  conversation_id uuid not null references public.conversations(id) on delete cascade,
-  created_by uuid not null references public.profiles(id) on delete restrict,
-  mode text not null check (mode in ('audio', 'video')),
-  status text not null default 'ringing' check (status in ('ringing', 'active', 'ended', 'missed', 'declined')),
-  created_at timestamptz not null default now(),
-  started_at timestamptz null,
-  ended_at timestamptz null,
-  last_activity_at timestamptz not null default now(),
-  ended_reason text null check (ended_reason in ('no_answer', 'hangup', 'timeout', 'declined', 'error')),
-  participants jsonb not null default '{}'::jsonb,
-  constraint call_sessions_participants_object_chk check (jsonb_typeof(participants) = 'object'),
-  constraint call_sessions_terminal_fields_chk check (
-    (status in ('ended', 'missed', 'declined') and ended_at is not null and ended_reason is not null)
-    or (status in ('ringing', 'active') and ended_reason is null)
-  )
-);
-
-create index if not exists call_sessions_conversation_id_idx
-  on public.call_sessions(conversation_id);
-
-create table if not exists public.call_signals (
-  id uuid primary key default gen_random_uuid(),
-  call_id uuid not null references public.call_sessions(id) on delete cascade,
-  from_user_id uuid not null references public.profiles(id) on delete restrict,
-  to_user_id uuid not null references public.profiles(id) on delete restrict,
-  type text not null check (type in ('offer', 'answer', 'ice', 'bye')),
-  payload jsonb not null default '{}'::jsonb,
-  created_at timestamptz not null default now(),
-  constraint call_signals_distinct_participants_chk check (from_user_id <> to_user_id),
-  constraint call_signals_payload_object_chk check (jsonb_typeof(payload) = 'object')
-);
-
-create index if not exists call_signals_call_id_idx
-  on public.call_signals(call_id);
-
--- FK de call_id adicionada após existir call_sessions
-do $$
-begin
-  if not exists (
-    select 1
-    from pg_constraint
-    where conname = 'messages_call_id_fkey'
-  ) then
-    alter table public.messages
-      add constraint messages_call_id_fkey
-      foreign key (call_id) references public.call_sessions(id) on delete set null;
-  end if;
-end $$;
-
--- ---------------------------------------------------------
 -- Triggers de integridade
 -- ---------------------------------------------------------
 create or replace function public.validate_message_integrity()
@@ -369,7 +311,6 @@ set search_path = public, pg_temp
 as $$
 declare
   reply_conv uuid;
-  call_conv uuid;
   conv_user1 uuid;
   conv_user2 uuid;
 begin
@@ -394,17 +335,6 @@ begin
 
     if reply_conv is null or reply_conv <> new.conversation_id then
       raise exception 'reply_to_id must belong to the same conversation';
-    end if;
-  end if;
-
-  if new.call_id is not null then
-    select cs.conversation_id
-      into call_conv
-    from public.call_sessions cs
-    where cs.id = new.call_id;
-
-    if call_conv is null or call_conv <> new.conversation_id then
-      raise exception 'call_id must belong to the same conversation';
     end if;
   end if;
 
@@ -496,31 +426,13 @@ as $$
   );
 $$;
 
-create or replace function public.can_access_call(p_call_id uuid, p_user_id uuid)
-returns boolean
-language sql
-stable
-security definer
-set search_path = public, pg_temp
-as $$
-  select exists (
-    select 1
-    from public.call_sessions cs
-    join public.conversations c on c.id = cs.conversation_id
-    where cs.id = p_call_id
-      and (c.user1_id = p_user_id or c.user2_id = p_user_id)
-  );
-$$;
-
 revoke all on function public.is_conversation_member(uuid, uuid) from public;
 revoke all on function public.is_message_author(uuid, uuid) from public;
 revoke all on function public.can_access_message(uuid, uuid) from public;
-revoke all on function public.can_access_call(uuid, uuid) from public;
 
 grant execute on function public.is_conversation_member(uuid, uuid) to authenticated;
 grant execute on function public.is_message_author(uuid, uuid) to authenticated;
 grant execute on function public.can_access_message(uuid, uuid) to authenticated;
-grant execute on function public.can_access_call(uuid, uuid) to authenticated;
 
 -- ---------------------------------------------------------
 -- RLS
@@ -533,8 +445,6 @@ alter table public.user_blocks enable row level security;
 alter table public.messages enable row level security;
 alter table public.attachments enable row level security;
 alter table public.message_reads enable row level security;
-alter table public.call_sessions enable row level security;
-alter table public.call_signals enable row level security;
 
 alter table public.profiles force row level security;
 alter table public.user_sessions force row level security;
@@ -544,8 +454,6 @@ alter table public.user_blocks force row level security;
 alter table public.messages force row level security;
 alter table public.attachments force row level security;
 alter table public.message_reads force row level security;
-alter table public.call_sessions force row level security;
-alter table public.call_signals force row level security;
 
 -- Perfis
 drop policy if exists profiles_select_authenticated on public.profiles;
@@ -765,65 +673,6 @@ with check (
   and ((select public.can_access_message(message_id, (select auth.uid()))))
 );
 
--- Call sessions
-drop policy if exists call_sessions_select_member on public.call_sessions;
-create policy call_sessions_select_member
-on public.call_sessions
-for select
-to authenticated
-using (((select public.is_conversation_member(conversation_id, (select auth.uid())))));
-
-drop policy if exists call_sessions_insert_member on public.call_sessions;
-create policy call_sessions_insert_member
-on public.call_sessions
-for insert
-to authenticated
-with check (
-  ((select auth.uid()) = created_by)
-  and ((select public.is_conversation_member(conversation_id, (select auth.uid()))))
-);
-
-drop policy if exists call_sessions_update_member on public.call_sessions;
-create policy call_sessions_update_member
-on public.call_sessions
-for update
-to authenticated
-using (((select public.is_conversation_member(conversation_id, (select auth.uid())))))
-with check (((select public.is_conversation_member(conversation_id, (select auth.uid())))));
-
-drop policy if exists call_sessions_delete_creator on public.call_sessions;
-drop policy if exists call_sessions_delete_member on public.call_sessions;
-create policy call_sessions_delete_creator
-on public.call_sessions
-for delete
-to authenticated
-using (
-  ((select auth.uid()) = created_by)
-  and ((select public.is_conversation_member(conversation_id, (select auth.uid()))))
-);
-
--- Call signals
-drop policy if exists call_signals_select_member on public.call_signals;
-drop policy if exists call_signals_member on public.call_signals;
-create policy call_signals_select_member
-on public.call_signals
-for select
-to authenticated
-using (
-  ((select public.can_access_call(call_id, (select auth.uid()))))
-  and ((select auth.uid()) in (from_user_id, to_user_id))
-);
-
-drop policy if exists call_signals_insert_member on public.call_signals;
-create policy call_signals_insert_member
-on public.call_signals
-for insert
-to authenticated
-with check (
-  ((select public.can_access_call(call_id, (select auth.uid()))))
-  and ((select auth.uid()) in (from_user_id, to_user_id))
-);
-
 -- ---------------------------------------------------------
 -- Grants
 -- ---------------------------------------------------------
@@ -838,7 +687,5 @@ grant select, insert, delete on public.user_blocks to authenticated;
 grant select, insert, update on public.messages to authenticated;
 grant select, insert, update, delete on public.attachments to authenticated;
 grant select, insert, update on public.message_reads to authenticated;
-grant select, insert, update, delete on public.call_sessions to authenticated;
-grant select, insert on public.call_signals to authenticated;
 
 commit;

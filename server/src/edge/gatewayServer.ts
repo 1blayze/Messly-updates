@@ -91,10 +91,10 @@ function parseFrame(raw: unknown): GatewayFrame<unknown> | null {
   }
 }
 
-type SocketSubscriptionType = "conversation" | "user" | "friends" | "notifications" | "voice";
+type SocketSubscriptionType = "conversation" | "user" | "friends" | "notifications";
 
 function normalizeSubscriptionType(type: string): SocketSubscriptionType | null {
-  if (type === "conversation" || type === "user" || type === "friends" || type === "notifications" || type === "voice") {
+  if (type === "conversation" || type === "user" || type === "friends" || type === "notifications") {
     return type;
   }
   return null;

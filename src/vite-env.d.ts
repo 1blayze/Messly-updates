@@ -6,7 +6,6 @@ interface ImportMetaEnv {
   readonly VITE_SUPABASE_URL: string;
   readonly VITE_SUPABASE_ANON_KEY?: string;
   readonly VITE_SUPABASE_PUBLISHABLE_KEY?: string;
-  readonly VITE_CALLS_USE_EDGE_FUNCTIONS_IN_DEV?: string;
   readonly VITE_MESSLY_GATEWAY_URL?: string;
   readonly VITE_MESSLY_AUTH_API_URL?: string;
   readonly VITE_MESSLY_ALLOW_DIRECT_SUPABASE_AUTH_FALLBACK?: string;
@@ -15,16 +14,12 @@ interface ImportMetaEnv {
   readonly VITE_MESSLY_CDN_URL?: string;
   readonly VITE_MESSLY_ASSETS_URL?: string;
   readonly VITE_MESSLY_GATEWAY_CLIENT_VERSION?: string;
-  readonly VITE_MESSLY_CALL_TRANSPORT?: string;
   readonly VITE_MEDIA_BUCKET?: string;
   readonly VITE_R2_BUCKET?: string;
   readonly VITE_MEDIA_PUBLIC_BASE_URL?: string;
   readonly VITE_R2_PUBLIC_BASE_URL?: string;
   readonly VITE_CHAT_KEEP_ORIGINAL_UPLOADS?: string;
   readonly VITE_CHAT_E2EE_ENABLED?: string;
-  readonly VITE_WEBRTC_ICE_SERVERS_JSON?: string;
-  readonly VITE_WEBRTC_TURN_USERNAME?: string;
-  readonly VITE_WEBRTC_TURN_CREDENTIAL?: string;
 }
 
 interface ImportMeta {
@@ -204,9 +199,9 @@ interface MessageNotificationPayload {
   contentPreview?: string;
   createdAt?: string | null;
   avatarUrl?: string;
-  conversationType?: "dm" | "group" | "channel" | "guild" | "voice" | "unknown";
+  conversationType?: "dm" | "group" | "channel" | "guild" | "unknown";
   contextLabel?: string;
-  messageType?: "text" | "image" | "video" | "file" | "call_event";
+  messageType?: "text" | "image" | "video" | "file";
   attachmentMimeType?: string;
   attachmentCount?: number;
   batchCount?: number;

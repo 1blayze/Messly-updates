@@ -40,7 +40,6 @@ export const gatewaySubscriptionTypes = [
   "user",
   "friends",
   "notifications",
-  "voice",
   "room",
 ] as const;
 

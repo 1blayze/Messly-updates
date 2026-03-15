@@ -32,8 +32,6 @@ const DROP_FILE_EXTENSIONS = new Set([
 
 const UNPACKED_MODULES_TO_REMOVE = [
   ["ioredis"],
-  ["mediasoup"],
-  ["mediasoup-client"],
   ["tsx"],
   ["ws"],
   ["@esbuild"],

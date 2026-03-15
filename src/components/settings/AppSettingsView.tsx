@@ -323,7 +323,6 @@ interface PersistedAudioSettings {
   echoCancellation: boolean;
   autoGain: boolean;
   vadEnabled: boolean;
-  voiceFocus: boolean;
   autoSensitivity: boolean;
   sensitivityDb: number;
   pushToTalkEnabled: boolean;
@@ -1822,7 +1821,6 @@ export default function AppSettingsView({
   const [echoCancellation, setEchoCancellation] = useState(true);
   const [autoGainControl, setAutoGainControl] = useState(true);
   const [vadEnabled, setVadEnabled] = useState(true);
-  const [voiceFocus, setVoiceFocus] = useState(false);
   const [autoMicSensitivity, setAutoMicSensitivity] = useState(true);
   const [manualMicSensitivity, setManualMicSensitivity] = useState(-70);
   const [qosHighPriority, setQosHighPriority] = useState(false);
@@ -2347,7 +2345,6 @@ export default function AppSettingsView({
       setEchoCancellation(typeof parsed.echoCancellation === "boolean" ? parsed.echoCancellation : true);
       setAutoGainControl(typeof parsed.autoGain === "boolean" ? parsed.autoGain : true);
       setVadEnabled(typeof parsed.vadEnabled === "boolean" ? parsed.vadEnabled : true);
-      setVoiceFocus(typeof parsed.voiceFocus === "boolean" ? parsed.voiceFocus : false);
       setAutoMicSensitivity(typeof parsed.autoSensitivity === "boolean" ? parsed.autoSensitivity : true);
       if (typeof parsed.sensitivityDb === "number" && Number.isFinite(parsed.sensitivityDb)) {
         setManualMicSensitivity(clamp(Math.round(parsed.sensitivityDb), -100, 0));
@@ -2377,7 +2374,6 @@ export default function AppSettingsView({
       echoCancellation,
       autoGain: autoGainControl,
       vadEnabled,
-      voiceFocus,
       autoSensitivity: autoMicSensitivity,
       sensitivityDb: clamp(Math.round(manualMicSensitivity), -100, 0),
       pushToTalkEnabled,
@@ -2408,7 +2404,6 @@ export default function AppSettingsView({
     echoCancellation,
     autoGainControl,
     vadEnabled,
-    voiceFocus,
     autoMicSensitivity,
     manualMicSensitivity,
     pushToTalkEnabled,
@@ -6150,34 +6145,18 @@ export default function AppSettingsView({
 
                         <div className={styles.processingCoreRow}>
                           <div className={styles.processingCoreRowMeta}>
-                            <p className={styles.processingCoreRowTitle}>Foco de voz</p>
-                            <p className={styles.processingCoreRowState}>Prioriza sua voz e corta sons laterais.</p>
-                          </div>
-                          <button
-                            type="button"
-                            className={`${styles.windowsSwitch}${voiceFocus ? ` ${styles.windowsSwitchOn}` : ""}`}
-                            aria-label="Alternar foco de voz"
-                            aria-pressed={voiceFocus}
-                            onClick={() => setVoiceFocus(!voiceFocus)}
-                          >
-                            <span className={styles.windowsSwitchThumb} aria-hidden="true" />
-                          </button>
-                        </div>
-
-                        <div className={styles.processingCoreRow}>
-                          <div className={styles.processingCoreRowMeta}>
                             <p className={styles.processingCoreRowTitle}>
-                              Prioridade de áudio em chamadas
+                              Prioridade de audio em tempo real
                             </p>
                             <p className={styles.processingCoreRowState}>
-                              Melhora a estabilidade da voz em conexões sobrecarregadas. Em algumas redes, este ajuste
+                              Melhora a estabilidade do audio em conexoes sobrecarregadas. Em algumas redes, este ajuste
                               pode não ter efeito.
                             </p>
                           </div>
                           <button
                             type="button"
                             className={`${styles.windowsSwitch}${qosHighPriority ? ` ${styles.windowsSwitchOn}` : ""}`}
-                            aria-label="Alternar prioridade de áudio em chamadas"
+                            aria-label="Alternar prioridade de audio em tempo real"
                             aria-pressed={qosHighPriority}
                             onClick={() => setQosHighPriority(!qosHighPriority)}
                           >
