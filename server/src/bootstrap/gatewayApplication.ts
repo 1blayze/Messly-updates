@@ -208,6 +208,8 @@ export class GatewayApplication {
       maxPayloadBytes: env.maxPayloadBytes,
       isAllowedOrigin: (origin) => this.isAllowedOrigin(origin),
       validateAccessToken: async (token) => this.validateToken(token),
+      redis: this.redis,
+      instanceId: this.instanceId,
     });
     this.backpressureBytes = env.maxPayloadBytes * 4;
     this.wss = new WebSocketServer({
@@ -233,6 +235,7 @@ export class GatewayApplication {
     }
 
     await this.redis.connect();
+    await this.voiceSignaling.start();
     await this.bus.start();
     this.bus.subscribe((message) => this.handleBusMessage(message));
     this.bridge.start();
