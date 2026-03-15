@@ -16,6 +16,14 @@ export function toFriendlySupabaseAuthError(error: unknown): string {
     return "A requisição foi bloqueada por um ad-blocker ou extensão. Desative para prosseguir.";
   }
 
+  // Resposta imediata para 400-403 de login, antes de chegar em OTP/token genérico.
+  if (status >= 400 && status <= 403) {
+    if (normalizedCode === "EMAIL_VERIFICATION_REQUIRED" || normalized.includes("email not confirmed")) {
+      return "Confirme seu e-mail para continuar.";
+    }
+    return "Email ou senha incorretos.";
+  }
+
   if (normalizedCode === "EMAIL_ALREADY_REGISTERED") {
     return "Este e-mail já está cadastrado.";
   }
@@ -65,12 +73,6 @@ export function toFriendlySupabaseAuthError(error: unknown): string {
     normalizedCode === "INVALID_CREDENTIALS"
   ) {
     return "Email ou senha incorretos.";
-  }
-
-  if (status === 401 || status === 403) {
-    if (!normalized.includes("verification")) {
-      return "Email ou senha incorretos.";
-    }
   }
 
   if (normalized.includes("user already registered")) {
