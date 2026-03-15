@@ -103,6 +103,9 @@ const CALL_SOLO_TIMEOUT_MS = 3 * 60 * 1000;
 const CALL_REALTIME_CHANNEL_NAME = "dm-call";
 const CALL_KEEPALIVE_INTERVAL_MS = 1_500;
 const CALL_DISCONNECT_FINALIZE_TIMEOUT_MS = 8_000;
+// ICE candidates can arrive before the callee accepts the call (no CallService instance yet).
+// Buffer a small amount so we don't drop early trickle ICE and end up with "call connects but no audio".
+const CALL_MAX_PENDING_ICE_SIGNALS = 128;
 const CALL_RESUME_STORAGE_KEY_PREFIX = "messly:call-resume:v1:";
 const CALL_RESUME_MAX_AGE_MS = 15 * 60_000;
 const AUDIO_SETTINGS_STORAGE_KEY_PREFIX = "messly:audio-settings:";
@@ -2605,6 +2608,7 @@ export default function DirectMessageChatView({
     incomingCallSession: null,
   });
   const pendingOfferByCallIdRef = useRef<Map<string, Record<string, unknown>>>(new Map());
+  const pendingIceByCallIdRef = useRef<Map<string, Array<Record<string, unknown>>>>(new Map());
   const processedSignalIdsRef = useRef<Set<string>>(new Set());
   const callPopoutWindowRef = useRef<Window | null>(null);
   const callRingingAudioRef = useRef<HTMLAudioElement | null>(null);
@@ -5887,6 +5891,7 @@ export default function DirectMessageChatView({
     activeCallIdRef.current = null;
     callSignalTargetUidRef.current = null;
     pendingOfferByCallIdRef.current.clear();
+    pendingIceByCallIdRef.current.clear();
     processedSignalIdsRef.current.clear();
     pendingCallEventsRef.current = [];
     isFlushingPendingCallEventsRef.current = false;
@@ -6502,6 +6507,14 @@ export default function DirectMessageChatView({
 
       const service = await ensureCallService(accepted.mode);
       await service.startAsCallee();
+
+      const pendingIceSignals = pendingIceByCallIdRef.current.get(accepted.id) ?? [];
+      if (pendingIceSignals.length > 0) {
+        for (const icePayload of pendingIceSignals) {
+          await service.handleSignal({ type: "ice", payload: icePayload });
+        }
+        pendingIceByCallIdRef.current.delete(accepted.id);
+      }
       const pendingOffer = pendingOfferByCallIdRef.current.get(accepted.id);
       if (pendingOffer) {
         const responseSignal = await service.handleSignal({
@@ -6836,6 +6849,13 @@ export default function DirectMessageChatView({
         }
       }
 
+      const pendingIceSignals = pendingIceByCallIdRef.current.get(callId) ?? [];
+      if (pendingIceSignals.length > 0) {
+        for (const icePayload of pendingIceSignals) {
+          await service.handleSignal({ type: "ice", payload: icePayload });
+        }
+        pendingIceByCallIdRef.current.delete(callId);
+      }
       const pendingOffer = pendingOfferByCallIdRef.current.get(callId);
       if (pendingOffer) {
         const responseSignal = await service.handleSignal({
@@ -7561,6 +7581,23 @@ export default function DirectMessageChatView({
                 return;
               }
 
+              if (event.signalType === "ice" && (!callServiceRef.current || activeCallIdRef.current !== event.callId)) {
+                const payload =
+                  event.signalPayload && typeof event.signalPayload === "object" && !Array.isArray(event.signalPayload)
+                    ? (event.signalPayload as Record<string, unknown>)
+                    : null;
+                if (!payload) {
+                  return;
+                }
+                const existing = pendingIceByCallIdRef.current.get(event.callId) ?? [];
+                existing.push(payload);
+                if (existing.length > CALL_MAX_PENDING_ICE_SIGNALS) {
+                  existing.splice(0, existing.length - CALL_MAX_PENDING_ICE_SIGNALS);
+                }
+                pendingIceByCallIdRef.current.set(event.callId, existing);
+                return;
+              }
+
               if (activeCallIdRef.current !== event.callId) {
                 return;
               }
@@ -7569,6 +7606,19 @@ export default function DirectMessageChatView({
               if (!service) {
                 if (event.signalType === "offer") {
                   pendingOfferByCallIdRef.current.set(event.callId, event.signalPayload);
+                } else if (event.signalType === "ice") {
+                  const payload =
+                    event.signalPayload && typeof event.signalPayload === "object" && !Array.isArray(event.signalPayload)
+                      ? (event.signalPayload as Record<string, unknown>)
+                      : null;
+                  if (payload) {
+                    const existing = pendingIceByCallIdRef.current.get(event.callId) ?? [];
+                    existing.push(payload);
+                    if (existing.length > CALL_MAX_PENDING_ICE_SIGNALS) {
+                      existing.splice(0, existing.length - CALL_MAX_PENDING_ICE_SIGNALS);
+                    }
+                    pendingIceByCallIdRef.current.set(event.callId, existing);
+                  }
                 }
                 return;
               }

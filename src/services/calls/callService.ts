@@ -127,6 +127,29 @@ function toId(value: unknown): string {
   return String(value ?? "").trim();
 }
 
+function describeWebRtcError(error: unknown): string {
+  if (typeof DOMException !== "undefined" && error instanceof DOMException) {
+    const code = typeof (error as unknown as { code?: unknown }).code === "number"
+      ? Number((error as unknown as { code: number }).code)
+      : null;
+    const codeLabel = code != null && Number.isFinite(code) ? ` (code ${code})` : "";
+    const message = String(error.message ?? "").trim();
+    return `${error.name || "DOMException"}${codeLabel}${message ? `: ${message}` : ""}`.trim();
+  }
+  if (error instanceof Error) {
+    const message = String(error.message ?? "").trim();
+    return `${error.name || "Error"}${message ? `: ${message}` : ""}`.trim();
+  }
+  if (typeof error === "string") {
+    return error;
+  }
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error ?? "");
+  }
+}
+
 function toCandidateAddress(candidateRaw: unknown): string {
   const candidate = toRecord(candidateRaw);
   return String(candidate.address ?? candidate.ip ?? "").trim().toLowerCase();
@@ -202,10 +225,9 @@ function resolvePreferredVoiceTransport(): VoiceTransport {
   }
 
   // Default behavior:
-  // - Dev builds keep the mediasoup/SFU path enabled so we can iterate locally.
-  // - Prod builds default to P2P because our current gateway deployment (Cloud Run / HTTP LB) cannot expose the UDP/TCP
-  //   port ranges required by mediasoup WebRTC transports.
-  return import.meta.env.DEV ? "mediasoup" : "p2p";
+  // - P2P is the safest default across environments because it works behind typical HTTPS load balancers.
+  // - Use VITE_MESSLY_CALL_TRANSPORT=mediasoup when running a gateway that exposes WebRTC transport ports.
+  return "p2p";
 }
 
 function normalizeIceServer(
@@ -2390,7 +2412,7 @@ export class CallService {
       } catch (error) {
         this.debugLog("p2p_add_ice_failed", {
           scope,
-          message: error instanceof Error ? error.message : String(error ?? ""),
+          message: describeWebRtcError(error),
         });
       }
     }
@@ -2407,6 +2429,8 @@ export class CallService {
       this.p2pMakingOffer = true;
       const offer = await peer.createOffer({ iceRestart: input.iceRestart });
       await peer.setLocalDescription(offer);
+    } catch (error) {
+      throw new Error(`Falha ao criar oferta P2P (${input.reason}). ${describeWebRtcError(error)}`);
     } finally {
       this.p2pMakingOffer = false;
     }
@@ -2442,11 +2466,19 @@ export class CallService {
       return false;
     }
 
-    await peer.setRemoteDescription(offer);
-    await this.flushP2pRemoteIceCandidates(scope);
+    try {
+      await peer.setRemoteDescription(offer);
+      await this.flushP2pRemoteIceCandidates(scope);
+    } catch (error) {
+      throw new Error(`Falha ao aplicar oferta P2P (${scope}). ${describeWebRtcError(error)}`);
+    }
 
-    const answer = await peer.createAnswer();
-    await peer.setLocalDescription(answer);
+    try {
+      const answer = await peer.createAnswer();
+      await peer.setLocalDescription(answer);
+    } catch (error) {
+      throw new Error(`Falha ao criar resposta P2P (${scope}). ${describeWebRtcError(error)}`);
+    }
 
     const answerSdp = String(peer.localDescription?.sdp ?? "").trim();
     if (!answerSdp) {
@@ -2469,9 +2501,13 @@ export class CallService {
       return;
     }
 
-    await peer.setRemoteDescription({ type: "answer", sdp: answerSdp });
-    await this.flushP2pRemoteIceCandidates(scope);
-    this.debugLog("p2p_answer_applied", { scope });
+    try {
+      await peer.setRemoteDescription({ type: "answer", sdp: answerSdp });
+      await this.flushP2pRemoteIceCandidates(scope);
+      this.debugLog("p2p_answer_applied", { scope });
+    } catch (error) {
+      throw new Error(`Falha ao aplicar resposta P2P (${scope}). ${describeWebRtcError(error)}`);
+    }
   }
 
   private async addP2pRemoteIceCandidate(payload: Record<string, unknown>, scope: string): Promise<void> {
@@ -2507,7 +2543,7 @@ export class CallService {
     } catch (error) {
       this.debugLog("p2p_add_ice_failed", {
         scope,
-        message: error instanceof Error ? error.message : String(error ?? ""),
+        message: describeWebRtcError(error),
       });
     }
   }
