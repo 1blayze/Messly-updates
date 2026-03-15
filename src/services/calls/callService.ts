@@ -155,6 +155,18 @@ function toCandidateAddress(candidateRaw: unknown): string {
   return String(candidate.address ?? candidate.ip ?? "").trim().toLowerCase();
 }
 
+function getBrowserEstimatedRttMs(): number | null {
+  if (typeof navigator === "undefined") {
+    return null;
+  }
+  const connection = (navigator as unknown as { connection?: unknown }).connection as { rtt?: unknown } | undefined;
+  const rtt = typeof connection?.rtt === "number" ? connection.rtt : null;
+  if (rtt == null || !Number.isFinite(rtt) || rtt <= 0) {
+    return null;
+  }
+  return rtt;
+}
+
 function hasNonWildcardIceCandidate(candidateListRaw: unknown): boolean {
   if (!Array.isArray(candidateListRaw) || candidateListRaw.length === 0) {
     return false;
@@ -1390,6 +1402,10 @@ export class CallService {
       if (rttSamples > 0) {
         currentRttMs = rttTotalMs / rttSamples;
       }
+    }
+
+    if (currentRttMs == null && isP2p) {
+      currentRttMs = getBrowserEstimatedRttMs();
     }
 
     const packetLossPercent = hasPacketCounters && packetsReceivedTotal + packetsLostTotal > 0
