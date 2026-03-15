@@ -18,7 +18,7 @@ const VOICE_DISTRIBUTED_PARTICIPANT_STALE_MS = 90_000;
 
 const sdpPayloadSchema = z.object({
   type: z.string().trim().min(1).max(32),
-  sdp: z.string().trim().min(1).max(200_000),
+  sdp: z.string().min(1).max(200_000),
 });
 
 const joinMessageSchema = z.object({

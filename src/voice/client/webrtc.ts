@@ -137,7 +137,7 @@ const offerSignalSchema = z.object({
   fromUserId: z.string().trim().min(1),
   sdp: z.object({
     type: z.string().trim().min(1),
-    sdp: z.string().trim().min(1),
+    sdp: z.string().min(1),
   }),
 });
 
@@ -146,7 +146,7 @@ const answerSignalSchema = z.object({
   fromUserId: z.string().trim().min(1),
   sdp: z.object({
     type: z.string().trim().min(1),
-    sdp: z.string().trim().min(1),
+    sdp: z.string().min(1),
   }),
 });
 
@@ -265,6 +265,32 @@ function parseInboundMessage(raw: string): InboundSignalingMessage | null {
 
 function normalizeErrorMessage(error: unknown): string {
   return String(error instanceof Error ? error.message : error ?? "").trim() || "Falha na chamada de voz.";
+}
+
+function toRemoteSdpType(typeRaw: string): "offer" | "answer" {
+  const normalized = String(typeRaw ?? "").trim().toLowerCase();
+  if (normalized === "offer" || normalized === "answer") {
+    return normalized;
+  }
+  throw new Error(`Tipo de SDP remoto invalido: ${normalized || "desconhecido"}`);
+}
+
+function canonicalizeSdpString(sdpRaw: string, stripSsrcAttributes = false): string {
+  const lines = String(sdpRaw ?? "")
+    .replace(/\u0000/g, "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter((line) => line.length > 0 && /^[a-z]=/i.test(line));
+
+  const filtered = stripSsrcAttributes
+    ? lines.filter((line) => !line.startsWith("a=ssrc:") && !line.startsWith("a=ssrc-group:"))
+    : lines;
+  if (filtered.length === 0) {
+    return "";
+  }
+  return `${filtered.join("\r\n")}\r\n`;
 }
 
 function normalizeMediaPreferences(preferences: VoiceCallMediaPreferences | null | undefined): Required<VoiceCallMediaPreferences> {
@@ -700,30 +726,23 @@ export class VoiceCallClient {
 
     const peerContext = this.ensurePeerConnection(userId);
     const connection = peerContext.connection;
-    const remoteDescription = new RTCSessionDescription({
-      type: descriptionRaw.type as RTCSdpType,
-      sdp: descriptionRaw.sdp,
-    });
 
     if (connection.signalingState !== "stable") {
-      await Promise.all([
-        connection.setLocalDescription({ type: "rollback" }),
-        connection.setRemoteDescription(remoteDescription),
-      ]);
-    } else {
-      await connection.setRemoteDescription(remoteDescription);
+      await connection.setLocalDescription({ type: "rollback" }).catch(() => undefined);
     }
+    await this.setRemoteDescriptionWithRecovery(connection, descriptionRaw);
 
     await this.flushPendingIceCandidates(userId);
     const answer = await connection.createAnswer();
     await connection.setLocalDescription(answer);
-    if (!connection.localDescription) {
+    const localAnswer = this.toLocalSdpPayload(connection.localDescription);
+    if (!localAnswer) {
       return;
     }
     this.sendSignal({
       type: "answer",
       targetUserId: userId,
-      sdp: connection.localDescription,
+      sdp: localAnswer,
     });
   }
 
@@ -738,11 +757,7 @@ export class VoiceCallClient {
       return;
     }
 
-    const remoteDescription = new RTCSessionDescription({
-      type: descriptionRaw.type as RTCSdpType,
-      sdp: descriptionRaw.sdp,
-    });
-    await peerContext.connection.setRemoteDescription(remoteDescription);
+    await this.setRemoteDescriptionWithRecovery(peerContext.connection, descriptionRaw);
     await this.flushPendingIceCandidates(userId);
   }
 
@@ -853,18 +868,65 @@ export class VoiceCallClient {
   private async createAndSendOffer(userId: string): Promise<void> {
     const peerContext = this.ensurePeerConnection(userId);
     const connection = peerContext.connection;
-    const offer = await connection.createOffer({
-      offerToReceiveAudio: true,
-    });
+    const offer = await connection.createOffer();
     await connection.setLocalDescription(offer);
-    if (!connection.localDescription) {
+    const localOffer = this.toLocalSdpPayload(connection.localDescription);
+    if (!localOffer) {
       return;
     }
     this.sendSignal({
       type: "offer",
       targetUserId: userId,
-      sdp: connection.localDescription,
+      sdp: localOffer,
     });
+  }
+
+  private async setRemoteDescriptionWithRecovery(
+    connection: RTCPeerConnection,
+    descriptionRaw: { type: string; sdp: string },
+  ): Promise<void> {
+    const type = toRemoteSdpType(descriptionRaw.type);
+    const canonical = canonicalizeSdpString(descriptionRaw.sdp, false);
+    if (!canonical) {
+      throw new Error("SDP remoto vazio.");
+    }
+
+    try {
+      await connection.setRemoteDescription({
+        type,
+        sdp: canonical,
+      });
+      return;
+    } catch (primaryError) {
+      const withoutSsrc = canonicalizeSdpString(descriptionRaw.sdp, true);
+      if (!withoutSsrc || withoutSsrc === canonical) {
+        throw primaryError;
+      }
+
+      try {
+        await connection.setRemoteDescription({
+          type,
+          sdp: withoutSsrc,
+        });
+        return;
+      } catch {
+        throw primaryError;
+      }
+    }
+  }
+
+  private toLocalSdpPayload(description: RTCSessionDescription | null): { type: string; sdp: string } | null {
+    if (!description) {
+      return null;
+    }
+    const canonical = canonicalizeSdpString(description.sdp ?? "", false);
+    if (!canonical) {
+      return null;
+    }
+    return {
+      type: description.type,
+      sdp: canonical,
+    };
   }
 
   private async flushPendingIceCandidates(userId: string): Promise<void> {
