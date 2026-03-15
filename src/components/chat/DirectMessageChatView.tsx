@@ -51,6 +51,7 @@ import {
   VoiceCallClient,
   type VoiceConnectionState,
   type VoiceDiagnosticsPeerSnapshot,
+  type VoiceCallMediaPreferences,
   type VoiceParticipantState,
   type VoiceUserIdentity,
 } from "../../voice/client/webrtc";
@@ -59,8 +60,10 @@ import "../../styles/components/DirectMessageChat.css";
 gsap.registerPlugin(ScrollToPlugin);
 
 const headerVoiceCallIconUrl = new URL("../../assets/icons/ui/Calling.svg", import.meta.url).href;
-const headerVoiceHangupIconUrl = new URL("../../assets/icons/ui/Call.svg", import.meta.url).href;
 const headerVideoOffIconUrl = new URL("../../assets/icons/ui/video-off.svg", import.meta.url).href;
+const VOICE_CALL_SIGNAL_PREFIX = "__messly_voice_call_signal__:";
+const VOICE_CALL_INVITE_TTL_MS = 45_000;
+const AUDIO_SETTINGS_STORAGE_KEY_PREFIX = "messly:audio-settings:";
 
 const GROUP_BREAK_MS = 5 * 60 * 1000;
 const AUTO_SCROLL_THRESHOLD_PX = 120;
@@ -287,6 +290,129 @@ interface MessageRenderData {
 interface MediaViewerState {
   items: MediaAttachmentItem[];
   index: number;
+}
+
+type VoiceCallSignalAction = "invite" | "cancel";
+
+interface VoiceCallSignalPayload {
+  version: 1;
+  action: VoiceCallSignalAction;
+  roomId: string;
+  senderUserId: string;
+  sentAt: number;
+}
+
+function encodeVoiceCallSignal(signal: VoiceCallSignalPayload): string {
+  return `${VOICE_CALL_SIGNAL_PREFIX}${JSON.stringify(signal)}`;
+}
+
+function parseVoiceCallSignalContent(contentRaw: string | null | undefined): VoiceCallSignalPayload | null {
+  const content = String(contentRaw ?? "").trim();
+  if (!content.startsWith(VOICE_CALL_SIGNAL_PREFIX)) {
+    return null;
+  }
+
+  const payloadRaw = content.slice(VOICE_CALL_SIGNAL_PREFIX.length).trim();
+  if (!payloadRaw) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(payloadRaw) as Partial<VoiceCallSignalPayload>;
+    const version = Number(parsed.version ?? 0);
+    if (version !== 1) {
+      return null;
+    }
+
+    const actionRaw = String(parsed.action ?? "").trim();
+    if (actionRaw !== "invite" && actionRaw !== "cancel") {
+      return null;
+    }
+
+    const roomId = String(parsed.roomId ?? "").trim();
+    const senderUserId = String(parsed.senderUserId ?? "").trim();
+    const sentAt = Number(parsed.sentAt ?? 0);
+    if (!roomId || !senderUserId || !Number.isFinite(sentAt) || sentAt <= 0) {
+      return null;
+    }
+
+    return {
+      version: 1,
+      action: actionRaw,
+      roomId,
+      senderUserId,
+      sentAt,
+    };
+  } catch {
+    return null;
+  }
+}
+
+interface PersistedAudioSettingsSnapshot {
+  v: 1;
+  inputDeviceId: string;
+  outputDeviceId: string;
+  inputVolume: number;
+  outputVolume: number;
+  noiseSuppression: boolean;
+  echoCancellation: boolean;
+  autoGain: boolean;
+}
+
+function clampNumeric(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function buildAudioSettingsStorageKey(userIdRaw: string | null | undefined): string {
+  const normalizedUserId = String(userIdRaw ?? "").trim();
+  if (!normalizedUserId) {
+    return `${AUDIO_SETTINGS_STORAGE_KEY_PREFIX}guest`;
+  }
+  return `${AUDIO_SETTINGS_STORAGE_KEY_PREFIX}${normalizedUserId}`;
+}
+
+function readVoiceCallMediaPreferences(userIdRaw: string | null | undefined): VoiceCallMediaPreferences {
+  const fallback: VoiceCallMediaPreferences = {
+    inputDeviceId: "",
+    outputDeviceId: "",
+    inputVolumePercent: 100,
+    outputVolumePercent: 100,
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
+  };
+
+  if (typeof window === "undefined") {
+    return fallback;
+  }
+
+  try {
+    const storageKey = buildAudioSettingsStorageKey(userIdRaw);
+    const raw = window.localStorage.getItem(storageKey);
+    if (!raw) {
+      return fallback;
+    }
+
+    const parsed = JSON.parse(raw) as Partial<PersistedAudioSettingsSnapshot> | null;
+    if (!parsed || Number(parsed.v ?? 0) !== 1) {
+      return fallback;
+    }
+
+    const inputVolumePercent = clampNumeric(Math.round(Number(parsed.inputVolume ?? 100)), 0, 100);
+    const outputVolumePercent = clampNumeric(Math.round(Number(parsed.outputVolume ?? 100)), 0, 200);
+
+    return {
+      inputDeviceId: String(parsed.inputDeviceId ?? "").trim(),
+      outputDeviceId: String(parsed.outputDeviceId ?? "").trim(),
+      inputVolumePercent,
+      outputVolumePercent,
+      echoCancellation: typeof parsed.echoCancellation === "boolean" ? parsed.echoCancellation : true,
+      noiseSuppression: typeof parsed.noiseSuppression === "boolean" ? parsed.noiseSuppression : true,
+      autoGainControl: typeof parsed.autoGain === "boolean" ? parsed.autoGain : true,
+    };
+  } catch {
+    return fallback;
+  }
 }
 
 export interface DirectMessageChatParticipant {
@@ -777,7 +903,13 @@ function isAttachmentMessage(message: ChatMessageItem): boolean {
 }
 
 function isVisibleChatMessage(message: ChatMessageItem): boolean {
-  return !message.deletedAt;
+  if (message.deletedAt) {
+    return false;
+  }
+  if (message.type === "text" && parseVoiceCallSignalContent(message.content)) {
+    return false;
+  }
+  return true;
 }
 
 function collectDeletedMessageIds(messages: ChatMessageItem[]): string[] {
@@ -1715,6 +1847,7 @@ export default function DirectMessageChatView({
   const [voiceCallError, setVoiceCallError] = useState<string | null>(null);
   const [voiceCallStartedAtMs, setVoiceCallStartedAtMs] = useState<number | null>(null);
   const [voiceCallElapsedTick, setVoiceCallElapsedTick] = useState(0);
+  const [incomingVoiceInviteFromUserId, setIncomingVoiceInviteFromUserId] = useState<string | null>(null);
   const [headerSearchValue, setHeaderSearchValue] = useState("");
   const [headerSearchIndex, setHeaderSearchIndex] = useState(-1);
   const [messageProfilePosition, setMessageProfilePosition] = useState<{ top: number; left: number }>({
@@ -1752,6 +1885,9 @@ export default function DirectMessageChatView({
   const messageProfilePopoverRef = useRef<HTMLDivElement | null>(null);
   const sidebarFullProfileRef = useRef<HTMLDivElement | null>(null);
   const voiceCallClientRef = useRef<VoiceCallClient | null>(null);
+  const voiceSignalMessageIdsRef = useRef<Set<string>>(new Set());
+  const isVoiceCallActiveRef = useRef(false);
+  const isVoiceCallConnectingRef = useRef(false);
   const openPerfRef = useRef<{ conversationId: string; openedAt: number; firstPaintLogged: boolean }>({
     conversationId,
     openedAt: performance.now(),
@@ -3012,6 +3148,84 @@ export default function DirectMessageChatView({
     [currentUserId],
   );
 
+  const sendVoiceSignal = useCallback(
+    async (action: VoiceCallSignalAction): Promise<void> => {
+      const senderUserId = String(currentUser.userId ?? "").trim() || String(currentUserId ?? "").trim();
+      if (!senderUserId) {
+        return;
+      }
+
+      const signalPayload = encodeVoiceCallSignal({
+        version: 1,
+        action,
+        roomId: conversationId,
+        senderUserId,
+        sentAt: Date.now(),
+      });
+
+      await sendChatMessage({
+        conversationId,
+        clientId: createClientMessageId(),
+        type: "text",
+        content: signalPayload,
+      });
+    },
+    [conversationId, currentUser.userId, currentUserId],
+  );
+
+  const consumeVoiceSignalMessage = useCallback(
+    (message: ChatMessageItem): boolean => {
+      if (message.type !== "text") {
+        return false;
+      }
+
+      const signal = parseVoiceCallSignalContent(message.content);
+      if (!signal || signal.roomId !== conversationId) {
+        return false;
+      }
+
+      if (!voiceSignalMessageIdsRef.current.has(message.id)) {
+        voiceSignalMessageIdsRef.current.add(message.id);
+        if (voiceSignalMessageIdsRef.current.size > 512) {
+          const firstInserted = voiceSignalMessageIdsRef.current.values().next().value as string | undefined;
+          if (firstInserted) {
+            voiceSignalMessageIdsRef.current.delete(firstInserted);
+          }
+        }
+      }
+
+      const senderUserId = String(message.senderId ?? "").trim();
+      const localUserId = String(currentUser.userId ?? "").trim() || String(currentUserId ?? "").trim();
+      const fromRemote = Boolean(senderUserId) && senderUserId !== localUserId;
+
+      if (fromRemote) {
+        void markConversationAsRead([message]);
+      }
+
+      if (!fromRemote) {
+        return true;
+      }
+
+      if (signal.action === "invite") {
+        if (Date.now() - signal.sentAt > VOICE_CALL_INVITE_TTL_MS) {
+          return true;
+        }
+        if (!isVoiceCallActiveRef.current && !isVoiceCallConnectingRef.current) {
+          setIncomingVoiceInviteFromUserId(senderUserId);
+        }
+        return true;
+      }
+
+      if (signal.action === "cancel") {
+        setIncomingVoiceInviteFromUserId((current) => (current === senderUserId ? null : current));
+        return true;
+      }
+
+      return true;
+    },
+    [conversationId, currentUser.userId, currentUserId, markConversationAsRead],
+  );
+
   useEffect(() => {
     draftAttachmentsRef.current = draftAttachments;
   }, [draftAttachments]);
@@ -3023,6 +3237,14 @@ export default function DirectMessageChatView({
   useEffect(() => {
     deletedMessageIdsRef.current = deletedMessageIds;
   }, [deletedMessageIds]);
+
+  useEffect(() => {
+    isVoiceCallActiveRef.current = isVoiceCallActive;
+  }, [isVoiceCallActive]);
+
+  useEffect(() => {
+    isVoiceCallConnectingRef.current = isVoiceCallConnecting;
+  }, [isVoiceCallConnecting]);
 
   useEffect(() => {
     if (messages.length <= ACTIVE_MESSAGE_WINDOW_MAX) {
@@ -3501,6 +3723,9 @@ export default function DirectMessageChatView({
           },
           (payload) => {
             const incoming = normalizeMessageRow(payload.new as MessageRow);
+            if (consumeVoiceSignalMessage(incoming)) {
+              return;
+            }
             if (!isVisibleChatMessage(incoming) || deletedMessageIdsRef.current.has(incoming.id)) {
               registerDeletedMessageId(incoming.id);
               setMessages((current) => current.filter((message) => message.id !== incoming.id));
@@ -3542,6 +3767,9 @@ export default function DirectMessageChatView({
           },
           (payload) => {
             const incoming = normalizeMessageRow(payload.new as MessageRow);
+            if (consumeVoiceSignalMessage(incoming)) {
+              return;
+            }
             if (!isVisibleChatMessage(incoming) || deletedMessageIdsRef.current.has(incoming.id)) {
               registerDeletedMessageId(incoming.id);
               setMessages((current) => current.filter((message) => message.id !== incoming.id));
@@ -3586,7 +3814,14 @@ export default function DirectMessageChatView({
         void supabase.removeChannel(channel);
       }
     };
-  }, [conversationId, currentUserId, loadConversationMessages, markConversationAsRead, registerDeletedMessageId]);
+  }, [
+    consumeVoiceSignalMessage,
+    conversationId,
+    currentUserId,
+    loadConversationMessages,
+    markConversationAsRead,
+    registerDeletedMessageId,
+  ]);
 
   useEffect(() => {
     const container = scrollContainerRef.current;
@@ -3693,6 +3928,8 @@ export default function DirectMessageChatView({
     setVoiceCallError(null);
     setVoiceCallStartedAtMs(null);
     setVoiceCallElapsedTick(0);
+    setIncomingVoiceInviteFromUserId(null);
+    voiceSignalMessageIdsRef.current.clear();
 
     const existingVoiceCallClient = voiceCallClientRef.current;
     voiceCallClientRef.current = null;
@@ -3724,6 +3961,12 @@ export default function DirectMessageChatView({
       window.clearInterval(timerId);
     };
   }, [isVoiceCallActive, voiceCallStartedAtMs]);
+
+  useEffect(() => {
+    if (isVoiceCallActive || isVoiceCallConnecting) {
+      setIncomingVoiceInviteFromUserId(null);
+    }
+  }, [isVoiceCallActive, isVoiceCallConnecting]);
 
   useEffect(() => {
     if (!normalizedHeaderSearchValue) {
@@ -4812,6 +5055,7 @@ export default function DirectMessageChatView({
 
   const handleToggleVoiceCall = useCallback(() => {
     if (isVoiceCallActive || isVoiceCallConnecting) {
+      void sendVoiceSignal("cancel").catch(() => undefined);
       void stopVoiceCallSession();
       return;
     }
@@ -4826,6 +5070,9 @@ export default function DirectMessageChatView({
       displayName: safeTargetDisplayName,
       avatarSrc: targetAvatarSrc,
     };
+    const mediaPreferences = readVoiceCallMediaPreferences(localIdentity.userId);
+    setIncomingVoiceInviteFromUserId(null);
+    void sendVoiceSignal("invite").catch(() => undefined);
 
     setVoiceCallError(null);
     setIsVoiceCallConnecting(true);
@@ -4848,6 +5095,7 @@ export default function DirectMessageChatView({
       peerDirectory: {
         [remoteIdentity.userId]: remoteIdentity,
       },
+      mediaPreferences,
       onParticipantsChanged: (participants) => {
         setVoiceCallParticipants(
           participants.map((participant) => ({
@@ -4900,6 +5148,7 @@ export default function DirectMessageChatView({
     isVoiceCallActive,
     isVoiceCallConnecting,
     safeTargetDisplayName,
+    sendVoiceSignal,
     stopVoiceCallSession,
     targetAvatarSrc,
     targetUser.userId,
@@ -4914,6 +5163,25 @@ export default function DirectMessageChatView({
     setIsVoiceCallMuted(existingVoiceCallClient.isMuted());
   }, []);
 
+  const handleAcceptIncomingVoiceInvite = useCallback(() => {
+    setIncomingVoiceInviteFromUserId(null);
+    if (isVoiceCallActive || isVoiceCallConnecting) {
+      return;
+    }
+    handleToggleVoiceCall();
+  }, [handleToggleVoiceCall, isVoiceCallActive, isVoiceCallConnecting]);
+
+  const handleDismissIncomingVoiceInvite = useCallback(() => {
+    setIncomingVoiceInviteFromUserId(null);
+  }, []);
+
+  const handleLeaveVoiceCall = useCallback(() => {
+    if (isVoiceCallActive || isVoiceCallConnecting) {
+      void sendVoiceSignal("cancel").catch(() => undefined);
+    }
+    void stopVoiceCallSession();
+  }, [isVoiceCallActive, isVoiceCallConnecting, sendVoiceSignal, stopVoiceCallSession]);
+
   const voiceCallElapsedSeconds = useMemo(() => {
     if (!voiceCallStartedAtMs) {
       return null;
@@ -4924,6 +5192,11 @@ export default function DirectMessageChatView({
 
   const shouldShowVoiceCallPanel = isVoiceCallActive || isVoiceCallConnecting;
   const voiceCallButtonActive = isVoiceCallActive || isVoiceCallConnecting;
+  const hasIncomingVoiceInvite = Boolean(incomingVoiceInviteFromUserId) && !shouldShowVoiceCallPanel;
+  const incomingVoiceInviteDisplayName =
+    incomingVoiceInviteFromUserId && incomingVoiceInviteFromUserId === String(targetUser.userId ?? "").trim()
+      ? safeTargetDisplayName
+      : "Contato";
 
   return (
     <section className="dm-chat" aria-label={`Conversa com ${safeTargetDisplayName}`}>
@@ -4949,25 +5222,23 @@ export default function DirectMessageChatView({
         </div>
         <div className="dm-chat__header-tools">
           <div className="dm-chat__header-actions" aria-label="Acoes da conversa">
-            <Tooltip
-              text={voiceCallButtonActive ? "Sair da chamada de voz" : "Iniciar ou entrar na chamada de voz"}
-              position="top"
-              delay={180}
-            >
-              <button
-                type="button"
-                className="dm-chat__header-action-btn dm-chat__header-action-btn--icon-only"
-                aria-label={voiceCallButtonActive ? "Sair da chamada de voz" : "Iniciar chamada de voz"}
-                onClick={handleToggleVoiceCall}
-              >
-                <img
-                  className="dm-chat__header-action-icon"
-                  src={voiceCallButtonActive ? headerVoiceHangupIconUrl : headerVoiceCallIconUrl}
-                  alt=""
-                  aria-hidden="true"
-                />
-              </button>
-            </Tooltip>
+            {!voiceCallButtonActive ? (
+              <Tooltip text="Iniciar ou entrar na chamada de voz" position="top" delay={180}>
+                <button
+                  type="button"
+                  className="dm-chat__header-action-btn dm-chat__header-action-btn--icon-only"
+                  aria-label="Iniciar chamada de voz"
+                  onClick={handleToggleVoiceCall}
+                >
+                  <img
+                    className="dm-chat__header-action-icon"
+                    src={headerVoiceCallIconUrl}
+                    alt=""
+                    aria-hidden="true"
+                  />
+                </button>
+              </Tooltip>
+            ) : null}
             <Tooltip text="Chamada de video indisponivel nesta versao" position="top" delay={180}>
               <button
                 type="button"
@@ -5024,6 +5295,41 @@ export default function DirectMessageChatView({
 
       <div className="dm-chat__body">
         <div className="dm-chat__main">
+          {hasIncomingVoiceInvite ? (
+            <section className="dm-chat__rejoin-stage" aria-label="Convite de chamada de voz">
+              <div className="dm-chat__rejoin-stage-surface">
+                <img
+                  className="dm-chat__rejoin-stage-avatar"
+                  src={targetAvatarSrc}
+                  alt={`Avatar de ${incomingVoiceInviteDisplayName}`}
+                  loading="lazy"
+                  onError={(event) => {
+                    const target = event.currentTarget;
+                    if (target.src !== targetFallbackAvatar) {
+                      target.src = targetFallbackAvatar;
+                    }
+                  }}
+                />
+                <p className="dm-chat__rejoin-stage-title">{incomingVoiceInviteDisplayName} iniciou uma chamada de voz</p>
+                <div className="dm-chat__rejoin-stage-controls" role="group" aria-label="Acoes do convite de chamada">
+                  <button
+                    type="button"
+                    className="dm-chat__rejoin-stage-btn dm-chat__rejoin-stage-btn--accept"
+                    onClick={handleAcceptIncomingVoiceInvite}
+                  >
+                    Entrar
+                  </button>
+                  <button
+                    type="button"
+                    className="dm-chat__rejoin-stage-btn dm-chat__rejoin-stage-btn--dismiss"
+                    onClick={handleDismissIncomingVoiceInvite}
+                  >
+                    Agora nao
+                  </button>
+                </div>
+              </div>
+            </section>
+          ) : null}
           {shouldShowVoiceCallPanel ? (
             <div className="dm-chat__voice-call-wrap">
               <VoiceCallInterface
@@ -5036,9 +5342,7 @@ export default function DirectMessageChatView({
                 diagnostics={voiceCallDiagnostics}
                 errorMessage={voiceCallError}
                 onToggleMute={handleToggleVoiceMute}
-                onLeave={() => {
-                  void stopVoiceCallSession();
-                }}
+                onLeave={handleLeaveVoiceCall}
               />
             </div>
           ) : null}

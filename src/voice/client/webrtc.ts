@@ -54,11 +54,22 @@ export interface VoiceDiagnosticsSnapshot {
   peers: VoiceDiagnosticsPeerSnapshot[];
 }
 
+export interface VoiceCallMediaPreferences {
+  inputDeviceId?: string | null;
+  outputDeviceId?: string | null;
+  inputVolumePercent?: number | null;
+  outputVolumePercent?: number | null;
+  echoCancellation?: boolean;
+  noiseSuppression?: boolean;
+  autoGainControl?: boolean;
+}
+
 export interface VoiceCallClientOptions {
   roomId: string;
   self: VoiceUserIdentity;
   peerDirectory?: Record<string, VoiceUserIdentity>;
   signalingUrl?: string;
+  mediaPreferences?: VoiceCallMediaPreferences;
   onParticipantsChanged?: (participants: VoiceParticipantState[]) => void;
   onDiagnostics?: (snapshot: VoiceDiagnosticsSnapshot) => void;
   onConnectionStateChanged?: (state: VoiceConnectionState) => void;
@@ -255,11 +266,35 @@ function normalizeErrorMessage(error: unknown): string {
   return String(error instanceof Error ? error.message : error ?? "").trim() || "Falha na chamada de voz.";
 }
 
+function normalizeMediaPreferences(preferences: VoiceCallMediaPreferences | null | undefined): Required<VoiceCallMediaPreferences> {
+  const normalizedInputDeviceId = String(preferences?.inputDeviceId ?? "").trim();
+  const normalizedOutputDeviceId = String(preferences?.outputDeviceId ?? "").trim();
+  const requestedInputVolume = Number(preferences?.inputVolumePercent ?? 100);
+  const requestedOutputVolume = Number(preferences?.outputVolumePercent ?? 100);
+  const normalizedInputVolume = Number.isFinite(requestedInputVolume)
+    ? Math.max(0, Math.min(100, requestedInputVolume))
+    : 100;
+  const normalizedOutputVolume = Number.isFinite(requestedOutputVolume)
+    ? Math.max(0, Math.min(200, requestedOutputVolume))
+    : 100;
+
+  return {
+    inputDeviceId: normalizedInputDeviceId,
+    outputDeviceId: normalizedOutputDeviceId,
+    inputVolumePercent: normalizedInputVolume,
+    outputVolumePercent: normalizedOutputVolume,
+    echoCancellation: preferences?.echoCancellation ?? true,
+    noiseSuppression: preferences?.noiseSuppression ?? true,
+    autoGainControl: preferences?.autoGainControl ?? true,
+  };
+}
+
 export class VoiceCallClient {
   private readonly roomId: string;
   private readonly self: VoiceUserIdentity;
   private readonly peerDirectory = new Map<string, VoiceUserIdentity>();
   private readonly signalingUrl: string | null;
+  private readonly mediaPreferences: Required<VoiceCallMediaPreferences>;
   private readonly onParticipantsChanged: ((participants: VoiceParticipantState[]) => void) | null;
   private readonly onDiagnostics: ((snapshot: VoiceDiagnosticsSnapshot) => void) | null;
   private readonly onConnectionStateChanged: ((state: VoiceConnectionState) => void) | null;
@@ -288,6 +323,7 @@ export class VoiceCallClient {
       avatarSrc: String(options.self.avatarSrc ?? "").trim(),
     };
     this.signalingUrl = resolveVoiceSignalingUrl(options.signalingUrl);
+    this.mediaPreferences = normalizeMediaPreferences(options.mediaPreferences);
     this.onParticipantsChanged = options.onParticipantsChanged ?? null;
     this.onDiagnostics = options.onDiagnostics ?? null;
     this.onConnectionStateChanged = options.onConnectionStateChanged ?? null;
@@ -370,7 +406,14 @@ export class VoiceCallClient {
     this.leaving = false;
     this.setConnectionState("connecting");
     try {
-      this.localStream = await captureMicrophoneStream();
+      this.localStream = await captureMicrophoneStream({
+        echoCancellation: this.mediaPreferences.echoCancellation,
+        noiseSuppression: this.mediaPreferences.noiseSuppression,
+        autoGainControl: this.mediaPreferences.autoGainControl,
+        channelCount: 1,
+        deviceId: this.mediaPreferences.inputDeviceId,
+        inputVolumePercent: this.mediaPreferences.inputVolumePercent,
+      });
       this.localMuted = false;
       this.updateLocalParticipant({
         muted: false,
@@ -762,7 +805,10 @@ export class VoiceCallClient {
       } else {
         remoteStream.addTrack(event.track);
       }
-      attachRemoteAudioPlayback(remoteStream, userId, this.remoteAudioElements);
+      attachRemoteAudioPlayback(remoteStream, userId, this.remoteAudioElements, {
+        outputDeviceId: this.mediaPreferences.outputDeviceId,
+        outputVolumePercent: this.mediaPreferences.outputVolumePercent,
+      });
     };
 
     connection.onconnectionstatechange = () => {
