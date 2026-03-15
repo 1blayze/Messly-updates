@@ -98,6 +98,11 @@ interface PeerConnectionContext {
   statsAccumulator: PeerStatsAccumulator | null;
 }
 
+interface PendingSpeakingState {
+  speaking: boolean;
+  level: number;
+}
+
 const connectedSignalSchema = z.object({
   type: z.literal("connected"),
   connectionId: z.string().trim().min(1),
@@ -341,6 +346,8 @@ export class VoiceCallClient {
   private readonly participants = new Map<string, VoiceParticipantState>();
   private readonly peers = new Map<string, PeerConnectionContext>();
   private readonly remoteAudioElements = new Map<string, HTMLAudioElement>();
+  private pendingSpeakingState: PendingSpeakingState | null = null;
+  private lastSignalingRttMs: number | null = null;
   private leaving = false;
 
   constructor(options: VoiceCallClientOptions) {
@@ -451,15 +458,22 @@ export class VoiceCallClient {
       });
       this.localVoiceDetector = new VoiceActivityDetector(this.localStream, {
         onSpeakingChange: (speaking, level) => {
+          const normalizedLevel = clamp(level, 0, 1);
           this.updateLocalParticipant({
             speaking,
             speakingLevel: level,
           });
-          this.sendSignal({
-            type: "speaking-state",
+          this.pendingSpeakingState = {
             speaking,
-            level: clamp(level, 0, 1),
-          });
+            level: normalizedLevel,
+          };
+          if (this.joinedRoom) {
+            this.sendSignal({
+              type: "speaking-state",
+              speaking,
+              level: normalizedLevel,
+            });
+          }
         },
         onLevel: (level) => {
           const current = this.participants.get(this.self.userId);
@@ -487,6 +501,8 @@ export class VoiceCallClient {
     this.clearReconnectTimer();
     this.clearIntervals();
     this.clearJoinRetryLoop();
+    this.pendingSpeakingState = null;
+    this.lastSignalingRttMs = null;
 
     this.localVoiceDetector?.stop();
     this.localVoiceDetector = null;
@@ -529,10 +545,12 @@ export class VoiceCallClient {
     this.updateLocalParticipant({
       muted,
     });
-    this.sendSignal({
-      type: "mute-state",
-      muted,
-    });
+    if (this.joinedRoom) {
+      this.sendSignal({
+        type: "mute-state",
+        muted,
+      });
+    }
   }
 
   toggleMuted(): void {
@@ -647,8 +665,17 @@ export class VoiceCallClient {
         this.handleError(new Error("Outra sessao substituiu esta chamada de voz."));
         void this.leave().catch(() => undefined);
         return;
-      case "pong":
+      case "pong": {
+        const nowMs = Date.now();
+        const echoedAtMs = typeof payload.timestamp === "number" ? payload.timestamp : NaN;
+        if (Number.isFinite(echoedAtMs)) {
+          const rttMs = nowMs - echoedAtMs;
+          if (rttMs >= 0 && rttMs <= 120_000) {
+            this.lastSignalingRttMs = Math.round(rttMs);
+          }
+        }
         return;
+      }
       default:
         return;
     }
@@ -662,6 +689,17 @@ export class VoiceCallClient {
     this.updateLocalParticipant({
       connectionState: "connected",
     });
+    this.sendSignal({
+      type: "mute-state",
+      muted: this.localMuted,
+    });
+    if (this.pendingSpeakingState) {
+      this.sendSignal({
+        type: "speaking-state",
+        speaking: this.pendingSpeakingState.speaking,
+        level: this.pendingSpeakingState.level,
+      });
+    }
 
     const presentRemoteUsers = new Set<string>();
     for (const participant of participants) {
@@ -1011,6 +1049,10 @@ export class VoiceCallClient {
 
   private startIntervals(): void {
     this.clearIntervals();
+    this.sendSignal({
+      type: "ping",
+      timestamp: Date.now(),
+    });
 
     this.pingIntervalId = window.setInterval(() => {
       this.sendSignal({
@@ -1052,12 +1094,31 @@ export class VoiceCallClient {
       let packetLossPercent: number | null = null;
       let inboundBytes = 0;
       let outboundBytes = 0;
+      let selectedCandidatePairId: string | null = null;
+      let candidatePairRttMs: number | null = null;
+      let remoteInboundRttMs: number | null = null;
 
       stats.forEach((report) => {
-        if (report.type === "candidate-pair" && (report as RTCStats & { selected?: boolean }).selected) {
-          const candidatePair = report as RTCStats & { currentRoundTripTime?: number };
-          if (typeof candidatePair.currentRoundTripTime === "number") {
-            pingMs = Math.round(candidatePair.currentRoundTripTime * 1_000);
+        if (report.type === "transport") {
+          const transport = report as RTCStats & { selectedCandidatePairId?: string };
+          if (typeof transport.selectedCandidatePairId === "string" && transport.selectedCandidatePairId) {
+            selectedCandidatePairId = transport.selectedCandidatePairId;
+          }
+        }
+
+        if (report.type === "candidate-pair") {
+          const candidatePair = report as RTCStats & {
+            currentRoundTripTime?: number;
+            selected?: boolean;
+            nominated?: boolean;
+            state?: string;
+          };
+          const isActivePair =
+            candidatePair.selected === true ||
+            candidatePair.nominated === true ||
+            candidatePair.state === "succeeded";
+          if (isActivePair && typeof candidatePair.currentRoundTripTime === "number") {
+            candidatePairRttMs = Math.round(candidatePair.currentRoundTripTime * 1_000);
           }
         }
 
@@ -1082,7 +1143,21 @@ export class VoiceCallClient {
           const outbound = report as RTCStats & { bytesSent?: number };
           outboundBytes = typeof outbound.bytesSent === "number" ? outbound.bytesSent : outboundBytes;
         }
+
+        if (report.type === "remote-inbound-rtp" && (report as RTCStats & { kind?: string }).kind === "audio") {
+          const remoteInbound = report as RTCStats & { roundTripTime?: number };
+          if (typeof remoteInbound.roundTripTime === "number") {
+            remoteInboundRttMs = Math.round(remoteInbound.roundTripTime * 1_000);
+          }
+        }
       });
+      if (selectedCandidatePairId) {
+        const selectedPair = stats.get(selectedCandidatePairId) as (RTCStats & { currentRoundTripTime?: number }) | undefined;
+        if (selectedPair && typeof selectedPair.currentRoundTripTime === "number") {
+          candidatePairRttMs = Math.round(selectedPair.currentRoundTripTime * 1_000);
+        }
+      }
+      pingMs = candidatePairRttMs ?? remoteInboundRttMs ?? this.lastSignalingRttMs;
 
       const nowMs = performance.now();
       let inboundBitrateKbps: number | null = null;
