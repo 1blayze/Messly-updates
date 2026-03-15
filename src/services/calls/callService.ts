@@ -1442,6 +1442,13 @@ export class CallService {
       this.debugLog("voice_reconnect_required", {
         reason: toId(toRecord(frame.d).reason) || null,
       });
+      // Drop current transports and socket immediately to avoid sending ops with stale IDs.
+      this.clearConsumeRetries();
+      this.consumerManager.clear("server-reconnect-required");
+      this.producerManager.closeAll("server-reconnect-required");
+      this.transportManager.closeTransports();
+      this.statsSnapshot = null;
+      this.closeSocket(1012, "RECONNECT_REQUIRED");
       this.requestReconnect("server-reconnect-required");
       return;
     }
@@ -1919,6 +1926,8 @@ export class CallService {
       || message.includes("producer cannot be consumed by this peer")
       || message.includes("producer owner not found")
       || message.includes("producer not found")
+      || message.includes("transport not found")
+      || message.includes("m= line") // SDP m-line mismatch; force reconnect
     );
   }
 }
