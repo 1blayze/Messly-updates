@@ -378,7 +378,8 @@ export class GatewayApplication {
 
     const ipAddress = extractClientIpFromHeaders(request.headers, String(request.socket.remoteAddress ?? ""));
     const rateLimitBucket = requestUrl.pathname === "/voice" ? "upgrade:voice" : "upgrade:gateway";
-    if (!(await this.assertRateLimit(`${rateLimitBucket}:${ipAddress}`, 30, 60_000))) {
+    const rateLimitMax = requestUrl.pathname === "/voice" ? 120 : 30;
+    if (!(await this.assertRateLimit(`${rateLimitBucket}:${ipAddress}`, rateLimitMax, 60_000))) {
       rejectUpgrade(socket, 429, {
         error: "rate_limited",
       });
