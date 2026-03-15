@@ -15,6 +15,7 @@ const SIGNALING_PING_INTERVAL_MS = 5_000;
 const SIGNALING_RECONNECT_BASE_DELAY_MS = 800;
 const SIGNALING_RECONNECT_MAX_DELAY_MS = 8_000;
 const DIAGNOSTICS_POLL_INTERVAL_MS = 2_000;
+const JOIN_RETRY_INTERVAL_MS = 2_500;
 const DEFAULT_AUDIO_MAX_BITRATE = 32_000;
 
 const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
@@ -308,6 +309,7 @@ export class VoiceCallClient {
   private reconnectAttempt = 0;
   private pingIntervalId: number | null = null;
   private diagnosticsIntervalId: number | null = null;
+  private joinRetryIntervalId: number | null = null;
   private localStream: MediaStream | null = null;
   private localVoiceDetector: VoiceActivityDetector | null = null;
   private readonly participants = new Map<string, VoiceParticipantState>();
@@ -458,6 +460,7 @@ export class VoiceCallClient {
     this.joinedRoom = false;
     this.clearReconnectTimer();
     this.clearIntervals();
+    this.clearJoinRetryLoop();
 
     this.localVoiceDetector?.stop();
     this.localVoiceDetector = null;
@@ -548,6 +551,7 @@ export class VoiceCallClient {
       }
 
       this.joinedRoom = false;
+      this.clearJoinRetryLoop();
       if (this.leaving) {
         return;
       }
@@ -561,14 +565,9 @@ export class VoiceCallClient {
       // No-op: close flow handles reconnect.
     });
 
-    const accessToken = await getSupabaseAccessToken().catch(() => null);
-    this.sendSignal({
-      type: "join",
-      roomId: this.roomId,
-      userId: this.self.userId,
-      displayName: this.self.displayName,
-      accessToken: accessToken ?? undefined,
-    });
+    this.joinedRoom = false;
+    void this.sendJoinSignal();
+    this.startJoinRetryLoop();
   }
 
   private handleSignalingMessage(raw: string): void {
@@ -631,6 +630,7 @@ export class VoiceCallClient {
 
   private handleJoinedRoom(participants: JoinedParticipant[]): void {
     this.joinedRoom = true;
+    this.clearJoinRetryLoop();
     this.reconnectAttempt = 0;
     this.setConnectionState("connected");
     this.updateLocalParticipant({
@@ -903,6 +903,35 @@ export class VoiceCallClient {
     };
     parameters.encodings = encodings;
     void sender.setParameters(parameters).catch(() => undefined);
+  }
+
+  private async sendJoinSignal(): Promise<void> {
+    const accessToken = await getSupabaseAccessToken().catch(() => null);
+    this.sendSignal({
+      type: "join",
+      roomId: this.roomId,
+      userId: this.self.userId,
+      displayName: this.self.displayName,
+      accessToken: accessToken ?? undefined,
+    });
+  }
+
+  private startJoinRetryLoop(): void {
+    this.clearJoinRetryLoop();
+    this.joinRetryIntervalId = window.setInterval(() => {
+      if (this.joinedRoom || this.leaving) {
+        this.clearJoinRetryLoop();
+        return;
+      }
+      void this.sendJoinSignal();
+    }, JOIN_RETRY_INTERVAL_MS);
+  }
+
+  private clearJoinRetryLoop(): void {
+    if (this.joinRetryIntervalId != null) {
+      window.clearInterval(this.joinRetryIntervalId);
+      this.joinRetryIntervalId = null;
+    }
   }
 
   private sendSignal(payload: Record<string, unknown>): void {
