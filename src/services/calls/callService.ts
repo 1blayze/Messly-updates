@@ -531,6 +531,11 @@ export class CallService {
   private voiceUrl: string | null;
   private socket: WebSocket | null = null;
   private readonly manualCloseSockets = new WeakSet<WebSocket>();
+  // Voice WS heartbeat/ping (signaling RTT). This is used as a ping fallback when media stats are unavailable.
+  private heartbeatIntervalMs = 15_000;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private pendingPingStartedAtMs: number | null = null;
+  private lastSignalPingMs: number | null = null;
   private pendingReply: {
     op: string;
     resolve: (value: Record<string, unknown>) => void;
@@ -547,6 +552,7 @@ export class CallService {
   private readonly mediaManager: MediaDeviceManager;
   private readonly reconnectManager: ReconnectManager;
   private connectionState: RTCPeerConnectionState = "new";
+  private audioProducerPaused: boolean | null = null;
   private remoteAudioWatchdog: ReturnType<typeof setTimeout> | null = null;
   private statsSnapshot: VoiceStatsSnapshot | null = null;
   private readonly consumeRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -769,7 +775,21 @@ export class CallService {
   }
 
   toggleMute(): boolean {
-    return this.mediaManager.toggleMute();
+    const micEnabled = this.mediaManager.toggleMute();
+    if (this.isSessionActive()) {
+      void this.callGraphLock
+        .runExclusive(async () => {
+          await this.syncAudioProducerPauseState("toggleMute");
+        })
+        .catch((error) => {
+          if (this.isRecoverableCallError(error)) {
+            this.requestReconnect("toggle-mute-recoverable");
+            return;
+          }
+          this.emitError(error);
+        });
+    }
+    return micEnabled;
   }
 
   toggleCamera(): boolean {
@@ -836,11 +856,12 @@ export class CallService {
     const stats = await this.collectVoiceStats();
     const nowMs = Date.now();
     const previousSnapshot = this.statsSnapshot;
-    const nextSmoothedPing = stats.currentRttMs == null
+    const rawPingMs = stats.currentRttMs ?? this.lastSignalPingMs ?? null;
+    const nextSmoothedPing = rawPingMs == null
       ? previousSnapshot?.smoothedPingMs ?? null
       : previousSnapshot?.smoothedPingMs == null
-        ? stats.currentRttMs
-        : (previousSnapshot.smoothedPingMs * 0.75) + (stats.currentRttMs * 0.25);
+        ? rawPingMs
+        : (previousSnapshot.smoothedPingMs * 0.75) + (rawPingMs * 0.25);
 
     let outboundBitrateKbps: number | null = null;
     let inboundBitrateKbps: number | null = null;
@@ -880,7 +901,7 @@ export class CallService {
 
     return {
       averagePingMs: nextSmoothedPing,
-      lastPingMs: stats.currentRttMs,
+      lastPingMs: rawPingMs,
       packetLossPercent: stats.packetLossPercent,
       connectionType: stats.remoteCandidateType ?? stats.localCandidateType ?? null,
       localCandidateType: stats.localCandidateType,
@@ -925,6 +946,7 @@ export class CallService {
       this.sessionManager.setSession(null);
       this.sessionManager.transition("destroyed", "call.close");
       this.statsSnapshot = null;
+      this.audioProducerPaused = null;
       this.debugLog("call_ended", {
         reason: "manual-close",
       });
@@ -1150,6 +1172,7 @@ export class CallService {
     this.producerManager.closeAll("transport-rebuild");
     this.transportManager.closeTransports();
     this.statsSnapshot = null;
+    this.audioProducerPaused = null;
 
     await this.transportManager.setup(routerRtpCapabilities, sendTransport, recvTransport);
     this.scheduleRemoteAudioWatchdog();
@@ -1223,6 +1246,7 @@ export class CallService {
 
     try {
       await this.producerManager.syncAudio(sendTransport, audioTrack);
+      await this.syncAudioProducerPauseState(`syncAudio:${scope}`);
     } catch (error) {
       if (isTrackEndedError(error)) {
         this.debugLog("track_ended", {
@@ -1240,6 +1264,7 @@ export class CallService {
             }
             throw retryError;
           });
+          await this.syncAudioProducerPauseState(`syncAudio:recovered:${scope}`);
         }
       } else if (isQueueStoppedError(error)) {
         this.requestReconnect("audio-producer-queue-stopped");
@@ -1307,6 +1332,8 @@ export class CallService {
           this.debugLog("socket_open", {
             url: this.voiceUrl,
           });
+          // Start heartbeat with the default interval; HELLO can override it later.
+          this.startHeartbeat(this.heartbeatIntervalMs);
           settle(() => resolve());
         },
         { once: true },
@@ -1332,6 +1359,7 @@ export class CallService {
           this.socket = null;
         }
 
+        this.stopHeartbeat();
         this.rejectPendingReply(new Error("Socket de voz fechado."));
 
         if (!opened) {
@@ -1393,6 +1421,31 @@ export class CallService {
       return;
     }
 
+    if (frame.op === "HELLO") {
+      const payload = toRecord(frame.d);
+      const heartbeatMs = toFiniteNumber(payload.heartbeatIntervalMs);
+      if (heartbeatMs != null) {
+        this.startHeartbeat(heartbeatMs);
+      }
+      this.debugLog("voice_hello", {
+        heartbeatIntervalMs: heartbeatMs ?? null,
+      });
+      return;
+    }
+
+    if (frame.op === "PONG") {
+      this.handlePong();
+      return;
+    }
+
+    if (frame.op === "RECONNECT_REQUIRED") {
+      this.debugLog("voice_reconnect_required", {
+        reason: toId(toRecord(frame.d).reason) || null,
+      });
+      this.requestReconnect("server-reconnect-required");
+      return;
+    }
+
     if (frame.op === "PRODUCER_ADDED") {
       const producerPayload = toRecord(frame.d);
       const producerId = toId(producerPayload.producerId);
@@ -1403,13 +1456,31 @@ export class CallService {
         });
         return;
       }
+
+      // A producer can arrive before we finish rebuilding transports/device (especially on join/reconnect).
+      // If we try to consume immediately with missing transport/device, we silently drop the producer forever.
+      // Queue a retry so we eventually consume once transports are ready.
+      if (!this.transportManager.getRecvTransport() || !this.transportManager.getDevice()) {
+        this.debugLog("consumer_deferred", {
+          reason: "missing-transport",
+          producerId,
+        });
+        this.scheduleConsumeRetry(producerPayload, "producer-added-missing-transport");
+        return;
+      }
+
       void this.callGraphLock
         .runExclusive(async () => {
-          await this.consumerManager.consumeProducer(
-            producerPayload,
-            this.transportManager.getRecvTransport(),
-            this.transportManager.getDevice(),
-          );
+          const recvTransport = this.transportManager.getRecvTransport();
+          const device = this.transportManager.getDevice();
+          if (!recvTransport || !device) {
+            this.scheduleConsumeRetry(producerPayload, "producer-added-missing-transport");
+            return;
+          }
+          await this.consumerManager.consumeProducer(producerPayload, recvTransport, device);
+          if (producerId && !this.consumerManager.hasConsumerForProducer(producerId)) {
+            this.scheduleConsumeRetry(producerPayload, "producer-added-no-consumer");
+          }
         })
         .catch((error) => {
           if (this.isProducerConsumeRaceError(error)) {
@@ -1728,11 +1799,96 @@ export class CallService {
     if (this.socket === currentSocket) {
       this.socket = null;
     }
+    this.stopHeartbeat();
   }
 
   private emitError(error: unknown): void {
     const casted = error instanceof Error ? error : new Error(String(error ?? "Falha na chamada."));
     this.options.onError?.(casted);
+  }
+
+  /**
+   * Ensures the server knows whether our microphone is muted by pausing/resuming the audio producer.
+   * This helps remote peers display mute state correctly and prevents "muted but still sending RTP" scenarios.
+   */
+  private async syncAudioProducerPauseState(scope: string): Promise<void> {
+    if (!this.isSessionActive()) {
+      return;
+    }
+    const producerId = this.producerManager.getAudioProducerId();
+    if (!producerId) {
+      this.audioProducerPaused = null;
+      return;
+    }
+
+    const shouldPause = !this.mediaManager.isMicEnabled();
+    if (this.audioProducerPaused === shouldPause) {
+      return;
+    }
+
+    this.producerManager.setAudioPaused(shouldPause, scope);
+
+    const op = shouldPause ? "PRODUCER_PAUSE" : "PRODUCER_RESUME";
+    const expectedOp = shouldPause ? "PRODUCER_PAUSED" : "PRODUCER_RESUMED";
+    try {
+      await this.request(op, { producerId }, expectedOp);
+      this.audioProducerPaused = shouldPause;
+    } catch (error) {
+      // If the socket is in a bad state, reconnect and let syncProducers restore state.
+      if (this.isRecoverableCallError(error)) {
+        this.requestReconnect("audio-producer-pause-sync-failed");
+        return;
+      }
+      throw error;
+    }
+  }
+
+  private startHeartbeat(intervalMsRaw: number): void {
+    const intervalMs = Math.max(5_000, Math.min(30_000, Math.floor(Number(intervalMsRaw) || 15_000)));
+    this.heartbeatIntervalMs = intervalMs;
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+    }
+    // Send a ping immediately and then at the configured interval.
+    this.sendPing();
+    this.heartbeatTimer = setInterval(() => {
+      this.sendPing();
+    }, intervalMs);
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+    this.pendingPingStartedAtMs = null;
+  }
+
+  private sendPing(): void {
+    const socket = this.socket;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    // Only allow one in-flight ping at a time so we can calculate RTT without a nonce.
+    if (this.pendingPingStartedAtMs != null) {
+      return;
+    }
+    this.pendingPingStartedAtMs = performance.now();
+    try {
+      socket.send(JSON.stringify({ op: "PING", d: { clientTime: new Date().toISOString() } }));
+    } catch {
+      this.pendingPingStartedAtMs = null;
+    }
+  }
+
+  private handlePong(): void {
+    if (this.pendingPingStartedAtMs == null) {
+      return;
+    }
+    const rttMs = Math.max(0, performance.now() - this.pendingPingStartedAtMs);
+    this.pendingPingStartedAtMs = null;
+    // Do not smooth here; smoothing is done in getVoiceDiagnostics to keep one source of truth.
+    this.lastSignalPingMs = rttMs;
   }
 
   private assertNotDisposed(): void {

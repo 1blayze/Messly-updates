@@ -192,4 +192,48 @@ export class ProducerManager {
     }
     return this.audioProducer.track ?? null;
   }
+
+  /**
+   * Returns the active audio producer id (if any). Useful for signaling mute/unmute to the SFU.
+   */
+  getAudioProducerId(): string | null {
+    if (!this.audioProducer || this.audioProducer.closed) {
+      return null;
+    }
+    return this.audioProducer.id;
+  }
+
+  /**
+   * Pause/resume the local audio producer (client-side). Server-side pause/resume must be signaled separately.
+   */
+  setAudioPaused(paused: boolean, reason = "toggle"): void {
+    const producer = this.audioProducer;
+    if (!producer || producer.closed) {
+      return;
+    }
+    try {
+      if (paused) {
+        producer.pause();
+        this.debugLog("producer_paused", {
+          kind: "audio",
+          producerId: producer.id,
+          reason,
+        });
+      } else {
+        producer.resume();
+        this.debugLog("producer_resumed", {
+          kind: "audio",
+          producerId: producer.id,
+          reason,
+        });
+      }
+    } catch (error) {
+      this.debugLog("producer_pause_failed", {
+        kind: "audio",
+        producerId: producer.id,
+        reason,
+        message: error instanceof Error ? error.message : String(error ?? ""),
+      });
+    }
+  }
 }
