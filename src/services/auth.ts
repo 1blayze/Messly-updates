@@ -540,16 +540,12 @@ class AuthService {
         return true;
       }
 
-      if (isSupabaseSessionCorruptedError(result.error)) {
-        await clearSessionState();
-      }
       if (lastValidatedEdgeAccessToken?.token === accessToken) {
         lastValidatedEdgeAccessToken = null;
       }
       return false;
     } catch (error) {
       if (isSupabaseSessionCorruptedError(error)) {
-        await clearSessionState();
         if (lastValidatedEdgeAccessToken?.token === accessToken) {
           lastValidatedEdgeAccessToken = null;
         }
@@ -792,7 +788,6 @@ class AuthService {
     try {
       refreshedSession = await this.refreshSession();
     } catch {
-      await clearSessionState();
       return null;
     }
     const refreshedAccessToken = String(refreshedSession?.access_token ?? "").trim();
@@ -808,8 +803,6 @@ class AuthService {
       // loops against Supabase Edge Functions like spotify-connections.
       return null;
     }
-
-    await clearSessionState();
     return null;
   }
 
