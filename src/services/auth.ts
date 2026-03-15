@@ -1,4 +1,4 @@
-import type { Session } from "@supabase/supabase-js";
+import type { AuthChangeEvent, Session } from "@supabase/supabase-js";
 import appPackage from "../../package.json";
 import {
   AuthApiError,
@@ -9,6 +9,7 @@ import {
   signup as signupRequest,
   verifyEmail as verifyEmailRequest,
   type AuthClientDescriptor,
+  type AuthTokenApiResponse,
 } from "../api/authApi";
 import { getRuntimeAppApiUrl, getRuntimeAuthApiUrl } from "../config/runtimeApiConfig";
 import { supabase, supabaseUrl } from "../lib/supabaseClient";
@@ -87,7 +88,7 @@ function isBase64Url(str: string): boolean {
   return /^[A-Za-z0-9\-_]+$/.test(str) && str.length % 4 !== 1;
 }
 
-function isLikelyJwt(tokenRaw: string | null | undefined): boolean {
+function isLikelyJwt(tokenRaw: string | null | undefined): tokenRaw is string {
   const token = String(tokenRaw ?? "").trim();
   if (!token) return false;
   const parts = token.split(".");
@@ -191,6 +192,14 @@ function clearSupabaseLocalSessionStorage(): void {
   }
 }
 
+async function setPendingVerificationState(state: PendingVerificationState | null): Promise<void> {
+  if (!state) {
+    await removeSecureItem(PENDING_VERIFICATION_KEY).catch(() => undefined);
+    return;
+  }
+  await setSecureJson(PENDING_VERIFICATION_KEY, state);
+}
+
 /** ------------------------------------------------------------------------
  * AuthService
  * --------------------------------------------------------------------- */
@@ -211,7 +220,7 @@ class AuthService {
     if (this.authStateSyncInitialized) return;
     this.authStateSyncInitialized = true;
     void this.ensureLegacyCleanup();
-    supabase.auth.onAuthStateChange((event, nextSession) => {
+    supabase.auth.onAuthStateChange((event: AuthChangeEvent, nextSession) => {
       if (event === "SIGNED_OUT") {
         void this.clearLocalSession();
         return;
@@ -227,8 +236,6 @@ class AuthService {
       this.edgeTokenCache = null;
       if (nextSession?.refresh_token) {
         void saveRefreshToken(nextSession.refresh_token).catch(() => undefined);
-      } else if (event === "SIGNED_OUT") {
-        void clearRefreshToken().catch(() => undefined);
       }
     });
   }
@@ -332,10 +339,11 @@ class AuthService {
   }
 
   private async isAccessTokenAcceptedBySupabaseRemote(accessToken: string | null): Promise<boolean> {
-    if (!isLikelyJwt(accessToken)) return false;
-    if (this.canReuseEdgeToken(accessToken)) return true;
+    const token = String(accessToken ?? "").trim();
+    if (!isLikelyJwt(token)) return false;
+    if (this.canReuseEdgeToken(token)) return true;
     const result = await withTimeout(
-      supabase.auth.getUser(accessToken!),
+      supabase.auth.getUser(token),
       AUTH_TOKEN_VALIDATION_TIMEOUT_MS,
       "Tempo limite ao validar token no Supabase.",
     ).catch((error) => {
@@ -347,7 +355,7 @@ class AuthService {
       return false;
     }
     const ok = Boolean((result as { data?: { user?: unknown } })?.data?.user);
-    if (ok) this.markEdgeTokenValidated(accessToken!);
+    if (ok) this.markEdgeTokenValidated(token);
     return ok;
   }
 
@@ -375,8 +383,9 @@ class AuthService {
         createdAt: Date.now(),
       };
       await setPendingVerificationState(state);
-      if (response.session) {
-        await this.applyRemoteSession(response.access_token, response.refresh_token);
+      const maybeTokenResponse = response as unknown as Partial<AuthTokenApiResponse & { session?: Session }>;
+      if (maybeTokenResponse.access_token && maybeTokenResponse.refresh_token) {
+        await this.applyRemoteSession(maybeTokenResponse.access_token, maybeTokenResponse.refresh_token);
       }
       return state;
     } catch (error) {
