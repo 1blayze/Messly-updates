@@ -248,12 +248,24 @@ function normalizeIceServer(
     return null;
   }
 
+  const normalizedUrls = urls.filter((url) => {
+    const lower = url.toLowerCase();
+    if (lower.startsWith("stun:") || lower.startsWith("stuns:")) {
+      // Chrome rejects STUN urls with query params like `?transport=udp`.
+      return !url.includes("?");
+    }
+    return lower.startsWith("turn:") || lower.startsWith("turns:");
+  });
+  if (normalizedUrls.length === 0) {
+    return null;
+  }
+
   const username = typeof record.username === "string" ? record.username : defaults.username;
   const credential = typeof record.credential === "string" ? record.credential : defaults.credential;
-  const isTurnServer = urls.some((url) => url.startsWith("turn:") || url.startsWith("turns:"));
+  const isTurnServer = normalizedUrls.some((url) => url.startsWith("turn:") || url.startsWith("turns:"));
 
   const server: RTCIceServer = {
-    urls,
+    urls: normalizedUrls,
   };
   if (isTurnServer) {
     if (username) {
@@ -295,7 +307,7 @@ function parseIceServersFromEnv(): RTCIceServer[] {
   // Best-effort defaults (STUN only). For strict NATs, configure TURN via VITE_WEBRTC_ICE_SERVERS_JSON.
   return [
     { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] },
-    { urls: ["stun:global.stun.twilio.com:3478?transport=udp"] },
+    { urls: ["stun:global.stun.twilio.com:3478"] },
   ];
 }
 
@@ -449,15 +461,40 @@ function buildAnswer(session: VoiceSession): Record<string, unknown> {
 }
 
 async function captureAudioTrack(settings: NormalizedAudioSettings): Promise<MediaStreamTrack> {
-  const stream = await navigator.mediaDevices.getUserMedia({
-    audio: {
-      noiseSuppression: settings.noiseSuppression,
-      echoCancellation: settings.echoCancellation,
-      autoGainControl: settings.autoGainControl,
-      ...(settings.inputDeviceId ? { deviceId: { exact: settings.inputDeviceId } } : {}),
-    },
-    video: false,
-  });
+  const baseConstraints: MediaTrackConstraints = {
+    noiseSuppression: settings.noiseSuppression,
+    echoCancellation: settings.echoCancellation,
+    autoGainControl: settings.autoGainControl,
+  };
+
+  const isOverconstrainedDeviceId = (error: unknown): boolean => {
+    const record = error && typeof error === "object" ? (error as Record<string, unknown>) : null;
+    const name = error instanceof Error ? error.name : String(record?.name ?? "").trim();
+    if (name.toLowerCase() !== "overconstrainederror") {
+      return false;
+    }
+    const constraint = String(record?.constraint ?? "").trim().toLowerCase();
+    return constraint === "deviceid" || constraint === "device-id" || constraint.includes("device");
+  };
+
+  const getStream = async (useDeviceId: boolean): Promise<MediaStream> => {
+    const audio: MediaTrackConstraints = useDeviceId && settings.inputDeviceId
+      ? { ...baseConstraints, deviceId: { exact: settings.inputDeviceId } }
+      : baseConstraints;
+    return navigator.mediaDevices.getUserMedia({ audio, video: false });
+  };
+
+  let stream: MediaStream;
+  try {
+    stream = await getStream(true);
+  } catch (error) {
+    // If the saved deviceId no longer exists (USB headset unplugged, etc), retry with the default mic.
+    if (settings.inputDeviceId && isOverconstrainedDeviceId(error)) {
+      stream = await getStream(false);
+    } else {
+      throw error;
+    }
+  }
   const track = stream.getAudioTracks()[0];
   if (!track) {
     throw new Error("Nao foi possivel capturar o microfone.");
