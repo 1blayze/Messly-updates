@@ -150,6 +150,19 @@ function describeWebRtcError(error: unknown): string {
   }
 }
 
+function sanitizeSdpForInterop(sdpRaw: string, streamIdHint: string): string {
+  const sdp = String(sdpRaw ?? "");
+  if (!sdp) {
+    return sdp;
+  }
+
+  // Some Chromium builds have generated `msid:- <trackId>` when transceivers have no stream association.
+  // Other builds reject it as invalid SDP. Rewrite the stream id to a stable, non-empty token.
+  const hint = String(streamIdHint ?? "").trim() || `messly-${Date.now().toString(36)}`;
+  const safeStreamId = hint.startsWith("messly-") ? hint : `messly-${hint}`;
+  return sdp.replace(/msid:-/g, `msid:${safeStreamId}`);
+}
+
 function toCandidateAddress(candidateRaw: unknown): string {
   const candidate = toRecord(candidateRaw);
   return String(candidate.address ?? candidate.ip ?? "").trim().toLowerCase();
@@ -2278,9 +2291,25 @@ export class CallService {
 
     // Keep m-line order stable by creating transceivers once. We'll replaceTrack later when local media changes.
     try {
-      this.p2pAudioTransceiver = peer.addTransceiver("audio", { direction: "sendrecv" });
+      const audioTrack = this.mediaManager.getAudioTrack();
+      const videoTrack = session.mode === "video" ? this.mediaManager.getPreferredVideoTrack() : null;
+      const sendStream = new MediaStream();
+      if (audioTrack) {
+        sendStream.addTrack(audioTrack);
+      }
+      if (videoTrack) {
+        sendStream.addTrack(videoTrack);
+      }
+      const streamsInit = { streams: [sendStream] };
+
+      this.p2pAudioTransceiver = audioTrack
+        ? peer.addTransceiver(audioTrack, { direction: "sendrecv", ...streamsInit })
+        : peer.addTransceiver("audio", { direction: "sendrecv", ...streamsInit });
+
       if (session.mode === "video") {
-        this.p2pVideoTransceiver = peer.addTransceiver("video", { direction: "sendrecv" });
+        this.p2pVideoTransceiver = videoTrack
+          ? peer.addTransceiver(videoTrack, { direction: "sendrecv", ...streamsInit })
+          : peer.addTransceiver("video", { direction: "sendrecv", ...streamsInit });
       } else {
         this.p2pVideoTransceiver = null;
       }
@@ -2492,10 +2521,11 @@ export class CallService {
     if (!sdp) {
       throw new Error("Falha ao gerar oferta P2P.");
     }
+    const sanitizedSdp = sanitizeSdpForInterop(sdp, session.callId);
 
     this.sessionManager.mutateSession((current) => ({
       ...current,
-      offerSdp: sdp,
+      offerSdp: sanitizedSdp,
     }));
 
     this.debugLog("p2p_offer_created", {
@@ -2511,7 +2541,8 @@ export class CallService {
       return false;
     }
 
-    const offer: RTCSessionDescriptionInit = { type: "offer", sdp: offerSdp };
+    const normalizedOfferSdp = sanitizeSdpForInterop(offerSdp, session.callId);
+    const offer: RTCSessionDescriptionInit = { type: "offer", sdp: normalizedOfferSdp };
     const offerCollision = this.p2pMakingOffer || peer.signalingState !== "stable";
     this.p2pIgnoreOffer = !this.p2pPolite && offerCollision;
     if (this.p2pIgnoreOffer) {
@@ -2533,7 +2564,8 @@ export class CallService {
       throw new Error(`Falha ao criar resposta P2P (${scope}). ${describeWebRtcError(error)}`);
     }
 
-    const answerSdp = String(peer.localDescription?.sdp ?? "").trim();
+    const answerSdpRaw = String(peer.localDescription?.sdp ?? "").trim();
+    const answerSdp = sanitizeSdpForInterop(answerSdpRaw, session.callId);
     if (!answerSdp) {
       throw new Error("Falha ao gerar resposta P2P.");
     }
@@ -2555,7 +2587,8 @@ export class CallService {
     }
 
     try {
-      await peer.setRemoteDescription({ type: "answer", sdp: answerSdp });
+      const normalizedAnswerSdp = sanitizeSdpForInterop(answerSdp, session.callId);
+      await peer.setRemoteDescription({ type: "answer", sdp: normalizedAnswerSdp });
       await this.flushP2pRemoteIceCandidates(scope);
       this.debugLog("p2p_answer_applied", { scope });
     } catch (error) {
