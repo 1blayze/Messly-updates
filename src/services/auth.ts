@@ -692,12 +692,20 @@ class AuthService {
       }
     }
 
-    const localSignOut = await supabase.auth.signOut({ scope: "local" });
-    if (localSignOut.error) {
-      throw localSignOut.error;
+    try {
+      const localSignOut = await supabase.auth.signOut({ scope: "local" });
+      if (localSignOut.error) {
+        throw localSignOut.error;
+      }
+    } catch (error) {
+      // Mesmo se o Supabase devolver 401/403 (ex.: session_not_found), limpamos o estado local
+      if (import.meta.env.DEV) {
+        console.warn("[auth] logout local fallback after signOut error", error);
+      }
+    } finally {
+      await clearSessionState().catch(() => undefined);
+      await setPendingVerificationState(null).catch(() => undefined);
     }
-    await clearSessionState();
-    await setPendingVerificationState(null);
   }
 
   async clearLocalSession(): Promise<void> {
