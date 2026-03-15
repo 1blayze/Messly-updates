@@ -1,4 +1,4 @@
-import type { Session, User } from "@supabase/supabase-js";
+import type { Session } from "@supabase/supabase-js";
 import appPackage from "../../package.json";
 import {
   AuthApiError,
@@ -22,7 +22,9 @@ import {
 import { clearRefreshToken, loadRefreshToken, saveRefreshToken } from "./auth/refreshTokenStorage";
 import { getSecureJson, removeSecureItem, setSecureJson } from "./auth/secureStorage";
 
-/** ---------------------------- Constantes ----------------------------- */
+/** ------------------------------------------------------------------------
+ * Constantes
+ * --------------------------------------------------------------------- */
 const PENDING_VERIFICATION_KEY = "messly.auth.pending-verification";
 const LEGACY_SESSION_STORAGE_KEY = "messly.auth.session";
 const SESSION_REFRESH_BUFFER_MS = 30_000;
@@ -32,7 +34,9 @@ const AUTH_SESSION_REFRESH_TIMEOUT_MS = 10_000;
 const AUTH_LOGIN_TIMEOUT_MS = 12_000;
 const AUTH_TOKEN_VALIDATION_TIMEOUT_MS = 8_000;
 
-/** ---------------------------- Tipos ----------------------------- */
+/** ------------------------------------------------------------------------
+ * Tipos
+ * --------------------------------------------------------------------- */
 export interface PendingVerificationState {
   email: string;
   expiresAt: string | null;
@@ -59,13 +63,12 @@ interface NormalizedErrorInfo {
   details: string;
 }
 
-/** ---------------------------- Helpers ----------------------------- */
+/** ------------------------------------------------------------------------
+ * Helpers puros
+ * --------------------------------------------------------------------- */
 function resolveClientDescriptor(): AuthClientDescriptor {
   const descriptor = buildAuthClientDescriptor();
-  return {
-    ...descriptor,
-    version: String(descriptor.version || appPackage.version || "0.0.5"),
-  };
+  return { ...descriptor, version: String(descriptor.version || appPackage.version || "0.0.5") };
 }
 
 async function withTimeout<T>(task: Promise<T>, timeoutMs: number, message: string): Promise<T> {
@@ -80,19 +83,6 @@ async function withTimeout<T>(task: Promise<T>, timeoutMs: number, message: stri
   }
 }
 
-async function setPendingVerificationState(state: PendingVerificationState | null): Promise<void> {
-  if (!state) {
-    await removeSecureItem(PENDING_VERIFICATION_KEY);
-    return;
-  }
-  await setSecureJson(PENDING_VERIFICATION_KEY, state);
-}
-
-function isSessionExpiringSoon(session: Session | null): boolean {
-  const expiresAt = typeof session?.expires_at === "number" ? session.expires_at * 1000 : 0;
-  return !expiresAt || expiresAt <= Date.now() + SESSION_REFRESH_BUFFER_MS;
-}
-
 function isBase64Url(str: string): boolean {
   return /^[A-Za-z0-9\-_]+$/.test(str) && str.length % 4 !== 1;
 }
@@ -101,8 +91,7 @@ function isLikelyJwt(tokenRaw: string | null | undefined): boolean {
   const token = String(tokenRaw ?? "").trim();
   if (!token) return false;
   const parts = token.split(".");
-  if (parts.length !== 3) return false;
-  return parts.every((p) => p.length > 0 && isBase64Url(p));
+  return parts.length === 3 && parts.every((p) => p.length > 0 && isBase64Url(p));
 }
 
 function normalizeErrorInfo(error: unknown): NormalizedErrorInfo {
@@ -159,297 +148,303 @@ function shouldFallbackToDirectSupabaseLogin(error: unknown): boolean {
 }
 
 function shouldPreferDirectSupabaseLogin(): boolean {
+  // Ambientes desktop empacotados podem exigir auth via API; mantemos flag de override.
   const flag = String(import.meta.env.VITE_MESSLY_ALLOW_DIRECT_SUPABASE_AUTH_FALLBACK ?? "").trim().toLowerCase();
   return flag === "1" || flag === "true";
 }
 
-/** ---------------------------- AuthService ----------------------------- */
+function shouldPreferDirectSupabaseSignup(): boolean {
+  return shouldPreferDirectSupabaseLogin();
+}
+
+function isSessionExpiringSoon(session: Session | null): boolean {
+  const expiresAt = typeof session?.expires_at === "number" ? session.expires_at * 1000 : 0;
+  return !expiresAt || expiresAt <= Date.now() + SESSION_REFRESH_BUFFER_MS;
+}
+
+/** Limpa tokens do Supabase no localStorage (inclusive keys legadas). */
+function clearSupabaseLocalSessionStorage(): void {
+  if (typeof window === "undefined") return;
+  let projectRef = "";
+  try {
+    projectRef = String(new URL(supabaseUrl).hostname.split(".")[0] ?? "").trim();
+  } catch {
+    projectRef = "";
+  }
+  const patterns = [
+    /^sb-[a-z0-9_-]+-auth-token$/i,
+    /^sb-[a-z0-9_-]+-auth-token-code-verifier$/i,
+  ];
+  if (projectRef) {
+    patterns.push(new RegExp(`^sb-${projectRef}-auth-token$`, "i"));
+    patterns.push(new RegExp(`^sb-${projectRef}-auth-token-code-verifier$`, "i"));
+  }
+  try {
+    const keys: string[] = [];
+    for (let i = 0; i < window.localStorage.length; i += 1) {
+      const key = String(window.localStorage.key(i) ?? "");
+      if (patterns.some((p) => p.test(key))) keys.push(key);
+    }
+    keys.forEach((k) => window.localStorage.removeItem(k));
+  } catch {
+    // ignore
+  }
+}
+
+/** ------------------------------------------------------------------------
+ * AuthService
+ * --------------------------------------------------------------------- */
 class AuthService {
-  /** Single-flight para refresh de sessão. */
   private refreshSessionPromise: Promise<Session | null> | null = null;
-  /** Cache de validação de token para Edge Function. */
   private edgeTokenCache: { token: string; validatedAt: number } | null = null;
-  /** Flags de inicialização. */
   private authStateSyncInitialized = false;
   private legacySessionCleanupStarted = false;
 
-  /** Single-flight helper para evitar corridas. */
-  private runSingleFlight<T>(key: "refresh" | "edge", fn: () => Promise<T>): Promise<T> {
-    if (key === "refresh") {
-      if (this.refreshSessionPromise) return this.refreshSessionPromise as Promise<T>;
-      const task = fn().finally(() => {
-        this.refreshSessionPromise = null;
-      }) as Promise<T>;
-      this.refreshSessionPromise = task as Promise<Session | null>;
-      return task;
-    }
-    return fn(); // edge: não reusa promise, só evita globais.
-  }
-
-  /** Limpa sessão local (memória + storage). */
-  private async clearSessionState(): Promise<void> {
-    setInMemorySession(null);
-    await clearAccessToken();
-    await clearRefreshToken();
-  }
-
-  /** Remove storage legado uma vez. */
-  private async cleanupLegacySessionOnce(): Promise<void> {
+  /* ------------------------ Infra interna ------------------------ */
+  private async ensureLegacyCleanup(): Promise<void> {
     if (this.legacySessionCleanupStarted) return;
     this.legacySessionCleanupStarted = true;
-    try {
-      await removeSecureItem(LEGACY_SESSION_STORAGE_KEY);
-    } catch {
-      // ignore
-    }
+    await removeSecureItem(LEGACY_SESSION_STORAGE_KEY).catch(() => undefined);
   }
 
-  /** Escuta eventos do Supabase e mantém store local em sincronia. */
   private initAuthStateSync(): void {
     if (this.authStateSyncInitialized) return;
-    supabase.auth.onAuthStateChange((event, session) => {
+    this.authStateSyncInitialized = true;
+    void this.ensureLegacyCleanup();
+    supabase.auth.onAuthStateChange((event, nextSession) => {
       if (event === "SIGNED_OUT") {
         void this.clearLocalSession();
         return;
       }
-      if ((event === "SIGNED_IN" || event === "TOKEN_REFRESHED") && session) {
-        setInMemorySession(session);
+      if (event === "INITIAL_SESSION" && !nextSession) {
+        // Não apaga store se houver refresh token persistido; evita logout indevido.
+        void this.hasStoredSessionHint().then((hint) => {
+          if (!hint) setInMemorySession(null);
+        });
+        return;
+      }
+      setInMemorySession(nextSession);
+      this.edgeTokenCache = null;
+      if (nextSession?.refresh_token) {
+        void saveRefreshToken(nextSession.refresh_token).catch(() => undefined);
+      } else if (event === "SIGNED_OUT") {
+        void clearRefreshToken().catch(() => undefined);
       }
     });
-    this.authStateSyncInitialized = true;
   }
 
-  /** Obtém sessão atual do Supabase com timeout. */
-  private async getCurrentSession(): Promise<Session | null> {
-    await this.cleanupLegacySessionOnce();
-    return withTimeout(
-      supabase.auth.getSession().then((r) => r.data.session ?? null),
-      AUTH_SESSION_READ_TIMEOUT_MS,
-      "Timeout ao ler sessão."
-    );
+  private async clearSessionState(): Promise<void> {
+    setInMemorySession(null);
+    this.edgeTokenCache = null;
+    clearSupabaseLocalSessionStorage();
+    await supabase.auth.signOut({ scope: "local" }).catch(() => undefined);
+    clearSupabaseLocalSessionStorage();
+    await removeSecureItem(LEGACY_SESSION_STORAGE_KEY).catch(() => undefined);
+    await clearRefreshToken();
+    await clearAccessToken();
   }
 
-  /** Valida token com Supabase (usado para Edge Functions). */
-  private async isAccessTokenAcceptedBySupabase(token: string | null): Promise<boolean> {
-    if (!isLikelyJwt(token)) return false;
-    return withTimeout(
-      supabase.auth.getUser(token!).then((r) => Boolean(r.data.user)),
-      AUTH_TOKEN_VALIDATION_TIMEOUT_MS,
-      "Timeout ao validar token."
-    ).catch(() => false);
-  }
-
-  /** Token atual, se não expira logo. */
-  async getCurrentAccessToken(): Promise<string | null> {
-    const currentSession = getInMemorySession();
-    const currentToken = String(currentSession?.access_token ?? "").trim();
-    if (currentToken && isLikelyJwt(currentToken) && !isSessionExpiringSoon(currentSession)) {
-      return currentToken;
+  private async persistSessionState(session: Session | null, fallbackRefreshToken?: string | null): Promise<void> {
+    setInMemorySession(session);
+    this.edgeTokenCache = null;
+    await removeSecureItem(LEGACY_SESSION_STORAGE_KEY).catch(() => undefined);
+    const nextRefresh = String(session?.refresh_token ?? fallbackRefreshToken ?? "").trim();
+    if (nextRefresh) {
+      await saveRefreshToken(nextRefresh);
+    } else {
+      await clearRefreshToken();
     }
-    const session = await this.getCurrentSession();
-    const accessToken = String(session?.access_token ?? "").trim();
-    return isLikelyJwt(accessToken) ? accessToken : null;
   }
 
-  /** Token validado para Edge Functions (cache 15s + single-flight). */
-  async getValidatedEdgeAccessToken(): Promise<string | null> {
-    return this.runSingleFlight("edge", async () => {
-      const now = Date.now();
-      if (this.edgeTokenCache && this.edgeTokenCache.validatedAt + EDGE_ACCESS_TOKEN_VALIDATION_TTL_MS > now) {
-        return this.edgeTokenCache.token;
-      }
-
-      const tryValidate = async (token: string | null): Promise<string | null> => {
-        if (!isLikelyJwt(token)) return null;
-        if (await this.isAccessTokenAcceptedBySupabase(token)) return token;
-        return null;
-      };
-
-      const current = await this.getCurrentAccessToken();
-      const validatedCurrent = await tryValidate(current);
-      if (validatedCurrent) {
-        this.edgeTokenCache = { token: validatedCurrent, validatedAt: now };
-        return validatedCurrent;
-      }
-
-      const refreshed = await this.refreshSession();
-      const refreshedToken = String(refreshed?.access_token ?? "").trim();
-      const validatedRefreshed = await tryValidate(refreshedToken);
-      if (validatedRefreshed) {
-        this.edgeTokenCache = { token: validatedRefreshed, validatedAt: Date.now() };
-        return validatedRefreshed;
-      }
-
-      await this.clearSessionState();
-      return null;
-    });
-  }
-
-  /** Refresh de sessão protegido contra corrida. */
-  async refreshSession(): Promise<Session | null> {
-    return this.runSingleFlight("refresh", async () => {
-      const currentSession = getInMemorySession();
-      const supabaseSession = await this.getCurrentSession();
-      const refreshToken =
-        String(currentSession?.refresh_token ?? "").trim() ||
-        String(supabaseSession?.refresh_token ?? "").trim() ||
-        (await loadRefreshToken());
-
-      if (!refreshToken) {
-        await this.clearSessionState();
-        return null;
-      }
-
-      try {
-        const refreshed = await withTimeout(
-          supabase.auth.refreshSession({ refresh_token: refreshToken }).then((r) => r.data.session ?? null),
-          AUTH_SESSION_REFRESH_TIMEOUT_MS,
-          "Timeout ao atualizar sessão."
-        );
-        if (refreshed?.access_token) {
-          setInMemorySession(refreshed);
-          await saveRefreshToken(String(refreshed.refresh_token ?? ""));
-          return refreshed;
-        }
-      } catch (error) {
-        if (isInvalidRefreshTokenError(error)) {
+  private async readSupabaseClientSession(): Promise<Session | null> {
+    await this.ensureLegacyCleanup();
+    try {
+      const result = await withTimeout(
+        supabase.auth.getSession(),
+        AUTH_SESSION_READ_TIMEOUT_MS,
+        "Tempo limite ao ler sessão local do Supabase.",
+      );
+      if (result.error) {
+        if (isSupabaseSessionCorruptedError(result.error)) {
           await this.clearSessionState();
           return null;
         }
-        throw error;
+        throw result.error;
       }
-
-      await this.clearSessionState();
-      return null;
-    });
-  }
-
-  /** Login via API própria com fallback Supabase direto. */
-  async login(email: string, password: string): Promise<Session | null> {
-    this.initAuthStateSync();
-    await this.cleanupLegacySessionOnce();
-
-    const descriptor = resolveClientDescriptor();
-
-    const signInWithDirectSupabase = async (e: string, p: string): Promise<Session> => {
-      const { data, error } = await supabase.auth.signInWithPassword({ email: e, password: p });
-      if (error || !data.session) throw error ?? new Error("Falha no login Supabase.");
-      setInMemorySession(data.session);
-      await saveRefreshToken(String(data.session.refresh_token ?? ""));
-      return data.session;
-    };
-
-    let session: Session;
-    try {
-      const response = await withTimeout(
-        loginRequest({ email, password, client: descriptor }),
-        AUTH_LOGIN_TIMEOUT_MS,
-        "Timeout ao fazer login."
-      );
-      if (!response?.access_token || !response?.refresh_token) {
-        throw new Error("Resposta de login incompleta.");
-      }
-
-      const applied = await supabase.auth.setSession({
-        access_token: response.access_token,
-        refresh_token: response.refresh_token,
-      });
-
-      session = applied.data.session ?? null;
-      if (!session) {
-        await clearRefreshToken();
-        await clearAccessToken();
-        throw new Error("Sessão não retornada; verificação de email pode ser necessária.");
-      }
-
-      let tokenAccepted = true;
-      try {
-        tokenAccepted = await this.isAccessTokenAcceptedBySupabase(session.access_token);
-      } catch {
-        tokenAccepted = false;
-      }
-      if (!tokenAccepted) {
-        await this.clearSessionState();
-        session = await signInWithDirectSupabase(email, password);
-      }
+      const session = result.data.session ?? null;
+      if (session) setInMemorySession(session);
+      return session;
     } catch (error) {
-      const canFallback = shouldFallbackToDirectSupabaseLogin(error) || isSupabaseSessionCorruptedError(error);
-      if (!canFallback) throw error;
-      await this.clearSessionState().catch(() => undefined);
-      session = await signInWithDirectSupabase(email, password);
+      if (isSupabaseSessionCorruptedError(error)) {
+        await this.clearSessionState();
+        return null;
+      }
+      throw error;
     }
-
-    return session;
   }
 
-  /** Signup via API própria com fallback Supabase direto; guarda estado pendente. */
-  async signup(input: SignupInput): Promise<void> {
-    this.initAuthStateSync();
-    await this.cleanupLegacySessionOnce();
+  /** Single-flight para refresh; evita concorrência. */
+  private async refreshSessionWithStoredToken(refreshTokenRaw?: string | null): Promise<Session | null> {
+    if (this.refreshSessionPromise) return this.refreshSessionPromise;
 
-    const descriptor = resolveClientDescriptor();
-
-    const signUpDirect = async (): Promise<void> => {
-      const { data, error } = await supabase.auth.signUp({
-        email: input.email,
-        password: input.password,
-        options: {
-          emailRedirectTo: `${getRuntimeAppApiUrl()}/verify-email`,
-          data: {
-            display_name: input.profile?.displayName ?? null,
-            username: input.profile?.username ?? null,
-          },
-        },
-      });
-      if (error) throw error;
-      if (!data.session) {
-        await setPendingVerificationState({
-          email: input.email,
-          expiresAt: null,
-          maxAttempts: null,
-          createdAt: Date.now(),
-        });
+    this.refreshSessionPromise = (async () => {
+      const token = String(refreshTokenRaw ?? "").trim() || (await loadRefreshToken());
+      if (!token) {
+        await this.clearSessionState();
+        return null;
       }
-    };
+
+      const result = await withTimeout(
+        supabase.auth.refreshSession({ refresh_token: token }),
+        AUTH_SESSION_REFRESH_TIMEOUT_MS,
+        "Tempo limite ao renovar sessão.",
+      );
+
+      if (result.error) {
+        if (isInvalidRefreshTokenError(result.error)) {
+          await this.clearSessionState();
+          return null;
+        }
+        throw result.error;
+      }
+
+      const session = result.data.session ?? null;
+      await this.persistSessionState(session, token);
+      return session;
+    })();
+
+    try {
+      return await this.refreshSessionPromise;
+    } finally {
+      this.refreshSessionPromise = null;
+    }
+  }
+
+  private canReuseEdgeToken(token: string): boolean {
+    return (
+      this.edgeTokenCache?.token === token &&
+      Date.now() - (this.edgeTokenCache?.validatedAt ?? 0) < EDGE_ACCESS_TOKEN_VALIDATION_TTL_MS
+    );
+  }
+
+  private markEdgeTokenValidated(token: string): void {
+    this.edgeTokenCache = { token, validatedAt: Date.now() };
+  }
+
+  private async isAccessTokenAcceptedBySupabaseRemote(accessToken: string | null): Promise<boolean> {
+    if (!isLikelyJwt(accessToken)) return false;
+    if (this.canReuseEdgeToken(accessToken)) return true;
+    const result = await withTimeout(
+      supabase.auth.getUser(accessToken!),
+      AUTH_TOKEN_VALIDATION_TIMEOUT_MS,
+      "Tempo limite ao validar token no Supabase.",
+    ).catch((error) => {
+      if (isSupabaseSessionCorruptedError(error)) return { error };
+      throw error;
+    });
+    if ((result as { error?: unknown })?.error) {
+      await this.clearSessionState();
+      return false;
+    }
+    const ok = Boolean((result as { data?: { user?: unknown } })?.data?.user);
+    if (ok) this.markEdgeTokenValidated(accessToken!);
+    return ok;
+  }
+
+  /* ------------------------ API pública ------------------------ */
+  requiresSignupSecurityVerification(): boolean {
+    return !shouldPreferDirectSupabaseSignup();
+  }
+
+  async signup(input: SignupInput): Promise<PendingVerificationState> {
+    if (shouldPreferDirectSupabaseSignup()) {
+      await this.signUpWithDirectSupabase(input);
+      await setPendingVerificationState(null);
+      return { email: input.email, expiresAt: null, maxAttempts: null, createdAt: Date.now() };
+    }
 
     try {
       const response = await signupRequest({
         ...input,
-        client: descriptor,
-        appUrl: getRuntimeAppApiUrl(),
-        authUrl: getRuntimeAuthApiUrl(),
+        client: resolveClientDescriptor(),
       });
-
-      if (response?.pendingVerification) {
-        await setPendingVerificationState({
-          email: input.email,
-          expiresAt: response.pendingVerification.expiresAt ?? null,
-          maxAttempts: response.pendingVerification.maxAttempts ?? null,
-          createdAt: Date.now(),
-        });
+      const state: PendingVerificationState = {
+        email: response.email,
+        expiresAt: response.expires_at ?? null,
+        maxAttempts: response.max_attempts ?? null,
+        createdAt: Date.now(),
+      };
+      await setPendingVerificationState(state);
+      if (response.session) {
+        await this.applyRemoteSession(response.access_token, response.refresh_token);
       }
-
-      if (response?.session) {
-        const s = response.session as Session;
-        setInMemorySession(s);
-        await saveRefreshToken(String(s.refresh_token ?? ""));
-      }
+      return state;
     } catch (error) {
-      const canFallback = shouldFallbackToDirectSupabaseLogin(error);
-      if (!canFallback) throw error;
-      await signUpDirect();
+      if (!shouldFallbackToDirectSupabaseLogin(error)) throw error;
+      await this.signUpWithDirectSupabase(input);
+      await setPendingVerificationState(null);
+      return { email: input.email, expiresAt: null, maxAttempts: null, createdAt: Date.now() };
     }
   }
 
-  async resendVerification(email: string): Promise<void> {
-    await resendVerificationRequest({ email, client: resolveClientDescriptor() });
+  async resendVerification(emailRaw?: string | null): Promise<PendingVerificationState> {
+    const current = await this.getPendingVerification();
+    const email = String(emailRaw ?? current?.email ?? "").trim();
+    if (!email) throw new Error("Pending verification email is missing.");
+    const response = await resendVerificationRequest(email);
+    const state: PendingVerificationState = {
+      email: response.email,
+      expiresAt: response.expires_at ?? null,
+      maxAttempts: response.max_attempts ?? null,
+      createdAt: Date.now(),
+    };
+    await setPendingVerificationState(state);
+    return state;
   }
 
-  async verifyEmail(code: string): Promise<void> {
-    await verifyEmailRequest({ code, client: resolveClientDescriptor() });
+  async verifyEmailCode(email: string, code: string): Promise<Session> {
+    const response = await verifyEmailRequest({ email, code, client: resolveClientDescriptor() });
+    const session = await this.applyRemoteSession(response.access_token, response.refresh_token);
+    await setPendingVerificationState(null);
+    return session;
   }
 
-  /** Logout: tenta API própria e Supabase; sempre limpa estado local. */
+  async login(email: string, password: string): Promise<Session> {
+    if (shouldPreferDirectSupabaseLogin()) {
+      const session = await this.signInWithDirectSupabase(email, password);
+      await setPendingVerificationState(null);
+      return session;
+    }
+
+    let session: Session;
+    try {
+      const response = await loginRequest({ email, password, client: resolveClientDescriptor() });
+      session = await this.applyRemoteSession(response.access_token, response.refresh_token);
+
+      // valida token emitido pela API própria; se falhar, cai para Supabase direto
+      let accepted = true;
+      try {
+        accepted = await this.isAccessTokenAcceptedBySupabaseRemote(session.access_token);
+      } catch (err) {
+        if (import.meta.env.DEV) console.warn("[auth:login] validação remota indisponível", err);
+        accepted = false;
+      }
+      if (!accepted) {
+        await this.clearSessionState();
+        session = await this.signInWithDirectSupabase(email, password);
+      }
+    } catch (error) {
+      const fallback =
+        shouldFallbackToDirectSupabaseLogin(error) || (!(error instanceof AuthApiError) && isSupabaseSessionCorruptedError(error));
+      if (!fallback) throw error;
+      await this.clearSessionState().catch(() => undefined);
+      session = await this.signInWithDirectSupabase(email, password);
+    }
+
+    await setPendingVerificationState(null);
+    return session;
+  }
+
   async logout(): Promise<void> {
     const currentSession = getInMemorySession() ?? (await this.getCurrentSession());
     const accessToken = String(currentSession?.access_token ?? "").trim();
@@ -463,12 +458,10 @@ class AuthService {
     }
 
     try {
-      const localSignOut = await supabase.auth.signOut({ scope: "local" });
-      if (localSignOut.error) throw localSignOut.error;
+      const res = await supabase.auth.signOut({ scope: "local" });
+      if (res.error) throw res.error;
     } catch (error) {
-      if (import.meta.env.DEV) {
-        console.warn("[auth] logout local fallback after signOut error", error);
-      }
+      if (import.meta.env.DEV) console.warn("[auth] signOut local falhou", error);
     } finally {
       await this.clearSessionState().catch(() => undefined);
       await setPendingVerificationState(null).catch(() => undefined);
@@ -480,37 +473,135 @@ class AuthService {
     await setPendingVerificationState(null);
   }
 
+  async refreshSession(): Promise<Session | null> {
+    const current = getInMemorySession();
+    const clientSession = await this.readSupabaseClientSession();
+    const refreshToken =
+      String(current?.refresh_token ?? "").trim() || String(clientSession?.refresh_token ?? "").trim();
+    if (!refreshToken) {
+      await this.clearSessionState();
+      return null;
+    }
+    const next = await this.refreshSessionWithStoredToken(refreshToken);
+    if (next?.access_token && !isLikelyJwt(next.access_token)) {
+      await this.clearSessionState();
+      return null;
+    }
+    return next;
+  }
+
+  async getCurrentSession(): Promise<Session | null> {
+    const mem = getInMemorySession();
+    if (mem && isLikelyJwt(mem.access_token) && !isSessionExpiringSoon(mem)) return mem;
+
+    const client = await this.readSupabaseClientSession();
+    if (client && isLikelyJwt(client.access_token) && !isSessionExpiringSoon(client)) return client;
+
+    const refreshToken =
+      String(mem?.refresh_token ?? "").trim() || String(client?.refresh_token ?? "").trim() || (await loadRefreshToken());
+    if (refreshToken) return this.refreshSessionWithStoredToken(refreshToken);
+    return this.refreshSessionWithStoredToken();
+  }
+
+  async getCurrentAccessToken(): Promise<string | null> {
+    const session = await this.getCurrentSession();
+    const token = String(session?.access_token ?? "").trim();
+    return isLikelyJwt(token) ? token : null;
+  }
+
+  async getValidatedEdgeAccessToken(): Promise<string | null> {
+    const current = await this.getCurrentAccessToken();
+    try {
+      if (await this.isAccessTokenAcceptedBySupabaseRemote(current)) return current;
+    } catch (error) {
+      if (import.meta.env.DEV) console.warn("[auth] falha ao validar token atual para Edge", error);
+    }
+
+    try {
+      const refreshed = await this.refreshSession();
+      const token = String(refreshed?.access_token ?? "").trim();
+      if (await this.isAccessTokenAcceptedBySupabaseRemote(token)) return token;
+    } catch (error) {
+      if (import.meta.env.DEV) console.warn("[auth] falha ao validar token renovado para Edge", error);
+      return null;
+    }
+
+    await this.clearSessionState();
+    return null;
+  }
+
   async getCurrentUserId(): Promise<string | null> {
-    const fromStore = getCurrentUserIdFromStore();
-    if (fromStore) return fromStore;
+    const storeId = getCurrentUserIdFromStore();
+    if (storeId) return storeId;
     const session = await this.getCurrentSession();
     return String(session?.user?.id ?? "").trim() || null;
   }
 
   async hasStoredSessionHint(): Promise<boolean> {
-    const memorySession = getInMemorySession();
-    const memoryAccessToken = String(memorySession?.access_token ?? "").trim();
-    const memoryRefreshToken = String(memorySession?.refresh_token ?? "").trim();
-    if (isLikelyJwt(memoryAccessToken) || Boolean(memoryRefreshToken)) return true;
+    const mem = getInMemorySession();
+    const memAccess = String(mem?.access_token ?? "").trim();
+    const memRefresh = String(mem?.refresh_token ?? "").trim();
+    if (isLikelyJwt(memAccess) || Boolean(memRefresh)) return true;
 
-    const clientSession = await this.getCurrentSession();
-    const clientAccessToken = String(clientSession?.access_token ?? "").trim();
-    const clientRefreshToken = String(clientSession?.refresh_token ?? "").trim();
-    if (isLikelyJwt(clientAccessToken) || Boolean(clientRefreshToken)) return true;
+    const client = await this.readSupabaseClientSession();
+    const clientAccess = String(client?.access_token ?? "").trim();
+    const clientRefresh = String(client?.refresh_token ?? "").trim();
+    if (isLikelyJwt(clientAccess) || Boolean(clientRefresh)) return true;
 
-    const storedRefresh = await loadRefreshToken();
-    return Boolean(storedRefresh);
+    const storedRefresh = await loadRefreshToken().catch(() => null);
+    return Boolean(String(storedRefresh ?? "").trim());
   }
 
-  getSupabasePublishableKey(): string {
-    const key = String(import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY ?? "").trim();
-    if (key) return key;
-    const legacyAnon = String(import.meta.env.VITE_SUPABASE_ANON_KEY ?? "").trim();
-    return legacyAnon;
+  async getPendingVerification(): Promise<PendingVerificationState | null> {
+    return getSecureJson<PendingVerificationState>(PENDING_VERIFICATION_KEY);
   }
 
-  getSupabaseUrl(): string {
-    return supabaseUrl;
+  /* ------------------------ Auxiliares privados (signup/login) ------------------------ */
+  private async applyRemoteSession(accessToken: string, refreshToken: string): Promise<Session> {
+    const result = await withTimeout(
+      supabase.auth.setSession({ access_token: accessToken, refresh_token: refreshToken }),
+      AUTH_LOGIN_TIMEOUT_MS,
+      "Tempo limite ao aplicar sessão remota.",
+    );
+    if (result.error || !result.data.session) {
+      throw result.error ?? new Error("Supabase session was not returned.");
+    }
+    const session = result.data.session;
+    await this.persistSessionState(session, refreshToken);
+    return session;
+  }
+
+  private async signInWithDirectSupabase(email: string, password: string): Promise<Session> {
+    const res = await withTimeout(
+      supabase.auth.signInWithPassword({ email, password }),
+      AUTH_LOGIN_TIMEOUT_MS,
+      "Tempo limite ao autenticar direto no Supabase.",
+    );
+    if (res.error || !res.data.session) throw res.error ?? new Error("Supabase session was not returned.");
+    const session = res.data.session;
+    await this.persistSessionState(session, session.refresh_token ?? null);
+    return session;
+  }
+
+  private async signUpWithDirectSupabase(input: SignupInput): Promise<Session | null> {
+    const meta: Record<string, string> = {};
+    const displayName = String(input.profile?.displayName ?? "").trim();
+    const username = String(input.profile?.username ?? "").trim();
+    if (displayName) meta.display_name = displayName;
+    if (username) meta.username = username;
+
+    const res = await supabase.auth.signUp({
+      email: input.email,
+      password: input.password,
+      options: { data: meta, emailRedirectTo: `${getRuntimeAppApiUrl()}/verify-email` },
+    });
+    if (res.error) throw res.error;
+    if (res.data.session) {
+      const session = res.data.session;
+      await this.persistSessionState(session, session.refresh_token ?? null);
+      return session;
+    }
+    return null; // comum quando email verification é obrigatória
   }
 }
 
