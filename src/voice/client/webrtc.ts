@@ -659,6 +659,9 @@ export class VoiceCallClient {
         });
         return;
       case "error":
+        if (payload.code === "NOT_IN_ROOM" && !this.joinedRoom) {
+          return;
+        }
         this.handleError(toError(payload.message, payload.code));
         return;
       case "replaced":
