@@ -67,8 +67,10 @@ export function toFriendlySupabaseAuthError(error: unknown): string {
     return "Email ou senha incorretos.";
   }
 
-  if ((status === 401 || status === 403) && !normalized.includes("verification") && !normalized.includes("otp")) {
-    return "Email ou senha incorretos.";
+  if (status === 401 || status === 403) {
+    if (!normalized.includes("verification")) {
+      return "Email ou senha incorretos.";
+    }
   }
 
   if (normalized.includes("user already registered")) {
