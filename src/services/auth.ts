@@ -351,7 +351,6 @@ class AuthService {
       throw error;
     });
     if ((result as { error?: unknown })?.error) {
-      await this.clearSessionState();
       return false;
     }
     const ok = Boolean((result as { data?: { user?: unknown } })?.data?.user);
