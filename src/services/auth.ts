@@ -95,6 +95,12 @@ function isLikelyJwt(tokenRaw: string | null | undefined): tokenRaw is string {
   return parts.length === 3 && parts.every((p) => p.length > 0 && isBase64Url(p));
 }
 
+function assertLikelyJwt(token: string, context: string): void {
+  if (!isLikelyJwt(token)) {
+    throw new Error(`[auth] Token inválido (${context})`);
+  }
+}
+
 function normalizeErrorInfo(error: unknown): NormalizedErrorInfo {
   const toStr = (v: unknown) => (typeof v === "string" ? v : "");
   const statusCandidate = (error as { status?: unknown })?.status;
@@ -226,7 +232,6 @@ class AuthService {
         return;
       }
       if (event === "INITIAL_SESSION" && !nextSession) {
-        // Não apaga store se houver refresh token persistido; evita logout indevido.
         void this.hasStoredSessionHint().then((hint) => {
           if (!hint) setInMemorySession(null);
         });
@@ -256,7 +261,7 @@ class AuthService {
     this.edgeTokenCache = null;
     await removeSecureItem(LEGACY_SESSION_STORAGE_KEY).catch(() => undefined);
     const nextRefresh = String(session?.refresh_token ?? fallbackRefreshToken ?? "").trim();
-    if (nextRefresh) {
+    if (nextRefresh && isLikelyJwt(nextRefresh)) {
       await saveRefreshToken(nextRefresh);
     } else {
       await clearRefreshToken();
@@ -296,6 +301,10 @@ class AuthService {
 
     this.refreshSessionPromise = (async () => {
       const token = String(refreshTokenRaw ?? "").trim() || (await loadRefreshToken());
+      if (!isLikelyJwt(token)) {
+        await this.clearSessionState();
+        return null;
+      }
       if (!token) {
         await this.clearSessionState();
         return null;
@@ -490,6 +499,10 @@ class AuthService {
       await this.clearSessionState();
       return null;
     }
+    if (!isLikelyJwt(refreshToken)) {
+      await this.clearSessionState();
+      return null;
+    }
     const next = await this.refreshSessionWithStoredToken(refreshToken);
     if (next?.access_token && !isLikelyJwt(next.access_token)) {
       await this.clearSessionState();
@@ -507,7 +520,11 @@ class AuthService {
 
     const refreshToken =
       String(mem?.refresh_token ?? "").trim() || String(client?.refresh_token ?? "").trim() || (await loadRefreshToken());
-    if (refreshToken) return this.refreshSessionWithStoredToken(refreshToken);
+    if (isLikelyJwt(refreshToken)) return this.refreshSessionWithStoredToken(refreshToken);
+    if (refreshToken) {
+      await this.clearSessionState();
+      return null;
+    }
     return this.refreshSessionWithStoredToken();
   }
 
@@ -566,6 +583,8 @@ class AuthService {
 
   /* ------------------------ Auxiliares privados (signup/login) ------------------------ */
   private async applyRemoteSession(accessToken: string, refreshToken: string): Promise<Session> {
+    assertLikelyJwt(accessToken, "access");
+    assertLikelyJwt(refreshToken, "refresh");
     const result = await withTimeout(
       supabase.auth.setSession({ access_token: accessToken, refresh_token: refreshToken }),
       AUTH_LOGIN_TIMEOUT_MS,
@@ -587,6 +606,9 @@ class AuthService {
     );
     if (res.error || !res.data.session) throw res.error ?? new Error("Supabase session was not returned.");
     const session = res.data.session;
+    if (!isLikelyJwt(session.access_token) || !isLikelyJwt(session.refresh_token ?? "")) {
+      throw new Error("[auth] Supabase retornou tokens inválidos");
+    }
     await this.persistSessionState(session, session.refresh_token ?? null);
     return session;
   }
@@ -606,6 +628,9 @@ class AuthService {
     if (res.error) throw res.error;
     if (res.data.session) {
       const session = res.data.session;
+      if (!isLikelyJwt(session.access_token) || !isLikelyJwt(session.refresh_token ?? "")) {
+        throw new Error("[auth] Supabase retornou tokens inválidos");
+      }
       await this.persistSessionState(session, session.refresh_token ?? null);
       return session;
     }
