@@ -1,6 +1,7 @@
 export function toFriendlySupabaseAuthError(error: unknown): string {
   const message = String((error as { message?: unknown } | null)?.message ?? "").trim();
   const normalized = message.toLowerCase();
+  const status = Number((error as { status?: unknown } | null)?.status ?? 0);
   const code = String((error as { code?: unknown } | null)?.code ?? "").trim();
   const rawDetails = (error as { details?: unknown } | null)?.details;
   const details =
@@ -10,6 +11,10 @@ export function toFriendlySupabaseAuthError(error: unknown): string {
         ? JSON.stringify(rawDetails).toLowerCase()
         : "";
   const normalizedCode = code.toUpperCase();
+
+  if (normalized.includes("blocked_by_client") || normalized.includes("err_blocked_by_client")) {
+    return "A requisição foi bloqueada por um ad-blocker ou extensão. Desative para prosseguir.";
+  }
 
   if (normalizedCode === "EMAIL_ALREADY_REGISTERED") {
     return "Este e-mail já está cadastrado.";
@@ -54,7 +59,15 @@ export function toFriendlySupabaseAuthError(error: unknown): string {
     return "Falha na verificação de segurança. Tente novamente.";
   }
 
-  if (normalized.includes("invalid login credentials")) {
+  if (
+    normalized.includes("invalid login credentials") ||
+    normalized.includes("invalid credentials") ||
+    normalizedCode === "INVALID_CREDENTIALS"
+  ) {
+    return "Email ou senha incorretos.";
+  }
+
+  if ((status === 401 || status === 403) && !normalized.includes("verification") && !normalized.includes("otp")) {
     return "Email ou senha incorretos.";
   }
 
