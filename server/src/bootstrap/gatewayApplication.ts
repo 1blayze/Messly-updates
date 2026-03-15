@@ -41,6 +41,7 @@ import { AuthRouter } from "../auth/router";
 import { MediaRouter } from "../media/router";
 import { AuthSessionManager, type SessionClientInfo } from "../sessions/sessionManager";
 import { extractClientIpFromHeaders } from "../sessions/loginLocation";
+import { VoiceSignalingServer } from "../voice/signalingServer";
 
 function getInstanceId(): string {
   return String(process.env.K_REVISION ?? process.env.HOSTNAME ?? randomUUID()).trim() || randomUUID();
@@ -122,6 +123,7 @@ export class GatewayApplication {
   private readonly presence: RedisPresenceService;
   private readonly registry = new ConnectionRegistry();
   private readonly typing: TypingCoordinator;
+  private readonly voiceSignaling: VoiceSignalingServer;
   private readonly server = http.createServer();
   private readonly wss: WebSocketServer;
   private heartbeatSweepTimer: NodeJS.Timeout | null = null;
@@ -201,6 +203,12 @@ export class GatewayApplication {
       Math.max(env.resumeTtlSeconds, Math.ceil(env.clientTimeoutMs / 1_000) * 2),
     );
     this.typing = new TypingCoordinator(this.publisher, env.typingTtlMs);
+    this.voiceSignaling = new VoiceSignalingServer({
+      logger: this.logger.child({ subsystem: "voice-signaling" }),
+      maxPayloadBytes: env.maxPayloadBytes,
+      isAllowedOrigin: (origin) => this.isAllowedOrigin(origin),
+      validateAccessToken: async (token) => this.validateToken(token),
+    });
     this.backpressureBytes = env.maxPayloadBytes * 4;
     this.wss = new WebSocketServer({
       noServer: true,
@@ -285,6 +293,7 @@ export class GatewayApplication {
 
       this.heartbeatSweepTimer && clearInterval(this.heartbeatSweepTimer);
       this.instanceHeartbeatTimer && clearInterval(this.instanceHeartbeatTimer);
+      this.voiceSignaling.close();
       this.wss.close();
       await this.bridge.stop();
       await this.bus.stop();
@@ -298,6 +307,10 @@ export class GatewayApplication {
   }
 
   private async handleUpgrade(request: IncomingMessage, socket: UpgradeSocket, head: Buffer): Promise<void> {
+    if (this.voiceSignaling.handleUpgrade(request, socket, head, { draining: this.draining })) {
+      return;
+    }
+
     const requestUrl = new URL(request.url ?? "/", "http://messly.local");
     if (requestUrl.pathname !== "/gateway") {
       rejectUpgrade(socket, 404, {
@@ -348,7 +361,7 @@ export class GatewayApplication {
       baseCorsHeaders["access-control-allow-headers"] = "authorization,content-type,x-client-version";
     }
 
-    if ((url.pathname === "/gateway" || url.pathname === "/gateway/")
+    if ((url.pathname === "/gateway" || url.pathname === "/gateway/" || url.pathname === "/voice" || url.pathname === "/voice/")
       && request.method?.toUpperCase() === "OPTIONS") {
       response.writeHead(204, {
         ...baseCorsHeaders,
@@ -414,6 +427,23 @@ export class GatewayApplication {
       return;
     }
 
+    if (url.pathname === "/voice" || url.pathname === "/voice/") {
+      response.writeHead(426, {
+        ...baseCorsHeaders,
+        "content-type": "application/json",
+        "cache-control": "no-store",
+        connection: "Upgrade",
+        upgrade: "websocket",
+      });
+      response.end(
+        JSON.stringify({
+          error: "upgrade_required",
+          message: "Use WebSocket upgrade for /voice.",
+        }),
+      );
+      return;
+    }
+
     if (await this.authRouter.handle(request, response)) {
       return;
     }
@@ -432,6 +462,8 @@ export class GatewayApplication {
         service: "messly-gateway",
         instanceId: this.instanceId,
         activeConnections: this.registry.count(),
+        activeVoiceConnections: this.voiceSignaling.getActiveConnectionCount(),
+        activeVoiceRooms: this.voiceSignaling.getActiveRoomCount(),
       }),
     );
   }

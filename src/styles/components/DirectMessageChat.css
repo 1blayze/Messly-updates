@@ -46,6 +46,16 @@
   border-right: 0;
 }
 
+.dm-chat__voice-call-wrap {
+  flex: 0 0 auto;
+  padding: 10px 10px 0;
+}
+
+.dm-chat__voice-call-wrap .voice-call-panel {
+  width: 100%;
+  max-width: 100%;
+}
+
 .dm-chat__rejoin-stage {
   flex: 0 0 auto;
   padding: 10px 14px 12px;
@@ -792,6 +802,30 @@
   cursor: not-allowed;
 }
 
+.dm-chat__header-action-btn--icon-only,
+.dm-chat__header-action-btn--icon-only:hover,
+.dm-chat__header-action-btn--icon-only:focus-visible {
+  background: transparent;
+}
+
+.dm-chat__header-action-btn--icon-only:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.3);
+  outline-offset: 2px;
+}
+
+.dm-chat__header-action-icon {
+  width: 18px;
+  height: 18px;
+  display: block;
+  opacity: 0.88;
+  transition: opacity 120ms ease;
+}
+
+.dm-chat__header-action-btn--icon-only:hover .dm-chat__header-action-icon,
+.dm-chat__header-action-btn--icon-only:focus-visible .dm-chat__header-action-icon {
+  opacity: 1;
+}
+
 .dm-chat__header-tools {
   margin-left: auto;
   min-width: 0;
@@ -856,6 +890,10 @@
 @media (max-width: 760px) {
   .dm-chat__header-search {
     width: min(150px, 44vw);
+  }
+
+  .dm-chat__voice-call-wrap {
+    padding: 8px 8px 0;
   }
 }
 

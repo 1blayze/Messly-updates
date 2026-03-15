@@ -46,9 +46,21 @@ import {
 import { prepareAttachmentUpload, uploadAttachmentBlob } from "../../services/media/attachmentPipeline";
 import { incrementMetric, recordLatency, reportClientError } from "../../services/observability/clientObservability";
 import { supabase } from "../../services/supabase";
+import VoiceCallInterface from "../../voice/ui/callInterface";
+import {
+  VoiceCallClient,
+  type VoiceConnectionState,
+  type VoiceDiagnosticsPeerSnapshot,
+  type VoiceParticipantState,
+  type VoiceUserIdentity,
+} from "../../voice/client/webrtc";
 import "../../styles/components/DirectMessageChat.css";
 
 gsap.registerPlugin(ScrollToPlugin);
+
+const headerVoiceCallIconUrl = new URL("../../assets/icons/ui/Calling.svg", import.meta.url).href;
+const headerVoiceHangupIconUrl = new URL("../../assets/icons/ui/Call.svg", import.meta.url).href;
+const headerVideoOffIconUrl = new URL("../../assets/icons/ui/video-off.svg", import.meta.url).href;
 
 const GROUP_BREAK_MS = 5 * 60 * 1000;
 const AUTO_SCROLL_THRESHOLD_PX = 120;
@@ -1694,6 +1706,15 @@ export default function DirectMessageChatView({
   const [isUnfriendingTarget, setIsUnfriendingTarget] = useState(false);
   const [isAddingTargetFriend, setIsAddingTargetFriend] = useState(false);
   const [isBlockingTarget, setIsBlockingTarget] = useState(false);
+  const [isVoiceCallActive, setIsVoiceCallActive] = useState(false);
+  const [isVoiceCallConnecting, setIsVoiceCallConnecting] = useState(false);
+  const [isVoiceCallMuted, setIsVoiceCallMuted] = useState(false);
+  const [voiceCallParticipants, setVoiceCallParticipants] = useState<VoiceParticipantState[]>([]);
+  const [voiceCallDiagnostics, setVoiceCallDiagnostics] = useState<VoiceDiagnosticsPeerSnapshot[]>([]);
+  const [voiceCallConnectionState, setVoiceCallConnectionState] = useState<VoiceConnectionState>("idle");
+  const [voiceCallError, setVoiceCallError] = useState<string | null>(null);
+  const [voiceCallStartedAtMs, setVoiceCallStartedAtMs] = useState<number | null>(null);
+  const [voiceCallElapsedTick, setVoiceCallElapsedTick] = useState(0);
   const [headerSearchValue, setHeaderSearchValue] = useState("");
   const [headerSearchIndex, setHeaderSearchIndex] = useState(-1);
   const [messageProfilePosition, setMessageProfilePosition] = useState<{ top: number; left: number }>({
@@ -1730,6 +1751,7 @@ export default function DirectMessageChatView({
   const messageProfileAnchorRef = useRef<HTMLElement | null>(null);
   const messageProfilePopoverRef = useRef<HTMLDivElement | null>(null);
   const sidebarFullProfileRef = useRef<HTMLDivElement | null>(null);
+  const voiceCallClientRef = useRef<VoiceCallClient | null>(null);
   const openPerfRef = useRef<{ conversationId: string; openedAt: number; firstPaintLogged: boolean }>({
     conversationId,
     openedAt: performance.now(),
@@ -3662,7 +3684,46 @@ export default function DirectMessageChatView({
   useEffect(() => {
     setHeaderSearchValue("");
     setHeaderSearchIndex(-1);
+    setIsVoiceCallActive(false);
+    setIsVoiceCallConnecting(false);
+    setIsVoiceCallMuted(false);
+    setVoiceCallParticipants([]);
+    setVoiceCallDiagnostics([]);
+    setVoiceCallConnectionState("idle");
+    setVoiceCallError(null);
+    setVoiceCallStartedAtMs(null);
+    setVoiceCallElapsedTick(0);
+
+    const existingVoiceCallClient = voiceCallClientRef.current;
+    voiceCallClientRef.current = null;
+    if (existingVoiceCallClient) {
+      void existingVoiceCallClient.leave();
+    }
   }, [conversationId]);
+
+  useEffect(() => {
+    return () => {
+      const existingVoiceCallClient = voiceCallClientRef.current;
+      voiceCallClientRef.current = null;
+      if (existingVoiceCallClient) {
+        void existingVoiceCallClient.leave();
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isVoiceCallActive || !voiceCallStartedAtMs) {
+      return;
+    }
+
+    const timerId = window.setInterval(() => {
+      setVoiceCallElapsedTick((current) => current + 1);
+    }, 1_000);
+
+    return () => {
+      window.clearInterval(timerId);
+    };
+  }, [isVoiceCallActive, voiceCallStartedAtMs]);
 
   useEffect(() => {
     if (!normalizedHeaderSearchValue) {
@@ -4732,6 +4793,138 @@ export default function DirectMessageChatView({
     window.open(externalUrl, "_blank", "noopener,noreferrer");
   }, [currentViewerItem]);
 
+  const stopVoiceCallSession = useCallback(async (): Promise<void> => {
+    const existingVoiceCallClient = voiceCallClientRef.current;
+    voiceCallClientRef.current = null;
+    if (existingVoiceCallClient) {
+      await existingVoiceCallClient.leave().catch(() => undefined);
+    }
+
+    setIsVoiceCallActive(false);
+    setIsVoiceCallConnecting(false);
+    setIsVoiceCallMuted(false);
+    setVoiceCallParticipants([]);
+    setVoiceCallDiagnostics([]);
+    setVoiceCallConnectionState("idle");
+    setVoiceCallStartedAtMs(null);
+    setVoiceCallElapsedTick(0);
+  }, []);
+
+  const handleToggleVoiceCall = useCallback(() => {
+    if (isVoiceCallActive || isVoiceCallConnecting) {
+      void stopVoiceCallSession();
+      return;
+    }
+
+    const localIdentity: VoiceUserIdentity = {
+      userId: String(currentUser.userId ?? "").trim(),
+      displayName: String(currentUser.displayName ?? "").trim() || "Voce",
+      avatarSrc: String(currentUser.avatarSrc ?? "").trim() || currentFallbackAvatar,
+    };
+    const remoteIdentity: VoiceUserIdentity = {
+      userId: String(targetUser.userId ?? "").trim(),
+      displayName: safeTargetDisplayName,
+      avatarSrc: targetAvatarSrc,
+    };
+
+    setVoiceCallError(null);
+    setIsVoiceCallConnecting(true);
+    setVoiceCallConnectionState("connecting");
+    setVoiceCallDiagnostics([]);
+    setVoiceCallParticipants([
+      {
+        ...localIdentity,
+        isLocal: true,
+        muted: false,
+        speaking: false,
+        speakingLevel: 0,
+        connectionState: "connecting",
+      },
+    ]);
+
+    const voiceCallClient = new VoiceCallClient({
+      roomId: conversationId,
+      self: localIdentity,
+      peerDirectory: {
+        [remoteIdentity.userId]: remoteIdentity,
+      },
+      onParticipantsChanged: (participants) => {
+        setVoiceCallParticipants(
+          participants.map((participant) => ({
+            ...participant,
+            avatarSrc: String(participant.avatarSrc ?? "").trim() || getNameAvatarUrl(participant.displayName || "U"),
+          })),
+        );
+        const localParticipant = participants.find((participant) => participant.isLocal);
+        if (localParticipant) {
+          setIsVoiceCallMuted(localParticipant.muted);
+        }
+      },
+      onDiagnostics: (snapshot) => {
+        setVoiceCallDiagnostics(snapshot.peers);
+      },
+      onConnectionStateChanged: (state) => {
+        setVoiceCallConnectionState(state);
+      },
+      onError: (error) => {
+        setVoiceCallError(String(error.message ?? "").trim() || "Falha na chamada de voz.");
+      },
+    });
+
+    voiceCallClientRef.current = voiceCallClient;
+    void voiceCallClient
+      .start()
+      .then(() => {
+        if (voiceCallClientRef.current !== voiceCallClient) {
+          return;
+        }
+        setIsVoiceCallConnecting(false);
+        setIsVoiceCallActive(true);
+        setVoiceCallStartedAtMs(Date.now());
+        setVoiceCallElapsedTick(0);
+        setIsVoiceCallMuted(voiceCallClient.isMuted());
+      })
+      .catch((error) => {
+        if (voiceCallClientRef.current === voiceCallClient) {
+          voiceCallClientRef.current = null;
+        }
+        setVoiceCallError(String(error instanceof Error ? error.message : error ?? "").trim() || "Falha na chamada de voz.");
+        void stopVoiceCallSession();
+      });
+  }, [
+    conversationId,
+    currentFallbackAvatar,
+    currentUser.avatarSrc,
+    currentUser.displayName,
+    currentUser.userId,
+    isVoiceCallActive,
+    isVoiceCallConnecting,
+    safeTargetDisplayName,
+    stopVoiceCallSession,
+    targetAvatarSrc,
+    targetUser.userId,
+  ]);
+
+  const handleToggleVoiceMute = useCallback(() => {
+    const existingVoiceCallClient = voiceCallClientRef.current;
+    if (!existingVoiceCallClient) {
+      return;
+    }
+    existingVoiceCallClient.toggleMuted();
+    setIsVoiceCallMuted(existingVoiceCallClient.isMuted());
+  }, []);
+
+  const voiceCallElapsedSeconds = useMemo(() => {
+    if (!voiceCallStartedAtMs) {
+      return null;
+    }
+    void voiceCallElapsedTick;
+    return Math.max(0, Math.floor((Date.now() - voiceCallStartedAtMs) / 1_000));
+  }, [voiceCallElapsedTick, voiceCallStartedAtMs]);
+
+  const shouldShowVoiceCallPanel = isVoiceCallActive || isVoiceCallConnecting;
+  const voiceCallButtonActive = isVoiceCallActive || isVoiceCallConnecting;
+
   return (
     <section className="dm-chat" aria-label={`Conversa com ${safeTargetDisplayName}`}>
       <header className="dm-chat__header" role="banner">
@@ -4755,6 +4948,42 @@ export default function DirectMessageChatView({
           </div>
         </div>
         <div className="dm-chat__header-tools">
+          <div className="dm-chat__header-actions" aria-label="Acoes da conversa">
+            <Tooltip
+              text={voiceCallButtonActive ? "Sair da chamada de voz" : "Iniciar ou entrar na chamada de voz"}
+              position="top"
+              delay={180}
+            >
+              <button
+                type="button"
+                className="dm-chat__header-action-btn dm-chat__header-action-btn--icon-only"
+                aria-label={voiceCallButtonActive ? "Sair da chamada de voz" : "Iniciar chamada de voz"}
+                onClick={handleToggleVoiceCall}
+              >
+                <img
+                  className="dm-chat__header-action-icon"
+                  src={voiceCallButtonActive ? headerVoiceHangupIconUrl : headerVoiceCallIconUrl}
+                  alt=""
+                  aria-hidden="true"
+                />
+              </button>
+            </Tooltip>
+            <Tooltip text="Chamada de video indisponivel nesta versao" position="top" delay={180}>
+              <button
+                type="button"
+                className="dm-chat__header-action-btn dm-chat__header-action-btn--icon-only"
+                aria-label="Chamada de video indisponivel"
+                disabled
+              >
+                <img
+                  className="dm-chat__header-action-icon"
+                  src={headerVideoOffIconUrl}
+                  alt=""
+                  aria-hidden="true"
+                />
+              </button>
+            </Tooltip>
+          </div>
           <label
             className={`dm-chat__header-search${normalizedHeaderSearchValue && headerSearchMatchIds.length === 0 ? " dm-chat__header-search--empty" : ""}`}
             aria-label="Buscar mensagens"
@@ -4795,6 +5024,24 @@ export default function DirectMessageChatView({
 
       <div className="dm-chat__body">
         <div className="dm-chat__main">
+          {shouldShowVoiceCallPanel ? (
+            <div className="dm-chat__voice-call-wrap">
+              <VoiceCallInterface
+                isOpen={shouldShowVoiceCallPanel}
+                isConnecting={isVoiceCallConnecting}
+                connectionState={voiceCallConnectionState}
+                participants={voiceCallParticipants}
+                localMuted={isVoiceCallMuted}
+                elapsedSeconds={voiceCallElapsedSeconds}
+                diagnostics={voiceCallDiagnostics}
+                errorMessage={voiceCallError}
+                onToggleMute={handleToggleVoiceMute}
+                onLeave={() => {
+                  void stopVoiceCallSession();
+                }}
+              />
+            </div>
+          ) : null}
           <div className="dm-chat__messages-wrap">
             <div
               className={`dm-chat__messages dm-chat__message-scroll${shouldShowMessagesSkeleton ? "" : " dm-chat__messages--ready"}`}
