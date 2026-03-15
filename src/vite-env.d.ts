@@ -15,6 +15,7 @@ interface ImportMetaEnv {
   readonly VITE_MESSLY_CDN_URL?: string;
   readonly VITE_MESSLY_ASSETS_URL?: string;
   readonly VITE_MESSLY_GATEWAY_CLIENT_VERSION?: string;
+  readonly VITE_MESSLY_CALL_TRANSPORT?: string;
   readonly VITE_MEDIA_BUCKET?: string;
   readonly VITE_R2_BUCKET?: string;
   readonly VITE_MEDIA_PUBLIC_BASE_URL?: string;

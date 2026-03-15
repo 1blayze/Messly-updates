@@ -10,7 +10,7 @@ import { SerialExecutor, SequentialLock, SingleFlight } from "./voice/operationL
 import { ProducerManager } from "./voice/ProducerManager";
 import { ReconnectManager } from "./voice/ReconnectManager";
 import { TransportManager } from "./voice/TransportManager";
-import type { CallDebugLogger, NormalizedAudioSettings, VoiceSession } from "./voice/types";
+import type { CallDebugLogger, NormalizedAudioSettings, VoiceSession, VoiceTransport } from "./voice/types";
 import { isTrackLive } from "./voice/types";
 
 export interface CallServiceSignal {
@@ -192,6 +192,91 @@ function resolveVoiceUrl(): string | null {
   return normalizeVoiceSocketUrl(getGatewayUrl());
 }
 
+function resolvePreferredVoiceTransport(): VoiceTransport {
+  const explicit = String(import.meta.env.VITE_MESSLY_CALL_TRANSPORT ?? "").trim().toLowerCase();
+  if (explicit === "mediasoup" || explicit === "sfu") {
+    return "mediasoup";
+  }
+  if (explicit === "p2p") {
+    return "p2p";
+  }
+
+  // Default behavior:
+  // - Dev builds keep the mediasoup/SFU path enabled so we can iterate locally.
+  // - Prod builds default to P2P because our current gateway deployment (Cloud Run / HTTP LB) cannot expose the UDP/TCP
+  //   port ranges required by mediasoup WebRTC transports.
+  return import.meta.env.DEV ? "mediasoup" : "p2p";
+}
+
+function normalizeIceServer(
+  raw: unknown,
+  defaults: { username: string | null; credential: string | null },
+): RTCIceServer | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return null;
+  }
+  const record = raw as Record<string, unknown>;
+  const urlsRaw = record.urls ?? record.url;
+  const urls = Array.isArray(urlsRaw)
+    ? urlsRaw.map((value) => String(value ?? "").trim()).filter(Boolean)
+    : typeof urlsRaw === "string"
+      ? [urlsRaw.trim()].filter(Boolean)
+      : [];
+  if (urls.length === 0) {
+    return null;
+  }
+
+  const username = typeof record.username === "string" ? record.username : defaults.username;
+  const credential = typeof record.credential === "string" ? record.credential : defaults.credential;
+  const isTurnServer = urls.some((url) => url.startsWith("turn:") || url.startsWith("turns:"));
+
+  const server: RTCIceServer = {
+    urls,
+  };
+  if (isTurnServer) {
+    if (username) {
+      server.username = username;
+    }
+    if (credential) {
+      server.credential = credential;
+    }
+  }
+  return server;
+}
+
+function parseIceServersFromEnv(): RTCIceServer[] {
+  const defaults = {
+    username: String(import.meta.env.VITE_WEBRTC_TURN_USERNAME ?? "").trim() || null,
+    credential: String(import.meta.env.VITE_WEBRTC_TURN_CREDENTIAL ?? "").trim() || null,
+  };
+
+  const rawJson = String(import.meta.env.VITE_WEBRTC_ICE_SERVERS_JSON ?? "").trim();
+  if (rawJson) {
+    try {
+      const parsed = JSON.parse(rawJson) as unknown;
+      const list = Array.isArray(parsed)
+        ? parsed
+        : parsed && typeof parsed === "object" && Array.isArray((parsed as { iceServers?: unknown }).iceServers)
+          ? (parsed as { iceServers: unknown[] }).iceServers
+          : [];
+      const normalized = list
+        .map((entry) => normalizeIceServer(entry, defaults))
+        .filter((entry): entry is RTCIceServer => Boolean(entry));
+      if (normalized.length > 0) {
+        return normalized;
+      }
+    } catch {
+      // Fall through to defaults.
+    }
+  }
+
+  // Best-effort defaults (STUN only). For strict NATs, configure TURN via VITE_WEBRTC_ICE_SERVERS_JSON.
+  return [
+    { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] },
+    { urls: ["stun:global.stun.twilio.com:3478?transport=udp"] },
+  ];
+}
+
 function toVoiceProbeHttpUrl(voiceUrlRaw: string): string | null {
   try {
     const parsed = new URL(voiceUrlRaw);
@@ -274,8 +359,10 @@ async function probeVoiceEndpoint(voiceUrl: string): Promise<VoiceEndpointProbeR
 
 function parseOffer(payload: Record<string, unknown>): VoiceSession | null {
   const version = Number(payload.v ?? 0);
-  const transport = String(payload.transport ?? "").trim().toLowerCase();
-  if (version !== SIGNAL_VERSION || transport !== "mediasoup") {
+  const transportRaw = String(payload.transport ?? "").trim().toLowerCase();
+  const transport: VoiceTransport | null =
+    transportRaw === "mediasoup" ? "mediasoup" : transportRaw === "p2p" ? "p2p" : null;
+  if (version !== SIGNAL_VERSION || !transport) {
     return null;
   }
   const callId = toId(payload.callId);
@@ -285,37 +372,58 @@ function parseOffer(payload: Record<string, unknown>): VoiceSession | null {
   if (!callId || !roomId || !conversationId) {
     return null;
   }
+  if (transport === "p2p" && !toId(payload.sdp)) {
+    // P2P offers must include SDP; otherwise we can't establish the connection.
+    return null;
+  }
   return {
+    transport,
     callId,
     roomId,
     conversationId,
     mode,
     role: "callee",
     resumeToken: null,
+    offerSdp: transport === "p2p" ? toId(payload.sdp) : null,
+    answerSdp: null,
   };
 }
 
 function buildOffer(session: VoiceSession): Record<string, unknown> {
-  return {
+  const base = {
     v: SIGNAL_VERSION,
-    transport: "mediasoup",
+    transport: session.transport,
     callId: session.callId,
     roomId: session.roomId,
     conversationId: session.conversationId,
     mode: session.mode,
     createdAt: new Date().toISOString(),
   };
+  if (session.transport === "p2p") {
+    return {
+      ...base,
+      sdp: String(session.offerSdp ?? "").trim(),
+    };
+  }
+  return base;
 }
 
 function buildAnswer(session: VoiceSession): Record<string, unknown> {
-  return {
+  const base = {
     v: SIGNAL_VERSION,
-    transport: "mediasoup",
+    transport: session.transport,
     callId: session.callId,
     roomId: session.roomId,
     conversationId: session.conversationId,
     acceptedAt: new Date().toISOString(),
   };
+  if (session.transport === "p2p") {
+    return {
+      ...base,
+      sdp: String(session.answerSdp ?? "").trim(),
+    };
+  }
+  return base;
 }
 
 async function captureAudioTrack(settings: NormalizedAudioSettings): Promise<MediaStreamTrack> {
@@ -531,6 +639,17 @@ export class CallService {
   private voiceUrl: string | null;
   private socket: WebSocket | null = null;
   private readonly manualCloseSockets = new WeakSet<WebSocket>();
+  // P2P transport state (used when session.transport === "p2p").
+  private p2pPeer: RTCPeerConnection | null = null;
+  private p2pAudioTransceiver: RTCRtpTransceiver | null = null;
+  private p2pVideoTransceiver: RTCRtpTransceiver | null = null;
+  private p2pRemoteStream: MediaStream | null = null;
+  private readonly p2pPendingLocalIce: RTCIceCandidateInit[] = [];
+  private readonly p2pPendingRemoteIce: RTCIceCandidateInit[] = [];
+  private readonly p2pIceServers: RTCIceServer[] = [];
+  private p2pMakingOffer = false;
+  private p2pIgnoreOffer = false;
+  private p2pPolite = false;
   // Voice WS heartbeat/ping (signaling RTT). This is used as a ping fallback when media stats are unavailable.
   private heartbeatIntervalMs = 15_000;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -563,6 +682,7 @@ export class CallService {
     this.options = options;
     this.audioSettings = normalizeAudioSettings(options.audioSettings);
     this.voiceUrl = resolveVoiceUrl();
+    this.p2pIceServers.push(...parseIceServersFromEnv());
 
     const debugEnabled = import.meta.env.DEV || String(import.meta.env.VITE_MESSLY_CALL_DEBUG ?? "").trim() === "1";
     this.debugLog = (event, details) => {
@@ -623,7 +743,11 @@ export class CallService {
         if (!this.isSessionActive()) {
           return;
         }
-        void this.syncProducers("track-graph-changed").catch((error) => {
+        const session = this.sessionManager.getSession();
+        const sync = session?.transport === "p2p"
+          ? this.syncP2pTracks("track-graph-changed")
+          : this.syncProducers("track-graph-changed");
+        void sync.catch((error) => {
           if (this.isRecoverableCallError(error)) {
             this.requestReconnect("track-graph-sync-failed");
             return;
@@ -639,7 +763,11 @@ export class CallService {
         if (!this.isSessionActive()) {
           return;
         }
-        void this.syncProducers("audio-track-recovered").catch((error) => {
+        const session = this.sessionManager.getSession();
+        const sync = session?.transport === "p2p"
+          ? this.syncP2pTracks("audio-track-recovered")
+          : this.syncProducers("audio-track-recovered");
+        void sync.catch((error) => {
           if (this.isRecoverableCallError(error)) {
             this.requestReconnect("audio-recovery-sync-failed");
             return;
@@ -672,6 +800,13 @@ export class CallService {
   }
 
   getRemoteStream(): MediaStream | null {
+    const session = this.sessionManager.getSession();
+    if (session?.transport === "p2p") {
+      if (!this.p2pRemoteStream) {
+        return null;
+      }
+      return new MediaStream(this.p2pRemoteStream.getTracks());
+    }
     return this.consumerManager.getRemoteStream();
   }
 
@@ -701,12 +836,15 @@ export class CallService {
         throw new Error("conversationId ausente para chamada.");
       }
       session = {
+        transport: resolvePreferredVoiceTransport(),
         callId: createSessionId("voice"),
         roomId: createSessionId("room"),
         conversationId,
         mode: this.options.mode,
         role: "caller",
         resumeToken: null,
+        offerSdp: null,
+        answerSdp: null,
       };
       this.sessionManager.setSession(session);
     }
@@ -716,9 +854,21 @@ export class CallService {
       callId: session.callId,
       conversationId: session.conversationId,
       mode: session.mode,
+      transport: session.transport,
     });
 
     await this.mediaManager.ensureLocalTracks();
+
+    if (session.transport === "p2p") {
+      await this.callGraphLock.runExclusive(async () => {
+        this.sessionManager.transition("connecting", "call.startOutgoing.p2p");
+        await this.ensureP2pPeer("call.startOutgoing");
+        await this.syncP2pTracksUnsafe("call.startOutgoing");
+        await this.createP2pOffer({ iceRestart: false, reason: "call.startOutgoing" });
+        this.scheduleRemoteAudioWatchdog();
+      });
+      return buildOffer(this.requireSession());
+    }
 
     const hasLiveVoiceSession =
       Boolean(this.socket && this.socket.readyState === WebSocket.OPEN) &&
@@ -757,6 +907,31 @@ export class CallService {
       this.sessionManager.setSession(offer);
       this.mediaManager.setMode(offer.mode);
       await this.mediaManager.ensureLocalTracks();
+      if (offer.transport === "p2p") {
+        await this.callGraphLock.runExclusive(async () => {
+          this.sessionManager.transition("connecting", "call.handleSignal.offer.p2p");
+          await this.ensureP2pPeer("call.handleSignal.offer");
+          await this.syncP2pTracksUnsafe("call.handleSignal.offer");
+          const sdp = toId(toRecord(signal.payload).sdp);
+          if (!sdp) {
+            throw new Error("Oferta P2P sem SDP.");
+          }
+          const createdAnswer = await this.acceptP2pOffer(sdp, "call.handleSignal.offer");
+          if (!createdAnswer) {
+            return;
+          }
+          this.scheduleRemoteAudioWatchdog();
+        });
+        const current = this.sessionManager.getSession();
+        if (!current || current.transport !== "p2p" || !current.answerSdp) {
+          return null;
+        }
+        return {
+          type: "answer",
+          payload: buildAnswer(current),
+        };
+      }
+
       await this.connectToVoice("call.handleSignal.offer");
       await this.syncProducers("call.handleSignal.offer");
 
@@ -764,6 +939,37 @@ export class CallService {
         type: "answer",
         payload: buildAnswer(this.requireSession()),
       };
+    }
+
+    if (signal.type === "answer") {
+      const session = this.sessionManager.getSession();
+      if (session?.transport === "p2p") {
+        const payload = toRecord(signal.payload);
+        const sdp = toId(payload.sdp);
+        if (sdp) {
+          await this.callGraphLock.runExclusive(async () => {
+            await this.ensureP2pPeer("call.handleSignal.answer");
+            await this.acceptP2pAnswer(sdp, "call.handleSignal.answer");
+          });
+        }
+      }
+      return null;
+    }
+
+    if (signal.type === "ice") {
+      const payload = toRecord(signal.payload);
+      const transport = String(payload.transport ?? "").trim().toLowerCase();
+      const session = this.sessionManager.getSession();
+      const shouldHandleP2p = transport === "p2p" || session?.transport === "p2p";
+      if (shouldHandleP2p) {
+        await this.callGraphLock.runExclusive(async () => {
+          if (this.sessionManager.getSession()?.transport === "p2p") {
+            await this.ensureP2pPeer("call.handleSignal.ice");
+          }
+          await this.addP2pRemoteIceCandidate(payload, "call.handleSignal.ice");
+        });
+      }
+      return null;
     }
 
     if (signal.type === "bye") {
@@ -779,6 +985,11 @@ export class CallService {
     if (this.isSessionActive()) {
       void this.callGraphLock
         .runExclusive(async () => {
+          const session = this.sessionManager.getSession();
+          if (session?.transport === "p2p") {
+            // For P2P calls we rely on track.enabled to represent mute state (silence).
+            return;
+          }
           await this.syncAudioProducerPauseState("toggleMute");
         })
         .catch((error) => {
@@ -794,7 +1005,9 @@ export class CallService {
 
   toggleCamera(): boolean {
     const nextEnabled = this.mediaManager.toggleCamera();
-    void this.syncProducers("call.toggleCamera").catch((error) => {
+    const session = this.sessionManager.getSession();
+    const sync = session?.transport === "p2p" ? this.syncP2pTracks("call.toggleCamera") : this.syncProducers("call.toggleCamera");
+    void sync.catch((error) => {
       if (this.isRecoverableCallError(error)) {
         this.requestReconnect("toggle-camera-recoverable");
         return;
@@ -820,17 +1033,32 @@ export class CallService {
   async updateAudioSettings(settings: CallAudioSettings | null | undefined): Promise<void> {
     this.audioSettings = normalizeAudioSettings(settings);
     await this.mediaManager.updateAudioSettings(this.audioSettings);
+    const session = this.sessionManager.getSession();
+    if (session?.transport === "p2p") {
+      await this.syncP2pTracks("call.updateAudioSettings");
+      return;
+    }
     await this.syncProducers("call.updateAudioSettings");
   }
 
   async startScreenShare(options?: StartScreenShareOptions): Promise<boolean> {
     await this.mediaManager.startScreenShare(options);
+    const session = this.sessionManager.getSession();
+    if (session?.transport === "p2p") {
+      await this.syncP2pTracks("call.startScreenShare");
+      return true;
+    }
     await this.syncProducers("call.startScreenShare");
     return true;
   }
 
   async stopScreenShare(): Promise<void> {
     await this.mediaManager.stopScreenShare();
+    const session = this.sessionManager.getSession();
+    if (session?.transport === "p2p") {
+      await this.syncP2pTracks("call.stopScreenShare");
+      return;
+    }
     await this.syncProducers("call.stopScreenShare");
   }
 
@@ -884,10 +1112,19 @@ export class CallService {
       smoothedPingMs: nextSmoothedPing,
     };
 
+    const session = this.sessionManager.getSession();
+    const isP2p = session?.transport === "p2p";
     const localAudioTrackState = resolveAudioTrackState(this.mediaManager.getAudioTrack());
-    const remoteAudioTrackState = resolveAudioTrackState(this.consumerManager.getPrimaryRemoteAudioTrack());
-    const remoteAudioConsumers = this.consumerManager.getAudioConsumerCount();
-    const hasActiveAudioProducer = this.producerManager.hasActiveAudioProducer();
+    const remoteAudioTrack = isP2p
+      ? (this.p2pRemoteStream?.getAudioTracks().find((track) => track.readyState === "live") ?? null)
+      : this.consumerManager.getPrimaryRemoteAudioTrack();
+    const remoteAudioTrackState = resolveAudioTrackState(remoteAudioTrack);
+    const remoteAudioConsumers = isP2p
+      ? (this.p2pRemoteStream?.getAudioTracks().length ?? 0)
+      : this.consumerManager.getAudioConsumerCount();
+    const hasActiveAudioProducer = isP2p
+      ? Boolean(this.p2pAudioTransceiver?.sender?.track && this.p2pAudioTransceiver.sender.track.readyState === "live")
+      : this.producerManager.hasActiveAudioProducer();
     const sendingAudio = localAudioTrackState !== "live"
       ? false
       : outboundBitrateKbps == null
@@ -941,6 +1178,7 @@ export class CallService {
       this.rejectPendingReply(new Error("Socket de voz fechado."));
       this.consumerManager.clear("call.close");
       this.producerManager.closeAll("call.close");
+      this.disposeP2pPeer("call.close");
       this.transportManager.destroy();
       this.mediaManager.dispose();
       this.sessionManager.setSession(null);
@@ -957,18 +1195,26 @@ export class CallService {
   }
 
   private async collectVoiceStats(): Promise<VoiceStatsValues> {
-    const sendTransport = this.transportManager.getSendTransport();
-    const recvTransport = this.transportManager.getRecvTransport();
-    const [sendStatsReport, recvStatsReport] = await Promise.all([
+    const session = this.sessionManager.getSession();
+    const isP2p = session?.transport === "p2p";
+    const sendTransport = isP2p ? null : this.transportManager.getSendTransport();
+    const recvTransport = isP2p ? null : this.transportManager.getRecvTransport();
+    const peer = isP2p ? this.p2pPeer : null;
+
+    const [sendStatsReport, recvStatsReport, p2pStatsReport] = await Promise.all([
       sendTransport?.getStats().catch(() => null) ?? Promise.resolve(null),
       recvTransport?.getStats().catch(() => null) ?? Promise.resolve(null),
+      peer?.getStats().catch(() => null) ?? Promise.resolve(null),
     ]);
 
-    const entries = [...toStatsEntries(sendStatsReport), ...toStatsEntries(recvStatsReport)];
+    const entries = isP2p
+      ? toStatsEntries(p2pStatsReport)
+      : [...toStatsEntries(sendStatsReport), ...toStatsEntries(recvStatsReport)];
     if (entries.length === 0) {
       this.debugLog("voice_stats_empty", {
         sendTransportId: sendTransport?.id ?? null,
         recvTransportId: recvTransport?.id ?? null,
+        transport: isP2p ? "p2p" : "mediasoup",
       });
     }
 
@@ -1577,6 +1823,34 @@ export class CallService {
           return;
         }
 
+        if (session.transport === "p2p") {
+          this.sessionManager.transition("reconnecting", "call.rejoinExisting.p2p");
+          this.debugLog("reconnect_started", {
+            callId: session.callId,
+            conversationId: session.conversationId,
+            transport: "p2p",
+          });
+
+          await this.ensureP2pPeer("call.rejoinExisting");
+          await this.syncP2pTracksUnsafe("call.rejoinExisting");
+          await this.createP2pOffer({ iceRestart: true, reason: "call.rejoinExisting" });
+          this.scheduleRemoteAudioWatchdog();
+
+          const offerPayload = buildOffer(this.requireSession());
+          void Promise.resolve(this.options.onSignal({ type: "offer", payload: offerPayload })).catch((error) => {
+            this.debugLog("p2p_signal_send_failed", {
+              type: "offer",
+              message: error instanceof Error ? error.message : String(error ?? ""),
+            });
+          });
+
+          this.debugLog("reconnect_success", {
+            callId: this.sessionManager.getSession()?.callId ?? null,
+            transport: "p2p",
+          });
+          return;
+        }
+
         this.sessionManager.transition("reconnecting", "call.rejoinExisting");
         this.debugLog("reconnect_started", {
           callId: session.callId,
@@ -1753,9 +2027,13 @@ export class CallService {
     }
     // Se não recebermos áudio remoto em alguns segundos, registrar diagnóstico para depurar chamadas mudas.
     this.remoteAudioWatchdog = setTimeout(() => {
-      const audioConsumers = this.consumerManager.getAudioConsumerCount();
-      const remoteStream = this.consumerManager.getRemoteStream();
-      const hasLiveAudioTrack = remoteStream?.getAudioTracks().some((track) => track.readyState === "live") ?? false;
+      const session = this.sessionManager.getSession();
+      const remoteStream = session?.transport === "p2p"
+        ? (this.p2pRemoteStream ? new MediaStream(this.p2pRemoteStream.getTracks()) : null)
+        : this.consumerManager.getRemoteStream();
+      const audioTracks = remoteStream?.getAudioTracks() ?? [];
+      const audioConsumers = session?.transport === "p2p" ? audioTracks.length : this.consumerManager.getAudioConsumerCount();
+      const hasLiveAudioTrack = audioTracks.some((track) => track.readyState === "live");
       this.debugLog("voice_audio_receive_status", {
         audioConsumers,
         hasLiveAudioTrack,
@@ -1847,6 +2125,390 @@ export class CallService {
         return;
       }
       throw error;
+    }
+  }
+
+  private disposeP2pPeer(reason: string, options?: { preserveQueuedRemoteIce?: boolean }): void {
+    const preserveQueuedRemoteIce = options?.preserveQueuedRemoteIce === true;
+    const peer = this.p2pPeer;
+    this.p2pPeer = null;
+    this.p2pAudioTransceiver = null;
+    this.p2pVideoTransceiver = null;
+    this.p2pRemoteStream = null;
+    this.p2pPendingLocalIce.length = 0;
+    if (!preserveQueuedRemoteIce) {
+      this.p2pPendingRemoteIce.length = 0;
+    }
+    this.p2pMakingOffer = false;
+    this.p2pIgnoreOffer = false;
+
+    // Clear UI stream when rebuilding peers.
+    this.publishP2pRemoteStream();
+
+    if (!peer) {
+      return;
+    }
+
+    try {
+      peer.ontrack = null;
+      peer.onicecandidate = null;
+      peer.onconnectionstatechange = null;
+      peer.oniceconnectionstatechange = null;
+      peer.onsignalingstatechange = null;
+      peer.onicegatheringstatechange = null;
+    } catch {
+      // Best effort.
+    }
+
+    try {
+      peer.close();
+    } catch {
+      // Best effort.
+    }
+
+    this.debugLog("p2p_peer_closed", { reason });
+  }
+
+  private publishP2pRemoteStream(): void {
+    if (this.disposed) {
+      return;
+    }
+    const stream = this.p2pRemoteStream ? new MediaStream(this.p2pRemoteStream.getTracks()) : null;
+    this.options.onRemoteStream?.(stream);
+  }
+
+  private async ensureP2pPeer(scope: string): Promise<void> {
+    const session = this.sessionManager.getSession();
+    if (!session || session.transport !== "p2p" || this.disposed) {
+      return;
+    }
+
+    const existing = this.p2pPeer;
+    if (existing && existing.connectionState !== "closed") {
+      return;
+    }
+
+    // Reset any previous peer state before creating a new one.
+    // Preserve queued remote ICE when we haven't created a peer yet (candidates may arrive before the offer).
+    this.disposeP2pPeer("rebuild", { preserveQueuedRemoteIce: !existing });
+
+    const peer = new RTCPeerConnection({
+      iceServers: this.p2pIceServers,
+      bundlePolicy: "max-bundle",
+      rtcpMuxPolicy: "require",
+    });
+    this.p2pPeer = peer;
+    this.p2pRemoteStream = new MediaStream();
+    this.p2pPolite = session.role === "callee";
+
+    // Keep m-line order stable by creating transceivers once. We'll replaceTrack later when local media changes.
+    try {
+      this.p2pAudioTransceiver = peer.addTransceiver("audio", { direction: "sendrecv" });
+      if (session.mode === "video") {
+        this.p2pVideoTransceiver = peer.addTransceiver("video", { direction: "sendrecv" });
+      } else {
+        this.p2pVideoTransceiver = null;
+      }
+    } catch {
+      // Some runtimes may not support addTransceiver; we'll fall back to addTrack in syncP2pTracksUnsafe.
+      this.p2pAudioTransceiver = null;
+      this.p2pVideoTransceiver = null;
+    }
+
+    peer.ontrack = (event) => {
+      const track = event.track;
+      if (!track || this.disposed) {
+        return;
+      }
+      if (!this.p2pRemoteStream) {
+        this.p2pRemoteStream = new MediaStream();
+      }
+      const already = this.p2pRemoteStream.getTracks().some((existingTrack) => existingTrack.id === track.id);
+      if (!already) {
+        this.p2pRemoteStream.addTrack(track);
+        this.debugLog("p2p_track_added", {
+          kind: track.kind,
+          id: track.id,
+        });
+        this.publishP2pRemoteStream();
+      }
+
+      track.onended = () => {
+        if (!this.p2pRemoteStream) {
+          return;
+        }
+        try {
+          this.p2pRemoteStream.removeTrack(track);
+        } catch {
+          // ignore
+        }
+        if (this.p2pRemoteStream.getTracks().length === 0) {
+          this.p2pRemoteStream = null;
+        }
+        this.debugLog("p2p_track_ended", {
+          kind: track.kind,
+          id: track.id,
+        });
+        this.publishP2pRemoteStream();
+      };
+    };
+
+    peer.onicecandidate = (event) => {
+      const candidate = event.candidate;
+      if (!candidate || this.disposed) {
+        return;
+      }
+
+      const current = this.sessionManager.getSession();
+      if (!current) {
+        return;
+      }
+
+      const payload = {
+        v: SIGNAL_VERSION,
+        transport: "p2p",
+        callId: current.callId,
+        roomId: current.roomId,
+        conversationId: current.conversationId,
+        candidate: candidate.toJSON ? candidate.toJSON() : { candidate: candidate.candidate, sdpMid: candidate.sdpMid, sdpMLineIndex: candidate.sdpMLineIndex },
+      };
+      void Promise.resolve(this.options.onSignal({ type: "ice", payload })).catch(() => {
+        // Best effort; keep gathering.
+      });
+    };
+
+    peer.onconnectionstatechange = () => {
+      this.handleP2pConnectionStateChange(`p2p:${scope}`);
+    };
+    peer.oniceconnectionstatechange = () => {
+      this.handleP2pConnectionStateChange(`p2p-ice:${scope}`);
+    };
+
+    this.debugLog("p2p_peer_created", {
+      scope,
+      polite: this.p2pPolite,
+      iceServers: this.p2pIceServers.length,
+    });
+  }
+
+  private handleP2pConnectionStateChange(scope: string): void {
+    const peer = this.p2pPeer;
+    if (!peer || this.disposed || this.sessionManager.isDestroyed()) {
+      return;
+    }
+
+    const state = peer.connectionState;
+    this.debugLog("p2p_connection_state", { scope, state });
+
+    if (state === "connected") {
+      this.sessionManager.transition("connected", "p2p-connected");
+      return;
+    }
+
+    if (state === "connecting") {
+      const lifecycle = this.sessionManager.getLifecycle();
+      if (lifecycle === "idle" || lifecycle === "connected") {
+        this.sessionManager.transition("connecting", "p2p-connecting");
+      }
+      return;
+    }
+
+    if (state === "failed" || state === "disconnected") {
+      this.requestReconnect(`p2p-${state}`);
+    }
+  }
+
+  private async syncP2pTracks(scope: string): Promise<void> {
+    if (!this.isSessionActive()) {
+      return;
+    }
+    await this.callGraphLock.runExclusive(async () => {
+      await this.syncP2pTracksUnsafe(scope);
+    });
+  }
+
+  private async syncP2pTracksUnsafe(scope: string): Promise<void> {
+    const session = this.sessionManager.getSession();
+    const peer = this.p2pPeer;
+    if (!session || session.transport !== "p2p" || !peer || peer.connectionState === "closed" || this.disposed) {
+      return;
+    }
+
+    let audioTrack = this.mediaManager.getAudioTrack();
+    if (!audioTrack) {
+      await this.mediaManager.ensureLocalTracks();
+      audioTrack = this.mediaManager.getAudioTrack();
+    }
+
+    const videoTrack = this.mediaManager.getPreferredVideoTrack();
+
+    const replace = async (transceiver: RTCRtpTransceiver | null, track: MediaStreamTrack | null): Promise<void> => {
+      if (transceiver && transceiver.sender) {
+        await transceiver.sender.replaceTrack(track).catch(() => undefined);
+      }
+    };
+
+    if (this.p2pAudioTransceiver) {
+      await replace(this.p2pAudioTransceiver, audioTrack);
+    } else if (audioTrack) {
+      // Fallback for runtimes without transceivers.
+      peer.addTrack(audioTrack);
+    }
+
+    if (session.mode === "video") {
+      if (this.p2pVideoTransceiver) {
+        await replace(this.p2pVideoTransceiver, videoTrack);
+      } else if (videoTrack) {
+        peer.addTrack(videoTrack);
+      }
+    }
+
+    this.debugLog("p2p_tracks_synced", {
+      scope,
+      hasAudio: Boolean(audioTrack),
+      hasVideo: Boolean(videoTrack),
+    });
+  }
+
+  private async flushP2pRemoteIceCandidates(scope: string): Promise<void> {
+    const peer = this.p2pPeer;
+    if (!peer || this.disposed) {
+      return;
+    }
+    if (!peer.remoteDescription) {
+      return;
+    }
+
+    const pending = this.p2pPendingRemoteIce.splice(0, this.p2pPendingRemoteIce.length);
+    if (pending.length === 0) {
+      return;
+    }
+
+    for (const candidate of pending) {
+      try {
+        await peer.addIceCandidate(candidate);
+      } catch (error) {
+        this.debugLog("p2p_add_ice_failed", {
+          scope,
+          message: error instanceof Error ? error.message : String(error ?? ""),
+        });
+      }
+    }
+  }
+
+  private async createP2pOffer(input: { iceRestart: boolean; reason: string }): Promise<void> {
+    const session = this.sessionManager.getSession();
+    const peer = this.p2pPeer;
+    if (!session || session.transport !== "p2p" || !peer || this.disposed) {
+      return;
+    }
+
+    try {
+      this.p2pMakingOffer = true;
+      const offer = await peer.createOffer({ iceRestart: input.iceRestart });
+      await peer.setLocalDescription(offer);
+    } finally {
+      this.p2pMakingOffer = false;
+    }
+
+    const sdp = String(peer.localDescription?.sdp ?? "").trim();
+    if (!sdp) {
+      throw new Error("Falha ao gerar oferta P2P.");
+    }
+
+    this.sessionManager.mutateSession((current) => ({
+      ...current,
+      offerSdp: sdp,
+    }));
+
+    this.debugLog("p2p_offer_created", {
+      reason: input.reason,
+      iceRestart: input.iceRestart,
+    });
+  }
+
+  private async acceptP2pOffer(offerSdp: string, scope: string): Promise<boolean> {
+    const session = this.sessionManager.getSession();
+    const peer = this.p2pPeer;
+    if (!session || session.transport !== "p2p" || !peer || this.disposed) {
+      return false;
+    }
+
+    const offer: RTCSessionDescriptionInit = { type: "offer", sdp: offerSdp };
+    const offerCollision = this.p2pMakingOffer || peer.signalingState !== "stable";
+    this.p2pIgnoreOffer = !this.p2pPolite && offerCollision;
+    if (this.p2pIgnoreOffer) {
+      this.debugLog("p2p_offer_ignored", { scope, reason: "collision" });
+      return false;
+    }
+
+    await peer.setRemoteDescription(offer);
+    await this.flushP2pRemoteIceCandidates(scope);
+
+    const answer = await peer.createAnswer();
+    await peer.setLocalDescription(answer);
+
+    const answerSdp = String(peer.localDescription?.sdp ?? "").trim();
+    if (!answerSdp) {
+      throw new Error("Falha ao gerar resposta P2P.");
+    }
+
+    this.sessionManager.mutateSession((current) => ({
+      ...current,
+      answerSdp,
+    }));
+
+    this.debugLog("p2p_answer_created", { scope });
+    return true;
+  }
+
+  private async acceptP2pAnswer(answerSdp: string, scope: string): Promise<void> {
+    const session = this.sessionManager.getSession();
+    const peer = this.p2pPeer;
+    if (!session || session.transport !== "p2p" || !peer || this.disposed) {
+      return;
+    }
+
+    await peer.setRemoteDescription({ type: "answer", sdp: answerSdp });
+    await this.flushP2pRemoteIceCandidates(scope);
+    this.debugLog("p2p_answer_applied", { scope });
+  }
+
+  private async addP2pRemoteIceCandidate(payload: Record<string, unknown>, scope: string): Promise<void> {
+    const session = this.sessionManager.getSession();
+    const peer = this.p2pPeer;
+    if ((session && session.transport !== "p2p") || this.disposed) {
+      return;
+    }
+
+    const candidateRaw = payload.candidate;
+    const candidateRecord = toRecord(candidateRaw);
+    const candidateString = typeof candidateRaw === "string"
+      ? candidateRaw
+      : toId(candidateRecord.candidate);
+    if (!candidateString) {
+      return;
+    }
+
+    const init: RTCIceCandidateInit = {
+      candidate: candidateString,
+      sdpMid: typeof candidateRecord.sdpMid === "string" ? candidateRecord.sdpMid : undefined,
+      sdpMLineIndex: typeof candidateRecord.sdpMLineIndex === "number" ? candidateRecord.sdpMLineIndex : undefined,
+    };
+
+    if (!peer || !peer.remoteDescription) {
+      this.p2pPendingRemoteIce.push(init);
+      this.debugLog("p2p_ice_queued", { scope, count: this.p2pPendingRemoteIce.length });
+      return;
+    }
+
+    try {
+      await peer.addIceCandidate(init);
+    } catch (error) {
+      this.debugLog("p2p_add_ice_failed", {
+        scope,
+        message: error instanceof Error ? error.message : String(error ?? ""),
+      });
     }
   }
 

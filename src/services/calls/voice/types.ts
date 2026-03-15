@@ -1,5 +1,7 @@
 import type { CallMode } from "../callApi";
 
+export type VoiceTransport = "mediasoup" | "p2p";
+
 export type CallLifecycleState =
   | "idle"
   | "connecting"
@@ -9,12 +11,19 @@ export type CallLifecycleState =
   | "destroyed";
 
 export interface VoiceSession {
+  transport: VoiceTransport;
   callId: string;
   roomId: string;
   conversationId: string;
   mode: CallMode;
   role: "caller" | "callee";
   resumeToken: string | null;
+  /**
+   * For P2P calls (transport="p2p"), we store the latest SDP blobs so the UI can resend them on resume.
+   * Mediasoup sessions do not use SDP signaling.
+   */
+  offerSdp?: string | null;
+  answerSdp?: string | null;
 }
 
 export interface NormalizedAudioSettings {
