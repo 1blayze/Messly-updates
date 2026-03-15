@@ -530,19 +530,45 @@ async function invokeSpotifyConnectionsEdge<TRequest extends Record<string, unkn
     timeoutMs?: number;
   } = {},
 ): Promise<TResponse> {
-  const validatedEdgeToken = String(await authService.getValidatedEdgeAccessToken() ?? "").trim();
-  if (!validatedEdgeToken) {
-    throw createSpotifyApiError("spotify_unauthorized", "Sessao invalida ou expirada.");
-  }
+  const run = async (): Promise<TResponse> => {
+    const validatedEdgeToken = String(await authService.getValidatedEdgeAccessToken() ?? "").trim();
+    if (!validatedEdgeToken) {
+      throw createSpotifyApiError("spotify_unauthorized", "Sessao invalida ou expirada.");
+    }
+
+    try {
+      return await invokeEdgeJson<TRequest, TResponse>(SPOTIFY_CONNECTIONS_EDGE_FUNCTION, payload, {
+        requireAuth: true,
+        retries: 0,
+        timeoutMs: options.timeoutMs ?? 15_000,
+        signal: options.signal,
+      });
+    } catch (error) {
+      throw error;
+    }
+  };
 
   try {
-    return await invokeEdgeJson<TRequest, TResponse>(SPOTIFY_CONNECTIONS_EDGE_FUNCTION, payload, {
-      requireAuth: true,
-      retries: 0,
-      timeoutMs: options.timeoutMs ?? 15_000,
-      signal: options.signal,
-    });
+    return await run();
   } catch (error) {
+    // Se o token tiver expirado na borda, tente uma vez renovar a sessao e repetir.
+    const edgeError = error instanceof Error ? error : new Error(String(error));
+    const message = edgeError.message.toLowerCase();
+    const isUnauthorized =
+      message.includes("unauthorized") ||
+      message.includes("invalid token") ||
+      message.includes("unvalidated") ||
+      message.includes("invalid jwt");
+
+    if (isUnauthorized) {
+      try {
+        await authService.refreshSession();
+        return await run();
+      } catch {
+        // fallback para tratamento padrao abaixo
+      }
+    }
+
     normalizeSpotifyEdgeError(error);
   }
 }
