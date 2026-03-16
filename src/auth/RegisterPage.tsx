@@ -770,8 +770,9 @@ export default function RegisterPage() {
               {isSubmitting ? "Continuando..." : "Continuar"}
             </button>
             <p className="auth-legal">
-              Ao se registrar, você concorda com os <Link to="/terms">Termos de Serviço</Link> e a{" "}
-              <Link to="/privacy">Política de Privacidade</Link>.
+              Ao se registrar, você concorda com os{" "}
+              <a href="/landing/terms.html">Termos de Serviço</a> e a{" "}
+              <a href="/landing/privacy.html">Política de Privacidade</a>.
             </p>
             <div className="auth-footer">
               <span>Já tem uma conta?</span>

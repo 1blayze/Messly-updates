@@ -5,11 +5,6 @@ import LoginPage from "../auth/LoginPage";
 import { appBootstrap, useAppBootstrapSnapshot } from "../core/appBootstrap";
 import { markStartupUiReady } from "../app/startupUi";
 import AppStartupScreen from "../app/AppStartupScreen";
-import {
-  PublicPrivacyPage,
-  PublicSiteLayout,
-  PublicTermsPage,
-} from "../public";
 
 type AppShellModule = typeof import("../app/AppShell");
 
@@ -324,6 +319,17 @@ function SettingsConnectionsRoute() {
   return <AppRoute />;
 }
 
+function RedirectToStaticPage({ href }: { href: string }) {
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.location.replace(href);
+  }, [href]);
+
+  return null;
+}
+
 export default function AppRoutes() {
   const { user, isLoading, authReady, hasSessionHint, sessionHintResolved } = useAuthSession();
   const bootstrap = useAppBootstrapSnapshot();
@@ -421,14 +427,12 @@ export default function AppRoutes() {
     <Router>
       <Routes>
         {isElectronRuntime ? <Route path="/" element={<RootRedirect />} /> : null}
-        <Route element={<PublicSiteLayout />}>
-          <Route path="/terms" element={<PublicTermsPage />} />
-          <Route path="/privacy" element={<PublicPrivacyPage />} />
-        </Route>
-        <Route path="/termos" element={<Navigate to="/terms" replace />} />
-        <Route path="/termos-de-uso" element={<Navigate to="/terms" replace />} />
-        <Route path="/privacidade" element={<Navigate to="/privacy" replace />} />
-        <Route path="/politica-de-privacidade" element={<Navigate to="/privacy" replace />} />
+        <Route path="/terms" element={<RedirectToStaticPage href="/landing/terms.html" />} />
+        <Route path="/privacy" element={<RedirectToStaticPage href="/landing/privacy.html" />} />
+        <Route path="/termos" element={<RedirectToStaticPage href="/landing/terms.html" />} />
+        <Route path="/termos-de-uso" element={<RedirectToStaticPage href="/landing/terms.html" />} />
+        <Route path="/privacidade" element={<RedirectToStaticPage href="/landing/privacy.html" />} />
+        <Route path="/politica-de-privacidade" element={<RedirectToStaticPage href="/landing/privacy.html" />} />
         <Route path="/auth/login" element={<LoginRoute />} />
         <Route path="/auth/register" element={<RegisterRoute />} />
         <Route path="/auth/verify" element={<VerifyRoute />} />
