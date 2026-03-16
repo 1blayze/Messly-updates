@@ -14,16 +14,19 @@ const VOICE_RATE_LIMIT_WINDOW_MS = 10_000;
 const VOICE_RATE_LIMIT_MAX_MESSAGES = 280;
 const VOICE_ROOM_REDIS_KEY_PREFIX = "messly:voice:room:";
 const VOICE_ROOM_REDIS_TTL_SECONDS = 120;
-const VOICE_DISTRIBUTED_PARTICIPANT_STALE_MS = 90_000;
+const VOICE_DISTRIBUTED_PARTICIPANT_STALE_MS = 20_000;
 const VOICE_CALL_SESSION_REDIS_KEY_PREFIX = "messly:voice:call-session:";
 const VOICE_USER_CALL_STATE_REDIS_KEY_PREFIX = "messly:voice:user-call-state:";
+const VOICE_ACTIVE_SESSION_REDIS_KEY_PREFIX = "messly:voice:active-session:";
 const VOICE_CALL_ACTIVE_TTL_SECONDS = 1_800;
 const VOICE_CALL_ENDED_TTL_SECONDS = 120;
 const VOICE_CALL_RING_TIMEOUT_MS = 3 * 60_000;
 const VOICE_CALL_SINGLE_PARTICIPANT_TIMEOUT_MS = 5 * 60_000;
-const VOICE_CALL_DISCONNECTED_GRACE_MS = 60_000;
+const VOICE_CALL_DISCONNECTED_GRACE_MS = 20_000;
 const VOICE_CALL_SWEEP_INTERVAL_MS = 5_000;
 const VOICE_CALL_ENDED_RETENTION_MS = 120_000;
+const VOICE_SESSION_HEARTBEAT_TIMEOUT_MS = 20_000;
+const VOICE_SESSION_REDIS_TTL_SECONDS = 120;
 
 const VOICE_CALL_STATUS_VALUES = ["IDLE", "RINGING", "CONNECTED", "RECONNECTING", "ENDED"] as const;
 const VOICE_CALL_PARTICIPANT_STATUS_VALUES = ["RINGING", "CONNECTED", "DISCONNECTED"] as const;
@@ -36,12 +39,21 @@ const VOICE_CALL_LIFECYCLE_EVENTS = [
   "CALL_ENDED",
   "CALL_STATE_UPDATED",
 ] as const;
+const VOICE_SESSION_EVENTS = [
+  "VOICE_SESSION_START",
+  "VOICE_SESSION_UPDATE",
+  "VOICE_SESSION_RECONNECT",
+  "VOICE_SESSION_END",
+] as const;
 const DISTRIBUTED_PARTICIPANT_STATE_VALUES = ["CONNECTED", "DISCONNECTED"] as const;
+const VOICE_SESSION_CONNECTION_STATE_VALUES = ["connecting", "connected", "reconnecting", "disconnected"] as const;
 
 type VoiceCallSessionStatus = (typeof VOICE_CALL_STATUS_VALUES)[number];
 type VoiceCallParticipantStatus = (typeof VOICE_CALL_PARTICIPANT_STATUS_VALUES)[number];
 type VoiceCallLifecycleEvent = (typeof VOICE_CALL_LIFECYCLE_EVENTS)[number];
+type VoiceSessionEvent = (typeof VOICE_SESSION_EVENTS)[number];
 type DistributedParticipantState = (typeof DISTRIBUTED_PARTICIPANT_STATE_VALUES)[number];
+type VoiceSessionConnectionState = (typeof VOICE_SESSION_CONNECTION_STATE_VALUES)[number];
 
 const sdpPayloadSchema = z.object({
   type: z.string().trim().min(1).max(32),
@@ -52,6 +64,7 @@ const joinMessageSchema = z.object({
   type: z.literal("join"),
   roomId: z.string().trim().min(1).max(128),
   userId: z.string().trim().min(1).max(128),
+  deviceId: z.string().trim().min(1).max(128).optional(),
   displayName: z.string().trim().max(120).optional(),
   accessToken: z.string().trim().min(1).max(8_000).optional(),
 });
@@ -168,6 +181,24 @@ const userCallStateSnapshotSchema = z.object({
   updatedAt: z.number().finite(),
 });
 
+const voiceSessionSnapshotSchema = z.object({
+  sessionId: z.string().trim().min(1).max(128),
+  userId: z.string().trim().min(1).max(128),
+  callId: z.string().trim().min(1).max(128),
+  roomId: z.string().trim().min(1).max(128),
+  deviceId: z.string().trim().min(1).max(128),
+  connectionId: z.string().trim().min(1).max(128),
+  instanceId: z.string().trim().min(1).max(128),
+  connectedAt: z.number().finite(),
+  muted: z.boolean(),
+  deafened: z.boolean(),
+  speaking: z.boolean(),
+  connectionState: z.enum(VOICE_SESSION_CONNECTION_STATE_VALUES),
+  lastHeartbeatAt: z.number().finite(),
+  updatedAt: z.number().finite(),
+  disconnectedAt: z.number().finite().nullable().optional().default(null),
+});
+
 const callSnapshotSchema = z.object({
   callId: z.string().trim().min(1).max(128),
   roomId: z.string().trim().min(1).max(128),
@@ -262,6 +293,14 @@ const clusterCallStateEventSchema = z.object({
   call: callSnapshotSchema,
 });
 
+const clusterVoiceSessionEventSchema = z.object({
+  kind: z.literal("voice-session"),
+  sourceInstanceId: z.string().trim().min(1).max(128),
+  userId: z.string().trim().min(1).max(128),
+  event: z.enum(VOICE_SESSION_EVENTS),
+  session: voiceSessionSnapshotSchema.nullable(),
+});
+
 const clusterEventSchema = z.discriminatedUnion("kind", [
   clusterParticipantJoinedEventSchema,
   clusterParticipantLeftEventSchema,
@@ -271,11 +310,13 @@ const clusterEventSchema = z.discriminatedUnion("kind", [
   clusterRelayEventSchema,
   clusterReplaceSessionEventSchema,
   clusterCallStateEventSchema,
+  clusterVoiceSessionEventSchema,
 ]);
 
 type VoiceClusterEvent = z.infer<typeof clusterEventSchema>;
 type VoiceDistributedParticipantDescriptor = z.infer<typeof distributedParticipantSchema>;
 type UserCallStateSnapshot = z.infer<typeof userCallStateSnapshotSchema>;
+type VoiceSessionSnapshot = z.infer<typeof voiceSessionSnapshotSchema>;
 
 interface VoiceConnectionContext {
   connectionId: string;
@@ -284,6 +325,8 @@ interface VoiceConnectionContext {
   userAgent: string | null;
   roomId: string | null;
   userId: string | null;
+  deviceId: string;
+  sessionId: string | null;
   displayName: string;
   muted: boolean;
   deafened: boolean;
@@ -354,6 +397,10 @@ function toUserCallStateRedisKey(userId: string): string {
   return `${VOICE_USER_CALL_STATE_REDIS_KEY_PREFIX}${userId}`;
 }
 
+function toActiveVoiceSessionRedisKey(userId: string): string {
+  return `${VOICE_ACTIVE_SESSION_REDIS_KEY_PREFIX}${userId}`;
+}
+
 function createIdleCallSnapshot(roomId: string): VoiceCallSessionSnapshot {
   const now = Date.now();
   return {
@@ -420,6 +467,7 @@ export class VoiceSignalingServer {
   private readonly connections = new Map<WebSocket, VoiceConnectionContext>();
   private readonly rateWindows = new Map<string, VoiceMessageRateWindow>();
   private readonly callSessions = new Map<string, VoiceCallSessionSnapshot>();
+  private readonly activeVoiceSessions = new Map<string, VoiceSessionSnapshot>();
   private clusterSubscribed = false;
   private sweepTimer: NodeJS.Timeout | null = null;
   private sweepRunning = false;
@@ -512,6 +560,7 @@ export class VoiceSignalingServer {
     this.userCallStateWatchers.clear();
     this.rateWindows.clear();
     this.callSessions.clear();
+    this.activeVoiceSessions.clear();
     this.wss.close();
   }
 
@@ -544,6 +593,7 @@ export class VoiceSignalingServer {
   }
 
   private async sweepCallSessions(): Promise<void> {
+    await this.sweepStaleParticipantConnections();
     const roomIds = new Set<string>();
     for (const roomId of this.rooms.keys()) {
       roomIds.add(roomId);
@@ -569,6 +619,8 @@ export class VoiceSignalingServer {
         await this.redis.command.del(toCallSessionRedisKey(roomId)).catch(() => undefined);
       }
     }
+
+    await this.sweepStaleVoiceSessions();
   }
 
   private handleConnection(socket: WebSocket, request: IncomingMessage): void {
@@ -584,6 +636,8 @@ export class VoiceSignalingServer {
       userAgent,
       roomId: null,
       userId: null,
+      deviceId: "",
+      sessionId: null,
       displayName: "",
       muted: false,
       deafened: false,
@@ -677,6 +731,7 @@ export class VoiceSignalingServer {
       case "ping":
         if (context.mode === "participant" && context.roomId && context.userId) {
           await this.upsertDistributedParticipant(context, "CONNECTED");
+          await this.touchActiveVoiceSession(context.userId, context.connectionId);
         }
         this.send(context.socket, {
           type: "pong",
@@ -724,8 +779,11 @@ export class VoiceSignalingServer {
 
     context.roomId = roomId;
     context.userId = userId;
+    context.deviceId = "";
+    context.sessionId = null;
     context.displayName = displayName;
     context.muted = false;
+    context.deafened = false;
     context.speaking = false;
     context.mode = "watch";
 
@@ -775,6 +833,8 @@ export class VoiceSignalingServer {
 
     context.roomId = null;
     context.userId = userId;
+    context.deviceId = "";
+    context.sessionId = null;
     context.displayName = displayName;
     context.muted = false;
     context.deafened = false;
@@ -788,12 +848,14 @@ export class VoiceSignalingServer {
     });
 
     await this.sendUserCallStateSnapshot(context.socket, userId);
+    await this.sendVoiceSessionSnapshot(context.socket, userId);
   }
 
   private async handleJoin(context: VoiceConnectionContext, payload: z.infer<typeof joinMessageSchema>): Promise<void> {
     const roomId = payload.roomId;
     const userId = payload.userId;
     const displayName = payload.displayName?.trim() || userId;
+    const deviceId = String(payload.deviceId ?? "").trim() || `unknown:${context.connectionId.slice(0, 8)}`;
 
     if (this.validateAccessToken) {
       const token = String(payload.accessToken ?? "").trim();
@@ -865,6 +927,7 @@ export class VoiceSignalingServer {
     const alreadyJoined = context.roomId === roomId && context.userId === userId && context.mode === "participant";
     context.roomId = roomId;
     context.userId = userId;
+    context.deviceId = deviceId;
     context.displayName = displayName;
     context.muted = false;
     context.deafened = false;
@@ -911,14 +974,17 @@ export class VoiceSignalingServer {
       });
     }
 
-    await this.reconcileCallSession(roomId, "join", {
+    const callSnapshot = await this.reconcileCallSession(roomId, "join", {
       userId,
       displayName,
     });
 
+    await this.activateVoiceSession(context, callSnapshot);
+
     this.logger.info("voice_room_joined", {
       roomId,
       userId,
+      deviceId,
       connectionId: context.connectionId,
       activeRoomSize: participants.length,
       localRoomSize: room.size,
@@ -951,6 +1017,11 @@ export class VoiceSignalingServer {
       muted,
     });
 
+    await this.updateActiveVoiceSession(context.userId, {
+      muted,
+      updatedAt: Date.now(),
+    }, "VOICE_SESSION_UPDATE", context.connectionId);
+
     if (previousMuted !== muted) {
       await this.reconcileCallSession(context.roomId, "system");
     }
@@ -979,6 +1050,11 @@ export class VoiceSignalingServer {
       userId: context.userId,
       deafened,
     });
+
+    await this.updateActiveVoiceSession(context.userId, {
+      deafened,
+      updatedAt: Date.now(),
+    }, "VOICE_SESSION_UPDATE", context.connectionId);
 
     if (previousDeafened !== deafened) {
       await this.reconcileCallSession(context.roomId, "system");
@@ -1011,6 +1087,11 @@ export class VoiceSignalingServer {
       speaking,
       level: normalizedLevel,
     });
+
+    await this.updateActiveVoiceSession(context.userId, {
+      speaking,
+      updatedAt: Date.now(),
+    }, "VOICE_SESSION_UPDATE", context.connectionId);
 
     if (previousSpeaking !== speaking) {
       await this.reconcileCallSession(context.roomId, "system");
@@ -1095,12 +1176,15 @@ export class VoiceSignalingServer {
     const userId = context.userId;
     const displayName = context.displayName;
     const connectionId = context.connectionId;
+    const sessionId = context.sessionId;
 
     if (mode === "watch-user-call-state" && userId) {
       this.removeWatcherFromUserCallState(context);
       context.mode = "idle";
       context.roomId = null;
       context.userId = null;
+      context.deviceId = "";
+      context.sessionId = null;
       context.displayName = "";
       context.muted = false;
       context.deafened = false;
@@ -1112,6 +1196,8 @@ export class VoiceSignalingServer {
       context.mode = "idle";
       context.roomId = null;
       context.userId = null;
+      context.deviceId = "";
+      context.sessionId = null;
       context.displayName = "";
       context.muted = false;
       context.deafened = false;
@@ -1124,6 +1210,8 @@ export class VoiceSignalingServer {
       context.mode = "idle";
       context.roomId = null;
       context.userId = null;
+      context.deviceId = "";
+      context.sessionId = null;
       context.displayName = "";
       context.muted = false;
       context.deafened = false;
@@ -1143,6 +1231,8 @@ export class VoiceSignalingServer {
     context.mode = "idle";
     context.roomId = null;
     context.userId = null;
+    context.deviceId = "";
+    context.sessionId = null;
     context.displayName = "";
     context.muted = false;
     context.deafened = false;
@@ -1154,8 +1244,20 @@ export class VoiceSignalingServer {
 
     if (reason === "socket_closed") {
       await this.markDistributedParticipantDisconnected(roomId, userId, connectionId);
+      await this.updateActiveVoiceSession(userId, {
+        connectionState: "reconnecting",
+        disconnectedAt: Date.now(),
+        updatedAt: Date.now(),
+      }, "VOICE_SESSION_RECONNECT", connectionId);
     } else {
       await this.removeDistributedParticipant(roomId, userId, connectionId);
+      await this.clearActiveVoiceSession(
+        userId,
+        "VOICE_SESSION_END",
+        "disconnected",
+        connectionId,
+        sessionId,
+      );
     }
 
     this.broadcastToParticipants(roomId, {
@@ -1272,6 +1374,16 @@ export class VoiceSignalingServer {
       this.callSessions.set(payload.roomId, payload.call);
       this.broadcastCallStateLocal(payload.roomId, payload.event, payload.call);
       this.emitUserCallStateUpdates(payload.call, previousSnapshot);
+      return;
+    }
+
+    if (payload.kind === "voice-session") {
+      if (payload.session) {
+        this.activeVoiceSessions.set(payload.userId, payload.session);
+      } else {
+        this.activeVoiceSessions.delete(payload.userId);
+      }
+      this.broadcastVoiceSessionLocal(payload.userId, payload.event, payload.session);
       return;
     }
 
@@ -1732,6 +1844,311 @@ export class VoiceSignalingServer {
       call: normalizedState ? callSnapshot : null,
       serverTime: new Date().toISOString(),
     });
+  }
+
+  private broadcastVoiceSessionLocal(
+    userId: string,
+    event: VoiceSessionEvent,
+    session: VoiceSessionSnapshot | null,
+  ): void {
+    const watchers = this.userCallStateWatchers.get(userId);
+    if (!watchers) {
+      return;
+    }
+    const payload = {
+      type: "voice-session",
+      userId,
+      event,
+      session,
+      serverTime: new Date().toISOString(),
+    };
+    for (const context of watchers.values()) {
+      this.send(context.socket, payload);
+    }
+  }
+
+  private async emitVoiceSessionEvent(
+    userId: string,
+    event: VoiceSessionEvent,
+    session: VoiceSessionSnapshot | null,
+    publishCluster = true,
+  ): Promise<void> {
+    this.logger.info(event, {
+      userId,
+      roomId: session?.roomId ?? null,
+      callId: session?.callId ?? null,
+      deviceId: session?.deviceId ?? null,
+      connectionState: session?.connectionState ?? null,
+    });
+    this.broadcastVoiceSessionLocal(userId, event, session);
+    if (!publishCluster) {
+      return;
+    }
+    await this.publishClusterEvent({
+      kind: "voice-session",
+      sourceInstanceId: this.instanceId,
+      userId,
+      event,
+      session,
+    });
+  }
+
+  private async readActiveVoiceSession(userId: string): Promise<VoiceSessionSnapshot | null> {
+    const local = this.activeVoiceSessions.get(userId) ?? null;
+    if (local) {
+      return local;
+    }
+    if (!this.redis) {
+      return null;
+    }
+    const raw = await this.redis.command.get(toActiveVoiceSessionRedisKey(userId)).catch(() => null);
+    if (!raw) {
+      return null;
+    }
+    try {
+      const parsed = voiceSessionSnapshotSchema.parse(JSON.parse(raw) as unknown);
+      this.activeVoiceSessions.set(userId, parsed);
+      return parsed;
+    } catch {
+      await this.redis.command.del(toActiveVoiceSessionRedisKey(userId)).catch(() => undefined);
+      return null;
+    }
+  }
+
+  private async persistActiveVoiceSession(session: VoiceSessionSnapshot): Promise<void> {
+    this.activeVoiceSessions.set(session.userId, session);
+    if (!this.redis) {
+      return;
+    }
+    await this.redis.command.set(
+      toActiveVoiceSessionRedisKey(session.userId),
+      JSON.stringify(session),
+      "EX",
+      VOICE_SESSION_REDIS_TTL_SECONDS,
+    ).catch(() => undefined);
+  }
+
+  private async clearActiveVoiceSession(
+    userId: string,
+    event: VoiceSessionEvent,
+    connectionState: VoiceSessionConnectionState,
+    expectedConnectionId?: string | null,
+    expectedSessionId?: string | null,
+  ): Promise<void> {
+    const existing = await this.readActiveVoiceSession(userId);
+    if (!existing) {
+      return;
+    }
+    if (expectedConnectionId && existing.connectionId !== expectedConnectionId) {
+      return;
+    }
+    if (expectedSessionId && existing.sessionId !== expectedSessionId) {
+      return;
+    }
+
+    const endedSession: VoiceSessionSnapshot = {
+      ...existing,
+      connectionState,
+      disconnectedAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+
+    this.activeVoiceSessions.delete(userId);
+    if (this.redis) {
+      await this.redis.command.del(toActiveVoiceSessionRedisKey(userId)).catch(() => undefined);
+    }
+    await this.emitVoiceSessionEvent(userId, event, endedSession);
+  }
+
+  private async updateActiveVoiceSession(
+    userId: string,
+    patch: Partial<VoiceSessionSnapshot>,
+    event: VoiceSessionEvent,
+    expectedConnectionId?: string | null,
+  ): Promise<void> {
+    const existing = await this.readActiveVoiceSession(userId);
+    if (!existing) {
+      return;
+    }
+    if (expectedConnectionId && existing.connectionId !== expectedConnectionId) {
+      return;
+    }
+    const nextSession: VoiceSessionSnapshot = {
+      ...existing,
+      ...patch,
+      updatedAt: patch.updatedAt ?? Date.now(),
+      lastHeartbeatAt: patch.lastHeartbeatAt ?? existing.lastHeartbeatAt,
+    };
+    if (
+      nextSession.muted === existing.muted &&
+      nextSession.deafened === existing.deafened &&
+      nextSession.speaking === existing.speaking &&
+      nextSession.connectionState === existing.connectionState &&
+      nextSession.callId === existing.callId &&
+      nextSession.roomId === existing.roomId
+    ) {
+      return;
+    }
+    await this.persistActiveVoiceSession(nextSession);
+    await this.emitVoiceSessionEvent(userId, event, nextSession);
+  }
+
+  private async touchActiveVoiceSession(userId: string, expectedConnectionId: string): Promise<void> {
+    const existing = await this.readActiveVoiceSession(userId);
+    if (!existing || existing.connectionId !== expectedConnectionId) {
+      return;
+    }
+    const now = Date.now();
+    const wasReconnecting = existing.connectionState === "reconnecting";
+    const nextSession: VoiceSessionSnapshot = {
+      ...existing,
+      connectionState: "connected",
+      disconnectedAt: null,
+      lastHeartbeatAt: now,
+      updatedAt: now,
+    };
+    await this.persistActiveVoiceSession(nextSession);
+    if (wasReconnecting) {
+      await this.emitVoiceSessionEvent(userId, "VOICE_SESSION_RECONNECT", nextSession);
+    }
+  }
+
+  private async ensureExclusiveVoiceSession(
+    context: VoiceConnectionContext,
+    callSnapshot: VoiceCallSessionSnapshot,
+  ): Promise<VoiceSessionEvent> {
+    const userId = String(context.userId ?? "").trim();
+    if (!userId) {
+      return "VOICE_SESSION_START";
+    }
+    const now = Date.now();
+    const existing = await this.readActiveVoiceSession(userId);
+    let event: VoiceSessionEvent = "VOICE_SESSION_START";
+
+    if (existing && (existing.connectionId !== context.connectionId || existing.instanceId !== this.instanceId)) {
+      const staleForMs = now - existing.lastHeartbeatAt;
+      if (staleForMs > VOICE_SESSION_HEARTBEAT_TIMEOUT_MS) {
+        await this.clearActiveVoiceSession(
+          userId,
+          "VOICE_SESSION_END",
+          "disconnected",
+          existing.connectionId,
+          existing.sessionId,
+        );
+      } else {
+        if (existing.instanceId === this.instanceId) {
+          const targetContext = Array.from(this.connections.values()).find(
+            (candidate) => candidate.connectionId === existing.connectionId,
+          ) ?? null;
+          if (targetContext) {
+            this.send(targetContext.socket, {
+              type: "replaced",
+              reason: "VOICE_SESSION_REPLACED",
+            });
+            this.safeCloseSocket(targetContext.socket, 4009, "VOICE_SESSION_REPLACED");
+            await this.removeConnectionFromVoiceScope(targetContext, "session_replaced");
+          }
+        } else {
+          await this.publishClusterEvent({
+            kind: "replace-session",
+            sourceInstanceId: this.instanceId,
+            targetInstanceId: existing.instanceId,
+            roomId: existing.roomId,
+            userId,
+            connectionId: existing.connectionId,
+            reason: "VOICE_SESSION_REPLACED",
+          });
+        }
+      }
+    } else if (existing && existing.connectionId === context.connectionId && existing.instanceId === this.instanceId) {
+      event = existing.connectionState === "reconnecting" ? "VOICE_SESSION_RECONNECT" : "VOICE_SESSION_UPDATE";
+    } else if (
+      existing &&
+      existing.connectionState === "reconnecting" &&
+      existing.deviceId === context.deviceId
+    ) {
+      event = "VOICE_SESSION_RECONNECT";
+    }
+
+    const connectedAt = callSnapshot.connectedAt ?? now;
+    const nextSession: VoiceSessionSnapshot = {
+      sessionId:
+        existing && existing.connectionId === context.connectionId && existing.instanceId === this.instanceId
+          ? existing.sessionId
+          : event === "VOICE_SESSION_RECONNECT" && existing?.deviceId === context.deviceId
+          ? existing.sessionId
+          : randomUUID(),
+      userId,
+      callId: callSnapshot.callId,
+      roomId: callSnapshot.roomId,
+      deviceId: context.deviceId || `unknown:${context.connectionId.slice(0, 8)}`,
+      connectionId: context.connectionId,
+      instanceId: this.instanceId,
+      connectedAt,
+      muted: context.muted,
+      deafened: context.deafened,
+      speaking: context.speaking,
+      connectionState: "connected",
+      lastHeartbeatAt: now,
+      updatedAt: now,
+      disconnectedAt: null,
+    };
+    context.sessionId = nextSession.sessionId;
+    await this.persistActiveVoiceSession(nextSession);
+    await this.emitVoiceSessionEvent(userId, event, nextSession);
+    return event;
+  }
+
+  private async activateVoiceSession(
+    context: VoiceConnectionContext,
+    callSnapshot: VoiceCallSessionSnapshot,
+  ): Promise<void> {
+    await this.ensureExclusiveVoiceSession(context, callSnapshot);
+  }
+
+  private async sendVoiceSessionSnapshot(socket: WebSocket, userId: string): Promise<void> {
+    const session = await this.readActiveVoiceSession(userId);
+    this.send(socket, {
+      type: "voice-session",
+      userId,
+      event: "VOICE_SESSION_UPDATE",
+      session,
+      serverTime: new Date().toISOString(),
+    });
+  }
+
+  private async sweepStaleParticipantConnections(): Promise<void> {
+    const now = Date.now();
+    const participantContexts = Array.from(this.connections.values()).filter(
+      (context) => context.mode === "participant" && context.roomId && context.userId,
+    );
+    for (const context of participantContexts) {
+      if (now - context.lastSeenAt <= VOICE_SESSION_HEARTBEAT_TIMEOUT_MS) {
+        continue;
+      }
+      this.safeCloseSocket(context.socket, 4011, "VOICE_HEARTBEAT_TIMEOUT");
+      await this.removeConnectionFromVoiceScope(context, "heartbeat_timeout");
+    }
+  }
+
+  private async sweepStaleVoiceSessions(): Promise<void> {
+    const now = Date.now();
+    const localSnapshots = Array.from(this.activeVoiceSessions.values());
+    for (const session of localSnapshots) {
+      if (session.instanceId !== this.instanceId) {
+        continue;
+      }
+      if (now - session.lastHeartbeatAt <= VOICE_SESSION_HEARTBEAT_TIMEOUT_MS) {
+        continue;
+      }
+      await this.clearActiveVoiceSession(
+        session.userId,
+        "VOICE_SESSION_END",
+        "disconnected",
+        session.connectionId,
+        session.sessionId,
+      );
+    }
   }
 
   private async persistUserCallStates(

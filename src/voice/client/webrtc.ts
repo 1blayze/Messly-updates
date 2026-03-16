@@ -15,7 +15,7 @@ import {
 import { VoiceActivityDetector } from "./voiceDetection";
 
 const DEFAULT_SIGNALING_PATH = "/voice";
-const SIGNALING_PING_INTERVAL_MS = 3_000;
+const SIGNALING_PING_INTERVAL_MS = 5_000;
 const SIGNALING_RECONNECT_BASE_DELAY_MS = 800;
 const SIGNALING_RECONNECT_MAX_DELAY_MS = 8_000;
 const DIAGNOSTICS_POLL_INTERVAL_MS = 2_000;
@@ -34,6 +34,7 @@ const OPUS_CHANNELS = 1;
 const OPUS_FRAME_DURATION = 20;
 const VOICE_TARGET_LATENCY_MS = 60;
 const VOICE_MAX_JITTER_MS = 30;
+const VOICE_DEVICE_ID_STORAGE_KEY = "messly:voice:device-id:v1";
 
 const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
   {
@@ -92,6 +93,7 @@ export interface VoiceCallMediaPreferences {
 export interface VoiceCallClientOptions {
   roomId: string;
   self: VoiceUserIdentity;
+  deviceId?: string | null;
   peerDirectory?: Record<string, VoiceUserIdentity>;
   signalingUrl?: string;
   mediaPreferences?: VoiceCallMediaPreferences;
@@ -282,6 +284,37 @@ function resolveVoiceSignalingUrl(explicitUrlRaw: string | null | undefined): st
     return parsed.toString();
   } catch {
     return null;
+  }
+}
+
+function createVoiceDeviceId(): string {
+  const entropy = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.round(Math.random() * 1_000_000_000)}`;
+  const platform = typeof window !== "undefined" && (window as Window & { electronAPI?: unknown }).electronAPI
+    ? "desktop"
+    : "browser";
+  return `${platform}:${entropy}`;
+}
+
+function resolveVoiceDeviceId(explicitDeviceIdRaw: string | null | undefined): string {
+  const explicitDeviceId = String(explicitDeviceIdRaw ?? "").trim();
+  if (explicitDeviceId) {
+    return explicitDeviceId;
+  }
+  if (typeof window === "undefined") {
+    return createVoiceDeviceId();
+  }
+  try {
+    const current = String(window.localStorage.getItem(VOICE_DEVICE_ID_STORAGE_KEY) ?? "").trim();
+    if (current) {
+      return current;
+    }
+    const next = createVoiceDeviceId();
+    window.localStorage.setItem(VOICE_DEVICE_ID_STORAGE_KEY, next);
+    return next;
+  } catch {
+    return createVoiceDeviceId();
   }
 }
 
@@ -530,6 +563,7 @@ function normalizeMediaPreferences(preferences: VoiceCallMediaPreferences | null
 export class VoiceCallClient {
   private readonly roomId: string;
   private readonly self: VoiceUserIdentity;
+  private readonly deviceId: string;
   private readonly peerDirectory = new Map<string, VoiceUserIdentity>();
   private readonly signalingUrl: string | null;
   private readonly mediaPreferences: Required<VoiceCallMediaPreferences>;
@@ -567,6 +601,7 @@ export class VoiceCallClient {
 
   constructor(options: VoiceCallClientOptions) {
     this.roomId = String(options.roomId ?? "").trim();
+    this.deviceId = resolveVoiceDeviceId(options.deviceId);
     this.self = {
       userId: String(options.self.userId ?? "").trim(),
       displayName: toDisplayName(options.self.displayName, "Voce"),
@@ -1530,6 +1565,7 @@ export class VoiceCallClient {
       type: "join",
       roomId: this.roomId,
       userId: this.self.userId,
+      deviceId: this.deviceId,
       displayName: this.self.displayName,
       accessToken: accessToken ?? undefined,
     });

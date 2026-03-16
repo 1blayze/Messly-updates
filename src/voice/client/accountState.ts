@@ -22,10 +22,26 @@ export interface VoiceAccountCallStateSnapshot {
   updatedAt: number;
 }
 
+export interface VoiceAccountAudioSessionSnapshot {
+  sessionId: string;
+  userId: string;
+  callId: string;
+  roomId: string;
+  deviceId: string;
+  connectedAt: number;
+  muted: boolean;
+  deafened: boolean;
+  speaking: boolean;
+  connectionState: "connecting" | "connected" | "reconnecting" | "disconnected";
+  lastHeartbeatAt: number;
+  updatedAt: number;
+}
+
 export interface VoiceAccountCallStateUpdate {
   userId: string;
   state: VoiceAccountCallStateSnapshot | null;
   call: VoiceCallSessionSnapshot | null;
+  session: VoiceAccountAudioSessionSnapshot | null;
 }
 
 export interface VoiceCallAccountStateClientOptions {
@@ -94,6 +110,31 @@ const userCallStateSignalSchema = z.object({
   call: callSnapshotSchema.nullable(),
 });
 
+const voiceSessionSignalSchema = z.object({
+  type: z.literal("voice-session"),
+  userId: z.string().trim().min(1),
+  event: z.enum([
+    "VOICE_SESSION_START",
+    "VOICE_SESSION_UPDATE",
+    "VOICE_SESSION_RECONNECT",
+    "VOICE_SESSION_END",
+  ]),
+  session: z.object({
+    sessionId: z.string().trim().min(1),
+    userId: z.string().trim().min(1),
+    callId: z.string().trim().min(1),
+    roomId: z.string().trim().min(1),
+    deviceId: z.string().trim().min(1),
+    connectedAt: z.number().finite(),
+    muted: z.boolean(),
+    deafened: z.boolean(),
+    speaking: z.boolean(),
+    connectionState: z.enum(["connecting", "connected", "reconnecting", "disconnected"]),
+    lastHeartbeatAt: z.number().finite(),
+    updatedAt: z.number().finite(),
+  }).nullable(),
+});
+
 const errorSignalSchema = z.object({
   type: z.literal("error"),
   code: z.string().trim().min(1),
@@ -114,6 +155,7 @@ const inboundSignalingSchema = z.discriminatedUnion("type", [
   connectedSignalSchema,
   watchingUserCallStateSignalSchema,
   userCallStateSignalSchema,
+  voiceSessionSignalSchema,
   errorSignalSchema,
   pongSignalSchema,
   replacedSignalSchema,
@@ -331,6 +373,16 @@ export class VoiceCallAccountStateClient {
           userId: payload.userId,
           state: payload.state,
           call: payload.call,
+          session: this.latestState?.userId === payload.userId ? this.latestState.session : null,
+        };
+        this.onStateUpdate?.(this.latestState);
+        return;
+      case "voice-session":
+        this.latestState = {
+          userId: payload.userId,
+          state: this.latestState?.userId === payload.userId ? this.latestState.state : null,
+          call: this.latestState?.userId === payload.userId ? this.latestState.call : null,
+          session: payload.session,
         };
         this.onStateUpdate?.(this.latestState);
         return;
