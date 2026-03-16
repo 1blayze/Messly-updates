@@ -302,6 +302,13 @@ interface VoiceCallSignalPayload {
   sentAt: number;
 }
 
+interface VoiceCallRejoinFallback {
+  roomId: string;
+  userId: string;
+  displayName: string;
+  avatarSrc: string;
+}
+
 function encodeVoiceCallSignal(signal: VoiceCallSignalPayload): string {
   return `${VOICE_CALL_SIGNAL_PREFIX}${JSON.stringify(signal)}`;
 }
@@ -1870,6 +1877,7 @@ export default function DirectMessageChatView({
   const [voiceCallElapsedTick, setVoiceCallElapsedTick] = useState(0);
   const [incomingVoiceInviteFromUserId, setIncomingVoiceInviteFromUserId] = useState<string | null>(null);
   const [incomingVoiceInviteRoomId, setIncomingVoiceInviteRoomId] = useState<string | null>(null);
+  const [voiceCallRejoinFallback, setVoiceCallRejoinFallback] = useState<VoiceCallRejoinFallback | null>(null);
   const [headerSearchValue, setHeaderSearchValue] = useState("");
   const [headerSearchIndex, setHeaderSearchIndex] = useState(-1);
   const [messageProfilePosition, setMessageProfilePosition] = useState<{ top: number; left: number }>({
@@ -1911,6 +1919,8 @@ export default function DirectMessageChatView({
   const voiceSignalMessageIdsRef = useRef<Set<string>>(new Set());
   const latestVoiceSignalBySenderRef = useRef<Map<string, number>>(new Map());
   const incomingVoiceInviteFromUserIdRef = useRef<string | null>(null);
+  const voiceCallParticipantsRef = useRef<VoiceParticipantState[]>([]);
+  const activeVoiceRoomIdRef = useRef<string>("");
   const isVoiceCallActiveRef = useRef(false);
   const isVoiceCallConnectingRef = useRef(false);
   const openPerfRef = useRef<{ conversationId: string; openedAt: number; firstPaintLogged: boolean }>({
@@ -3291,6 +3301,12 @@ export default function DirectMessageChatView({
           setIncomingVoiceInviteFromUserId(null);
           setIncomingVoiceInviteRoomId(null);
         }
+        setVoiceCallRejoinFallback((current) => {
+          if (!current || current.userId !== senderUserId) {
+            return current;
+          }
+          return null;
+        });
         return true;
       }
 
@@ -3318,6 +3334,14 @@ export default function DirectMessageChatView({
   useEffect(() => {
     isVoiceCallConnectingRef.current = isVoiceCallConnecting;
   }, [isVoiceCallConnecting]);
+
+  useEffect(() => {
+    voiceCallParticipantsRef.current = voiceCallParticipants;
+  }, [voiceCallParticipants]);
+
+  useEffect(() => {
+    activeVoiceRoomIdRef.current = voiceRoomId;
+  }, [voiceRoomId]);
 
   useEffect(() => {
     incomingVoiceInviteFromUserIdRef.current = incomingVoiceInviteFromUserId;
@@ -3929,6 +3953,12 @@ export default function DirectMessageChatView({
               setIncomingVoiceInviteFromUserId(null);
               setIncomingVoiceInviteRoomId(null);
             }
+            setVoiceCallRejoinFallback((current) => {
+              if (!current || current.userId !== senderUserId) {
+                return current;
+              }
+              return null;
+            });
           },
         )
         .subscribe((status) => {
@@ -4069,15 +4099,18 @@ export default function DirectMessageChatView({
     setVoiceCallElapsedTick(0);
     setIncomingVoiceInviteFromUserId(null);
     setIncomingVoiceInviteRoomId(null);
+    setVoiceCallRejoinFallback(null);
     voiceSignalMessageIdsRef.current.clear();
     latestVoiceSignalBySenderRef.current.clear();
+    voiceCallParticipantsRef.current = [];
+    activeVoiceRoomIdRef.current = voiceRoomId;
 
     const existingVoiceCallClient = voiceCallClientRef.current;
     voiceCallClientRef.current = null;
     if (existingVoiceCallClient) {
       void existingVoiceCallClient.leave();
     }
-  }, [conversationId]);
+  }, [conversationId, voiceRoomId]);
 
   useEffect(() => {
     return () => {
@@ -5196,9 +5229,11 @@ export default function DirectMessageChatView({
     setVoiceCallElapsedTick(0);
     setIncomingVoiceInviteFromUserId(null);
     setIncomingVoiceInviteRoomId(null);
+    voiceCallParticipantsRef.current = [];
   }, []);
 
-  const startVoiceCallWithRoomId = useCallback((roomIdOverride?: string | null) => {
+  const startVoiceCallWithRoomId = useCallback((roomIdOverride?: string | null, options?: { suppressInvite?: boolean }) => {
+    const suppressInviteSignal = options?.suppressInvite === true;
     const localIdentity: VoiceUserIdentity = {
       userId: String(currentUser.userId ?? "").trim(),
       displayName: String(currentUser.displayName ?? "").trim() || "Voce",
@@ -5211,16 +5246,20 @@ export default function DirectMessageChatView({
     };
     const activeVoiceRoomId = String(roomIdOverride ?? voiceRoomId).trim() || voiceRoomId;
     const mediaPreferences = readVoiceCallMediaPreferences(localIdentity.userId);
+    activeVoiceRoomIdRef.current = activeVoiceRoomId;
     setIncomingVoiceInviteFromUserId(null);
     setIncomingVoiceInviteRoomId(null);
-    void sendVoiceSignal("invite", activeVoiceRoomId).catch(() => undefined);
+    setVoiceCallRejoinFallback(null);
+    if (!suppressInviteSignal) {
+      void sendVoiceSignal("invite", activeVoiceRoomId).catch(() => undefined);
+    }
 
     setVoiceCallError(null);
     setVoiceCallMicWarning(null);
     setIsVoiceCallConnecting(true);
     setVoiceCallConnectionState("connecting");
     setVoiceCallDiagnostics([]);
-    setVoiceCallParticipants([
+    const initialParticipants: VoiceParticipantState[] = [
       {
         ...localIdentity,
         isLocal: true,
@@ -5229,7 +5268,19 @@ export default function DirectMessageChatView({
         speakingLevel: 0,
         connectionState: "connecting",
       },
-    ]);
+    ];
+    if (remoteIdentity.userId && remoteIdentity.userId !== localIdentity.userId) {
+      initialParticipants.push({
+        ...remoteIdentity,
+        isLocal: false,
+        muted: false,
+        speaking: false,
+        speakingLevel: 0,
+        connectionState: "connecting",
+      });
+    }
+    setVoiceCallParticipants(initialParticipants);
+    voiceCallParticipantsRef.current = initialParticipants;
 
     const voiceCallClient = new VoiceCallClient({
       roomId: activeVoiceRoomId,
@@ -5239,13 +5290,22 @@ export default function DirectMessageChatView({
       },
       mediaPreferences,
       onParticipantsChanged: (participants) => {
-        setVoiceCallParticipants(
-          participants.map((participant) => ({
-            ...participant,
-            avatarSrc: String(participant.avatarSrc ?? "").trim() || getNameAvatarUrl(participant.displayName || "U"),
-          })),
-        );
-        const localParticipant = participants.find((participant) => participant.isLocal);
+        const normalizedParticipants = participants.map((participant) => ({
+          ...participant,
+          avatarSrc: String(participant.avatarSrc ?? "").trim() || getNameAvatarUrl(participant.displayName || "U"),
+        }));
+        setVoiceCallParticipants(normalizedParticipants);
+        voiceCallParticipantsRef.current = normalizedParticipants;
+        const remoteParticipant = normalizedParticipants.find((participant) => !participant.isLocal);
+        if (remoteParticipant) {
+          setVoiceCallRejoinFallback({
+            roomId: activeVoiceRoomId,
+            userId: String(remoteParticipant.userId ?? "").trim() || remoteIdentity.userId,
+            displayName: String(remoteParticipant.displayName ?? "").trim() || remoteIdentity.displayName,
+            avatarSrc: String(remoteParticipant.avatarSrc ?? "").trim() || remoteIdentity.avatarSrc,
+          });
+        }
+        const localParticipant = normalizedParticipants.find((participant) => participant.isLocal);
         if (localParticipant) {
           setIsVoiceCallMuted(localParticipant.muted);
         }
@@ -5289,8 +5349,6 @@ export default function DirectMessageChatView({
     currentUser.avatarSrc,
     currentUser.displayName,
     currentUser.userId,
-    isVoiceCallActive,
-    isVoiceCallConnecting,
     safeTargetDisplayName,
     sendVoiceSignal,
     stopVoiceCallSession,
@@ -5324,7 +5382,7 @@ export default function DirectMessageChatView({
     if (isVoiceCallActive || isVoiceCallConnecting) {
       return;
     }
-    startVoiceCallWithRoomId(inviteRoomId || null);
+    startVoiceCallWithRoomId(inviteRoomId || null, { suppressInvite: true });
   }, [incomingVoiceInviteRoomId, isVoiceCallActive, isVoiceCallConnecting, startVoiceCallWithRoomId]);
 
   const handleDismissIncomingVoiceInvite = useCallback(() => {
@@ -5334,10 +5392,37 @@ export default function DirectMessageChatView({
 
   const handleLeaveVoiceCall = useCallback(() => {
     if (isVoiceCallActive || isVoiceCallConnecting) {
-      void sendVoiceSignal("cancel").catch(() => undefined);
+      const activeRoomId = String(activeVoiceRoomIdRef.current ?? "").trim() || voiceRoomId;
+      const remoteParticipant = voiceCallParticipantsRef.current.find(
+        (participant) => !participant.isLocal && Boolean(String(participant.userId ?? "").trim()),
+      );
+      const fallbackUserId = String(remoteParticipant?.userId ?? targetUser.userId ?? "").trim();
+      if (fallbackUserId) {
+        setVoiceCallRejoinFallback({
+          roomId: activeRoomId,
+          userId: fallbackUserId,
+          displayName: String(remoteParticipant?.displayName ?? "").trim() || safeTargetDisplayName,
+          avatarSrc: String(remoteParticipant?.avatarSrc ?? "").trim() || targetAvatarSrc,
+        });
+      }
+      void sendVoiceSignal("cancel", activeRoomId).catch(() => undefined);
     }
     void stopVoiceCallSession();
-  }, [isVoiceCallActive, isVoiceCallConnecting, sendVoiceSignal, stopVoiceCallSession]);
+  }, [isVoiceCallActive, isVoiceCallConnecting, safeTargetDisplayName, sendVoiceSignal, stopVoiceCallSession, targetAvatarSrc, targetUser.userId, voiceRoomId]);
+
+  const handleRejoinVoiceCall = useCallback(() => {
+    if (isVoiceCallActive || isVoiceCallConnecting || !voiceCallRejoinFallback) {
+      return;
+    }
+    setVoiceCallRejoinFallback(null);
+    setIncomingVoiceInviteFromUserId(null);
+    setIncomingVoiceInviteRoomId(null);
+    startVoiceCallWithRoomId(voiceCallRejoinFallback.roomId, { suppressInvite: true });
+  }, [isVoiceCallActive, isVoiceCallConnecting, startVoiceCallWithRoomId, voiceCallRejoinFallback]);
+
+  const handleDismissVoiceRejoinFallback = useCallback(() => {
+    setVoiceCallRejoinFallback(null);
+  }, []);
 
   const voiceCallElapsedSeconds = useMemo(() => {
     if (!voiceCallStartedAtMs) {
@@ -5350,10 +5435,13 @@ export default function DirectMessageChatView({
   const shouldShowVoiceCallPanel = isVoiceCallActive || isVoiceCallConnecting;
   const voiceCallButtonActive = isVoiceCallActive || isVoiceCallConnecting;
   const hasIncomingVoiceInvite = Boolean(incomingVoiceInviteFromUserId) && !shouldShowVoiceCallPanel;
+  const hasVoiceCallRejoinFallback = Boolean(voiceCallRejoinFallback) && !hasIncomingVoiceInvite && !shouldShowVoiceCallPanel;
   const incomingVoiceInviteDisplayName =
     incomingVoiceInviteFromUserId && incomingVoiceInviteFromUserId === String(targetUser.userId ?? "").trim()
       ? safeTargetDisplayName
       : "Contato";
+  const voiceCallRejoinDisplayName = String(voiceCallRejoinFallback?.displayName ?? "").trim() || safeTargetDisplayName;
+  const voiceCallRejoinAvatarSrc = String(voiceCallRejoinFallback?.avatarSrc ?? "").trim() || targetAvatarSrc;
 
   return (
     <section className="dm-chat" aria-label={`Conversa com ${safeTargetDisplayName}`}>
@@ -5452,13 +5540,16 @@ export default function DirectMessageChatView({
 
       <div className="dm-chat__body">
         <div className="dm-chat__main">
-          {hasIncomingVoiceInvite ? (
-            <section className="dm-chat__rejoin-stage" aria-label="Convite de chamada de voz">
+          {hasIncomingVoiceInvite || hasVoiceCallRejoinFallback ? (
+            <section
+              className="dm-chat__rejoin-stage"
+              aria-label={hasIncomingVoiceInvite ? "Convite de chamada de voz" : "Retorno para chamada de voz"}
+            >
               <div className="dm-chat__rejoin-stage-surface">
                 <img
                   className="dm-chat__rejoin-stage-avatar"
-                  src={targetAvatarSrc}
-                  alt={`Avatar de ${incomingVoiceInviteDisplayName}`}
+                  src={hasIncomingVoiceInvite ? targetAvatarSrc : voiceCallRejoinAvatarSrc}
+                  alt={`Avatar de ${hasIncomingVoiceInvite ? incomingVoiceInviteDisplayName : voiceCallRejoinDisplayName}`}
                   loading="lazy"
                   onError={(event) => {
                     const target = event.currentTarget;
@@ -5467,21 +5558,29 @@ export default function DirectMessageChatView({
                     }
                   }}
                 />
-                <p className="dm-chat__rejoin-stage-title">{incomingVoiceInviteDisplayName} iniciou uma chamada de voz</p>
-                <div className="dm-chat__rejoin-stage-controls" role="group" aria-label="Acoes do convite de chamada">
+                <p className="dm-chat__rejoin-stage-title">
+                  {hasIncomingVoiceInvite
+                    ? `${incomingVoiceInviteDisplayName} iniciou uma chamada de voz`
+                    : `${voiceCallRejoinDisplayName} continua na chamada de voz`}
+                </p>
+                <div
+                  className="dm-chat__rejoin-stage-controls"
+                  role="group"
+                  aria-label={hasIncomingVoiceInvite ? "Acoes do convite de chamada" : "Acoes para voltar para chamada"}
+                >
                   <button
                     type="button"
                     className="dm-chat__rejoin-stage-btn dm-chat__rejoin-stage-btn--accept"
-                    onClick={handleAcceptIncomingVoiceInvite}
+                    onClick={hasIncomingVoiceInvite ? handleAcceptIncomingVoiceInvite : handleRejoinVoiceCall}
                   >
-                    Entrar
+                    {hasIncomingVoiceInvite ? "Entrar" : "Voltar"}
                   </button>
                   <button
                     type="button"
                     className="dm-chat__rejoin-stage-btn dm-chat__rejoin-stage-btn--dismiss"
-                    onClick={handleDismissIncomingVoiceInvite}
+                    onClick={hasIncomingVoiceInvite ? handleDismissIncomingVoiceInvite : handleDismissVoiceRejoinFallback}
                   >
-                    Agora nao
+                    {hasIncomingVoiceInvite ? "Agora nao" : "Fechar"}
                   </button>
                 </div>
               </div>
