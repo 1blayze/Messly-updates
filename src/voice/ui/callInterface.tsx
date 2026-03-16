@@ -54,17 +54,17 @@ export default function VoiceCallInterface({
   return (
     <aside className="voice-call-panel" aria-label="Chamada de voz">
       <section className="voice-call-panel__avatars" aria-label="Participantes da chamada">
-        {avatarParticipants.map((participant, index) => (
+        {avatarParticipants.map((participant) => (
           <div
             key={participant.userId}
             className={`voice-call-panel__avatar-wrap${participant.speaking ? " voice-call-panel__avatar-wrap--speaking" : ""}`}
-            style={{ zIndex: avatarParticipants.length - index }}
           >
             <img
               className="voice-call-panel__avatar"
               src={participant.avatarSrc}
               alt={`Avatar de ${participant.displayName}`}
-              loading="lazy"
+              loading="eager"
+              decoding="sync"
             />
           </div>
         ))}

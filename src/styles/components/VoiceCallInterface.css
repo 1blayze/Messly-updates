@@ -16,7 +16,7 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding-left: 20px;
+  gap: 10px;
 }
 
 .voice-call-panel__avatar-wrap {
@@ -25,10 +25,10 @@
   height: 70px;
   border-radius: 999px;
   overflow: hidden;
-  margin-left: -20px;
-  border: 2px solid #0a0a0a;
+  border: 0;
   box-shadow: 0 6px 16px rgba(0, 0, 0, 0.45);
   background: #111111;
+  transition: box-shadow 120ms ease;
 }
 
 .voice-call-panel__avatar-wrap:first-child {
@@ -36,7 +36,7 @@
 }
 
 .voice-call-panel__avatar-wrap--speaking {
-  box-shadow: 0 0 0 2px rgba(53, 190, 129, 0.4), 0 0 22px rgba(53, 190, 129, 0.4);
+  box-shadow: 0 0 0 2px rgba(53, 190, 129, 0.55), 0 0 22px rgba(53, 190, 129, 0.42);
 }
 
 .voice-call-panel__avatar {
