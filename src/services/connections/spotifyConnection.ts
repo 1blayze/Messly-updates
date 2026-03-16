@@ -2386,6 +2386,27 @@ export async function syncSpotifyConnection(
   const unauthorizedUntil = readSpotifyUnauthUntil(scopedUserId);
   const currentConnection = readSpotifyConnection(scopedUserId);
 
+  if (!currentConnection.connected) {
+    const normalizedDisconnected = currentConnection.playback
+      ? writeSpotifyConnection(
+        scopedUserId,
+        normalizeConnection({
+          ...currentConnection,
+          playback: null,
+          updatedAt: new Date().toISOString(),
+        }),
+      )
+      : currentConnection;
+
+    return {
+      connection: normalizedDisconnected,
+      playbackKey: "idle",
+      playbackStatus: "idle",
+      latencyMs: 0,
+      didConnectionChange: normalizedDisconnected !== currentConnection,
+    };
+  }
+
   // Avoid noisy 401 loops when the app no longer has a valid user session.
   // In this state, we keep Spotify disconnected locally and skip remote sync.
   const authenticatedUserId = String(await authService.getCurrentUserId() ?? "").trim();

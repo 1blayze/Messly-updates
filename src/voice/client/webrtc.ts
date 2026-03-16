@@ -703,9 +703,13 @@ export class VoiceCallClient {
       await this.connectSignaling();
       this.startIntervals();
     } catch (error) {
-      this.handleError(toError("Nao foi possivel iniciar chamada de voz", normalizeErrorMessage(error)));
+      if (!this.leaving) {
+        this.handleError(toError("Nao foi possivel iniciar chamada de voz", normalizeErrorMessage(error)));
+      }
       await this.leave().catch(() => undefined);
-      throw error;
+      if (!this.leaving) {
+        throw error;
+      }
     }
   }
 
@@ -732,10 +736,12 @@ export class VoiceCallClient {
     const socket = this.socket;
     this.socket = null;
     if (socket) {
-      try {
-        socket.close(1000, "VOICE_LEAVE");
-      } catch {
-        // Ignore close failures.
+      if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CLOSING) {
+        try {
+          socket.close(1000, "VOICE_LEAVE");
+        } catch {
+          // Ignore close failures.
+        }
       }
     }
 
@@ -813,6 +819,16 @@ export class VoiceCallClient {
         if (settled) {
           return;
         }
+        if (this.leaving || this.socket !== socket) {
+          settled = true;
+          try {
+            socket.close(1000, "VOICE_CONNECT_CANCELLED");
+          } catch {
+            // Ignore close failures.
+          }
+          reject(new Error("Conexao de voz cancelada."));
+          return;
+        }
         settled = true;
         resolve();
       }, { once: true });
@@ -824,7 +840,24 @@ export class VoiceCallClient {
         settled = true;
         reject(new Error("Falha ao conectar no servidor de voz."));
       }, { once: true });
+
+      socket.addEventListener("close", () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        reject(new Error("Conexao de voz encerrada durante a inicializacao."));
+      }, { once: true });
     });
+
+    if (this.leaving || this.socket !== socket) {
+      try {
+        socket.close(1000, "VOICE_CONNECT_CANCELLED");
+      } catch {
+        // Ignore close failures.
+      }
+      throw new Error("Conexao de voz cancelada.");
+    }
 
     socket.addEventListener("message", (event) => {
       this.handleSignalingMessage(String(event.data ?? ""));

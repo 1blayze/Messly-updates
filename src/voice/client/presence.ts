@@ -242,10 +242,12 @@ export class VoiceCallPresenceClient {
     const socket = this.socket;
     this.socket = null;
     if (socket) {
-      try {
-        socket.close(1000, "VOICE_WATCH_STOP");
-      } catch {
-        // Ignore close failures.
+      if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CLOSING) {
+        try {
+          socket.close(1000, "VOICE_WATCH_STOP");
+        } catch {
+          // Ignore close failures.
+        }
       }
     }
     this.setState("closed");
@@ -265,6 +267,16 @@ export class VoiceCallPresenceClient {
         if (settled) {
           return;
         }
+        if (this.stopRequested || this.socket !== socket) {
+          settled = true;
+          try {
+            socket.close(1000, "VOICE_WATCH_STOP");
+          } catch {
+            // Ignore close failures.
+          }
+          reject(new Error("Monitor de voz cancelado."));
+          return;
+        }
         settled = true;
         resolve();
       }, { once: true });
@@ -276,7 +288,24 @@ export class VoiceCallPresenceClient {
         settled = true;
         reject(new Error("Falha ao conectar no monitor de voz."));
       }, { once: true });
+
+      socket.addEventListener("close", () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        reject(new Error("Conexao de monitoramento encerrada durante a inicializacao."));
+      }, { once: true });
     });
+
+    if (this.stopRequested || this.socket !== socket) {
+      try {
+        socket.close(1000, "VOICE_WATCH_STOP");
+      } catch {
+        // Ignore close failures.
+      }
+      throw new Error("Monitor de voz cancelado.");
+    }
 
     socket.addEventListener("message", (event) => {
       this.handleSignalingMessage(String(event.data ?? ""));
