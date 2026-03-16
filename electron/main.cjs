@@ -2025,18 +2025,31 @@ function syncStatusPanelWithUpdaterStateV2(nextState) {
   if (!nextState || typeof nextState !== "object") {
     return;
   }
-  if (!isStartupStatusPanelLifecycleActive()) {
+  const status = String(nextState.status ?? "").trim().toLowerCase();
+  const startupLifecycleActive = isStartupStatusPanelLifecycleActive();
+  const shouldMirrorOutsideStartup =
+    STATUS_PANEL_ENABLED &&
+    app.isPackaged &&
+    (
+      status === "available" ||
+      status === "downloading" ||
+      status === "downloaded" ||
+      status === "installing" ||
+      status === "applying" ||
+      status === "relaunching"
+    );
+
+  if (!startupLifecycleActive && !shouldMirrorOutsideStartup) {
     if (statusPanelWindowRef && !statusPanelWindowRef.isDestroyed()) {
       hideStatusPanel({ force: true });
     }
     return;
   }
 
-  if (startupAutoUpdateGateExpired) {
+  if (startupAutoUpdateGateExpired && startupLifecycleActive) {
     return;
   }
 
-  const status = String(nextState.status ?? "").trim().toLowerCase();
   if (status === "checking") {
     updaterInstallGuardActive = false;
     setStatusPanelPhase(STATUS_PANEL_PHASE.CHECKING);
@@ -2091,6 +2104,11 @@ function syncStatusPanelWithUpdaterStateV2(nextState) {
   if (status === "unavailable") {
     updaterInstallGuardActive = false;
     updaterAutoInstallInFlight = false;
+    if (!startupLifecycleActive) {
+      hideStatusPanel({ force: true });
+      restoreWindowsAfterUpdateFlow();
+      return;
+    }
     if (mainWindowWaitingForFirstFrame && !mainWindowFirstFrameReady) {
       setStatusPanelPhase(STATUS_PANEL_PHASE.LOADING_SHELL);
       return;
@@ -2115,6 +2133,14 @@ function syncStatusPanelWithUpdaterStateV2(nextState) {
   if (status === "error" || status === "failed") {
     updaterInstallGuardActive = false;
     updaterAutoInstallInFlight = false;
+    if (!startupLifecycleActive) {
+      setStatusPanelPhase(STATUS_PANEL_PHASE.FAILED, {
+        detail: String(nextState.errorMessage ?? "").trim() || "Nao foi possivel concluir a atualizacao.",
+      }, { force: true });
+      scheduleStatusPanelAutoHide(1_800, STATUS_PANEL_PHASE.FAILED);
+      restoreWindowsAfterUpdateFlow();
+      return;
+    }
     if (mainWindowWaitingForFirstFrame && !mainWindowFirstFrameReady) {
       setStatusPanelPhase(STATUS_PANEL_PHASE.LOADING_SHELL, {
         title: "Carregando Messly",
@@ -2136,6 +2162,11 @@ function syncStatusPanelWithUpdaterStateV2(nextState) {
   if (status === "disabled" || status === "idle" || status === "ready" || status === "retrying") {
     updaterInstallGuardActive = false;
     updaterAutoInstallInFlight = false;
+    if (!startupLifecycleActive) {
+      hideStatusPanel({ force: true });
+      restoreWindowsAfterUpdateFlow();
+      return;
+    }
     if (mainWindowWaitingForFirstFrame && !mainWindowFirstFrameReady) {
       setStatusPanelPhase(STATUS_PANEL_PHASE.LOADING_SHELL);
       return;
