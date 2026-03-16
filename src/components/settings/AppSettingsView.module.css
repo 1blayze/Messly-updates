@@ -2430,7 +2430,7 @@
 .noiseSuppressionSelectTrigger:hover,
 .noiseSuppressionSelectTrigger:focus-visible,
 .noiseSuppressionSelectTriggerOpen {
-  border-color: #5772ff;
+  border-color: #5aca8d;
   background: #3c404b;
   outline: none;
 }

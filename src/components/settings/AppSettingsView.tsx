@@ -6102,18 +6102,6 @@ export default function AppSettingsView({
 
                     <section className={styles.audioProcessingSection} aria-label="Processamento de voz">
                       <div className={`${styles.processingCoreRows} ${styles.processingCoreRowsClean}`}>
-                        <div className={`${styles.processingCoreRow} ${styles.processingCoreRowCheckboxLayout}`}>
-                          <ProcessingCheckbox
-                            checked={echoCancellation}
-                            ariaLabel="Alternar cancelamento de eco"
-                            onChange={setEchoCancellation}
-                          />
-                          <div className={styles.processingCoreRowMeta}>
-                            <p className={styles.processingCoreRowTitle}>Cancelamento de eco</p>
-                            <p className={styles.processingCoreRowState}>Filtra retorno acústico do alto-falante.</p>
-                          </div>
-                        </div>
-
                         <div className={styles.processingCoreRow}>
                           <div className={styles.noiseSuppressionRow}>
                             <div className={styles.processingCoreRowMeta}>
@@ -6171,6 +6159,18 @@ export default function AppSettingsView({
                                 </div>
                               ) : null}
                             </div>
+                          </div>
+                        </div>
+
+                        <div className={`${styles.processingCoreRow} ${styles.processingCoreRowCheckboxLayout}`}>
+                          <ProcessingCheckbox
+                            checked={echoCancellation}
+                            ariaLabel="Alternar cancelamento de eco"
+                            onChange={setEchoCancellation}
+                          />
+                          <div className={styles.processingCoreRowMeta}>
+                            <p className={styles.processingCoreRowTitle}>Cancelamento de eco</p>
+                            <p className={styles.processingCoreRowState}>Filtra retorno acústico do alto-falante.</p>
                           </div>
                         </div>
 
