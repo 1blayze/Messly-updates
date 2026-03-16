@@ -1905,6 +1905,7 @@ export default function DirectMessageChatView({
   const [isLoadingOlder, setIsLoadingOlder] = useState(false);
   const [showNewMessagesButton, setShowNewMessagesButton] = useState(false);
   const [isInitialConversationLoading, setIsInitialConversationLoading] = useState(true);
+  const [allowMessageSkeleton, setAllowMessageSkeleton] = useState(true);
   const [virtualScrollTop, setVirtualScrollTop] = useState(0);
   const [virtualViewportHeight, setVirtualViewportHeight] = useState(0);
   const [virtualFocusIndex, setVirtualFocusIndex] = useState<number | null>(null);
@@ -1961,6 +1962,7 @@ export default function DirectMessageChatView({
   const scrollbarThumbRef = useRef<HTMLDivElement | null>(null);
   const messageRefs = useRef<Map<string, HTMLElement>>(new Map());
   const messagesRef = useRef<ChatMessageItem[]>([]);
+  const activeConversationIdRef = useRef(conversationId);
   const deletedMessageIdsRef = useRef<Set<string>>(new Set());
   const pendingVirtualScrollMessageIdRef = useRef<string | null>(null);
   const forceNextAutoScrollRef = useRef(false);
@@ -2376,6 +2378,25 @@ export default function DirectMessageChatView({
     );
     return Math.max(0, Math.min(1, totalRatio / uploadingAttachmentsCount));
   }, [draftAttachments, isSending, uploadingAttachmentsCount]);
+
+  useEffect(() => {
+    activeConversationIdRef.current = conversationId;
+  }, [conversationId]);
+
+  const isConversationContextActive = useCallback(
+    (expectedConversationId: string): boolean => activeConversationIdRef.current === expectedConversationId,
+    [],
+  );
+
+  useEffect(() => {
+    setAllowMessageSkeleton(true);
+    const timerId = window.setTimeout(() => {
+      setAllowMessageSkeleton(false);
+    }, 1_800);
+    return () => {
+      window.clearTimeout(timerId);
+    };
+  }, [conversationId]);
 
   useEffect(() => {
     const now = performance.now();
@@ -3762,6 +3783,9 @@ export default function DirectMessageChatView({
   }, [voiceCallParticipants]);
 
   useEffect(() => {
+    if (voiceCallClientRef.current || isVoiceCallActiveRef.current || isVoiceCallConnectingRef.current) {
+      return;
+    }
     activeVoiceRoomIdRef.current = voiceRoomId;
   }, [voiceRoomId]);
 
@@ -3901,6 +3925,7 @@ export default function DirectMessageChatView({
   }, []);
 
   const loadConversationMessages = useCallback(async (reason: string = "manual"): Promise<void> => {
+    const requestConversationId = conversationId;
     const startedAt = Date.now();
     const fetchStartedAt = performance.now();
     try {
@@ -3920,6 +3945,9 @@ export default function DirectMessageChatView({
               conversationId,
               limit: INITIAL_PAGE_SIZE,
             });
+      if (!isConversationContextActive(requestConversationId)) {
+        return;
+      }
       const fetchElapsedMs = performance.now() - fetchStartedAt;
       const {
         normalizedMessages: listedNormalizedMessages,
@@ -3981,6 +4009,9 @@ export default function DirectMessageChatView({
         ? derivedOlderCursor
         : (listed.nextCursor ?? null);
       const resolvedHasMoreBefore = trimmed.droppedOlder.length > 0 || Boolean(listed.nextCursor);
+      if (!isConversationContextActive(requestConversationId)) {
+        return;
+      }
 
       setMessages((current) => (areMessagesEqual(current, trimmed.messages) ? current : trimmed.messages));
       setNextCursor(resolvedCursor);
@@ -3998,6 +4029,9 @@ export default function DirectMessageChatView({
         messageCount: visibleServerMessages.length,
       });
     } catch (error) {
+      if (!isConversationContextActive(requestConversationId)) {
+        return;
+      }
       reportClientError(error, {
         scope: "chat.loadConversationMessages",
         conversationId,
@@ -4006,7 +4040,7 @@ export default function DirectMessageChatView({
       setLoadError("Nao foi possivel carregar as mensagens.");
       incrementMetric("chat_load_failure_total", 1);
     }
-  }, [consumeVoiceSignalMessage, conversationId, markConversationAsRead]);
+  }, [consumeVoiceSignalMessage, conversationId, isConversationContextActive, markConversationAsRead]);
 
   const loadOlderMessages = useCallback(async (): Promise<void> => {
     if (!nextCursor || isLoadingOlderRef.current || !hasMoreBefore) {
@@ -4019,6 +4053,7 @@ export default function DirectMessageChatView({
     const container = scrollContainerRef.current;
     const previousScrollHeight = container?.scrollHeight ?? 0;
     const previousScrollTop = container?.scrollTop ?? 0;
+    const requestConversationId = conversationId;
 
     try {
       const listed = await listChatMessages({
@@ -4026,6 +4061,9 @@ export default function DirectMessageChatView({
         limit: INITIAL_PAGE_SIZE,
         cursor: nextCursor,
       });
+      if (!isConversationContextActive(requestConversationId)) {
+        return;
+      }
 
       const { deletedIds, visibleMessages: olderMessages } = normalizeListedMessages(listed.messages ?? []);
       const knownDeletedMessageIds = new Set(deletedMessageIdsRef.current);
@@ -4065,6 +4103,9 @@ export default function DirectMessageChatView({
       setHasMoreBefore(Boolean(listed.nextCursor));
 
       requestAnimationFrame(() => {
+        if (!isConversationContextActive(requestConversationId)) {
+          return;
+        }
         const liveContainer = scrollContainerRef.current;
         if (!liveContainer) {
           return;
@@ -4074,16 +4115,21 @@ export default function DirectMessageChatView({
         liveContainer.scrollTop = previousScrollTop + delta;
       });
     } catch (error) {
+      if (!isConversationContextActive(requestConversationId)) {
+        return;
+      }
       reportClientError(error, {
         scope: "chat.loadOlderMessages",
-        conversationId,
+        conversationId: requestConversationId,
       });
       incrementMetric("chat_load_older_failure_total", 1);
     } finally {
       isLoadingOlderRef.current = false;
-      setIsLoadingOlder(false);
+      if (isConversationContextActive(requestConversationId)) {
+        setIsLoadingOlder(false);
+      }
     }
-  }, [conversationId, hasMoreBefore, nextCursor]);
+  }, [conversationId, hasMoreBefore, isConversationContextActive, nextCursor]);
 
   useEffect(() => {
     let isMounted = true;
@@ -4178,6 +4224,7 @@ export default function DirectMessageChatView({
 
     setLoadError(null);
     setDraft("");
+    setIsSending(false);
     setEditingMessageId(null);
     setEditingValue("");
     setIsSavingEdit(false);
@@ -4294,6 +4341,9 @@ export default function DirectMessageChatView({
             filter: `conversation_id=eq.${conversationId}`,
           },
           (payload) => {
+            if (activeConversationIdRef.current !== conversationId) {
+              return;
+            }
             const incoming = normalizeMessageRow(payload.new as MessageRow);
             if (consumeVoiceSignalMessage(incoming)) {
               return;
@@ -4338,6 +4388,9 @@ export default function DirectMessageChatView({
             filter: `conversation_id=eq.${conversationId}`,
           },
           (payload) => {
+            if (activeConversationIdRef.current !== conversationId) {
+              return;
+            }
             const incoming = normalizeMessageRow(payload.new as MessageRow);
             if (consumeVoiceSignalMessage(incoming)) {
               return;
@@ -4377,6 +4430,9 @@ export default function DirectMessageChatView({
             event: "voice-signal",
           },
           (payload) => {
+            if (activeConversationIdRef.current !== conversationId) {
+              return;
+            }
             const raw = payload.payload as Partial<VoiceCallSignalPayload> | null;
             if (!raw || Number(raw.version ?? 0) !== 1) {
               return;
@@ -4549,6 +4605,17 @@ export default function DirectMessageChatView({
   }, [highlightMessageId]);
 
   useEffect(() => {
+    setHeaderSearchValue("");
+    setHeaderSearchIndex(-1);
+
+    const hasLiveVoiceSession =
+      Boolean(voiceCallClientRef.current) ||
+      isVoiceCallActiveRef.current ||
+      isVoiceCallConnectingRef.current;
+    if (hasLiveVoiceSession) {
+      return;
+    }
+
     clearOutgoingVoiceRingTimer();
     clearSingleParticipantTimer();
     clearIncomingVoiceInviteTimer();
@@ -4580,11 +4647,6 @@ export default function DirectMessageChatView({
     hadRemoteParticipantInSessionRef.current = false;
     connectedRemoteParticipantsCountRef.current = 0;
 
-    const existingVoiceCallClient = voiceCallClientRef.current;
-    voiceCallClientRef.current = null;
-    if (existingVoiceCallClient) {
-      void existingVoiceCallClient.leave();
-    }
     const existingVoicePresenceClient = voicePresenceClientRef.current;
     voicePresenceClientRef.current = null;
     if (existingVoicePresenceClient) {
@@ -4742,6 +4804,7 @@ export default function DirectMessageChatView({
 
   useEffect(() => {
     let isActive = true;
+    const requestConversationId = conversationId;
     const pending = messages
       .filter((message) => isAttachmentMessage(message) && isVisibleChatMessage(message))
       .filter((message) => {
@@ -4791,6 +4854,9 @@ export default function DirectMessageChatView({
       if (!isActive) {
         return;
       }
+      if (!isConversationContextActive(requestConversationId)) {
+        return;
+      }
 
       if (Object.keys(fullUpdates).length > 0) {
         setAttachmentUrlMap((current) => ({ ...current, ...fullUpdates }));
@@ -4806,7 +4872,7 @@ export default function DirectMessageChatView({
     return () => {
       isActive = false;
     };
-  }, [attachmentThumbUrlMap, attachmentUrlMap, messages]);
+  }, [attachmentThumbUrlMap, attachmentUrlMap, conversationId, isConversationContextActive, messages]);
 
   useEffect(() => {
     const container = scrollContainerRef.current;
@@ -5088,7 +5154,11 @@ export default function DirectMessageChatView({
 
   const uploadDraftAttachment = useCallback(
     async (attachment: DraftAttachmentItem): Promise<UploadedAttachmentResult> => {
+      const requestConversationId = conversationId;
       const setAttachmentProgress = (ratio: number): void => {
+        if (!isConversationContextActive(requestConversationId)) {
+          return;
+        }
         setDraftAttachments((current) =>
           current.map((item) =>
             item.id === attachment.id
@@ -5157,6 +5227,9 @@ export default function DirectMessageChatView({
           thumbUrl,
         };
       } catch (error) {
+        if (!isConversationContextActive(requestConversationId)) {
+          throw error;
+        }
         if (typeof console !== "undefined" && typeof console.error === "function") {
           console.error("[chat] attachment upload failed", error);
         }
@@ -5173,12 +5246,12 @@ export default function DirectMessageChatView({
         incrementMetric("chat_attachment_upload_failed_total", 1);
         reportClientError(error, {
           scope: "chat.uploadDraftAttachment",
-          conversationId,
+          conversationId: requestConversationId,
         });
         throw error;
       }
     },
-    [conversationId],
+    [conversationId, isConversationContextActive],
   );
 
   const insertMessage = useCallback(
@@ -5206,6 +5279,7 @@ export default function DirectMessageChatView({
   );
 
   const submitMessage = useCallback(async (): Promise<void> => {
+    const requestConversationId = conversationId;
     const content = draft.trim();
     const attachmentsToSend = [...draftAttachments];
     if ((content.length === 0 && attachmentsToSend.length === 0) || isSending) {
@@ -5254,6 +5328,9 @@ export default function DirectMessageChatView({
     try {
       if (content.length > 0 && textClientId) {
         const serverMessage = await insertMessage(content, "text", textClientId, replyPayload ?? undefined);
+        if (!isConversationContextActive(requestConversationId)) {
+          return;
+        }
         setMessages((current) => {
           const withoutOptimistic = current.filter((message) => !(message.clientId === textClientId && message.optimistic));
           const nextMessages = upsertMessages(withoutOptimistic, [serverMessage]);
@@ -5300,6 +5377,9 @@ export default function DirectMessageChatView({
         const failedAttachmentCount = settledAttachments.length - successfulAttachments.length;
 
         if (successfulAttachments.length > 0) {
+          if (!isConversationContextActive(requestConversationId)) {
+            return;
+          }
           const nextAttachmentMessages = successfulAttachments.map((item) => item.attachmentMessage);
           setMessages((current) => upsertMessages(current, nextAttachmentMessages));
 
@@ -5334,6 +5414,9 @@ export default function DirectMessageChatView({
           });
 
           requestAnimationFrame(() => {
+            if (!isConversationContextActive(requestConversationId)) {
+              return;
+            }
             scrollToBottom(true);
           });
         }
@@ -5347,6 +5430,9 @@ export default function DirectMessageChatView({
         }
       }
     } catch (error) {
+      if (!isConversationContextActive(requestConversationId)) {
+        return;
+      }
       if (textClientId) {
         setMessages((current) =>
           current.map((message) =>
@@ -5368,7 +5454,9 @@ export default function DirectMessageChatView({
       });
       setLoadError(error instanceof Error ? error.message : "Nao foi possivel enviar a mensagem.");
     } finally {
-      setIsSending(false);
+      if (isConversationContextActive(requestConversationId)) {
+        setIsSending(false);
+      }
     }
   }, [
     conversationId,
@@ -5377,6 +5465,7 @@ export default function DirectMessageChatView({
     draftAttachments,
     buildReplySnapshot,
     insertMessage,
+    isConversationContextActive,
     isSending,
     markConversationAsRead,
     replyTarget,
@@ -5410,6 +5499,7 @@ export default function DirectMessageChatView({
 
   const handleRetryFailedMessage = useCallback(
     async (message: ChatMessageItem): Promise<void> => {
+      const requestConversationId = conversationId;
       if (!message.failed || message.type !== "text") {
         return;
       }
@@ -5443,12 +5533,18 @@ export default function DirectMessageChatView({
               }
             : undefined,
         );
+        if (!isConversationContextActive(requestConversationId)) {
+          return;
+        }
 
         setMessages((current) => {
           const withoutOptimistic = current.filter((item) => !(item.clientId === retryClientId && item.optimistic));
           return upsertMessages(withoutOptimistic, [resent]);
         });
       } catch (error) {
+        if (!isConversationContextActive(requestConversationId)) {
+          return;
+        }
         reportClientError(error, {
           scope: "chat.retryFailedMessage",
           messageId: message.id,
@@ -5467,7 +5563,7 @@ export default function DirectMessageChatView({
         );
       }
     },
-    [insertMessage],
+    [conversationId, insertMessage, isConversationContextActive],
   );
 
   const handleStartEdit = useCallback(
@@ -5503,6 +5599,7 @@ export default function DirectMessageChatView({
   }, []);
 
   const handleSaveEdit = useCallback(async (): Promise<void> => {
+    const requestConversationId = conversationId;
     if (isSavingEdit) {
       return;
     }
@@ -5542,6 +5639,9 @@ export default function DirectMessageChatView({
 
     try {
       const updated = normalizeServerMessage(await editChatMessage(editingMessageId, trimmed));
+      if (!isConversationContextActive(requestConversationId)) {
+        return;
+      }
       setMessages((current) =>
         current.map((message) => (message.id === updated.id ? { ...message, ...updated } : message)),
       );
@@ -5549,6 +5649,9 @@ export default function DirectMessageChatView({
       setEditingMessageId(null);
       setEditingValue("");
     } catch (error) {
+      if (!isConversationContextActive(requestConversationId)) {
+        return;
+      }
       setMessages((current) =>
         current.map((message) =>
           message.id === original.id ? { ...message, content: original.content, editedAt: original.editedAt ?? null } : message,
@@ -5560,9 +5663,11 @@ export default function DirectMessageChatView({
       });
       setLoadError(error instanceof Error ? error.message : "Nao foi possivel editar a mensagem.");
     } finally {
-      setIsSavingEdit(false);
+      if (isConversationContextActive(requestConversationId)) {
+        setIsSavingEdit(false);
+      }
     }
-  }, [editingMessageId, editingValue, handleCancelEdit, isSavingEdit, messages]);
+  }, [conversationId, editingMessageId, editingValue, handleCancelEdit, isConversationContextActive, isSavingEdit, messages]);
 
   useEffect(() => {
     if (!editingMessageId) {
@@ -5574,6 +5679,7 @@ export default function DirectMessageChatView({
   }, [adjustEditTextareaHeight, editingMessageId, editingValue]);
 
   const handleConfirmDelete = useCallback(async (): Promise<void> => {
+    const requestConversationId = conversationId;
     if (!deleteTarget) {
       return;
     }
@@ -5600,6 +5706,9 @@ export default function DirectMessageChatView({
 
     try {
       await deleteChatMessage(targetId);
+      if (!isConversationContextActive(requestConversationId)) {
+        return;
+      }
       setAttachmentUrlMap((current) => {
         const next = { ...current };
         delete next[targetId];
@@ -5611,6 +5720,9 @@ export default function DirectMessageChatView({
         return next;
       });
     } catch (error) {
+      if (!isConversationContextActive(requestConversationId)) {
+        return;
+      }
       setMessages(snapshot);
       if (!alreadyKnownAsDeleted) {
         setDeletedMessageIds((current) => {
@@ -5627,6 +5739,9 @@ export default function DirectMessageChatView({
       setDeleteTarget(deleteTargetSnapshot);
       setLoadError(error instanceof Error ? error.message : "Nao foi possivel excluir a mensagem.");
     } finally {
+      if (!isConversationContextActive(requestConversationId)) {
+        return;
+      }
       setDeletingMessageIds((current) => {
         if (!current.has(targetId)) {
           return current;
@@ -5636,7 +5751,7 @@ export default function DirectMessageChatView({
         return next;
       });
     }
-  }, [canDeleteMessage, deleteTarget, deletedMessageIds, deletingMessageIds, messages, registerDeletedMessageId]);
+  }, [canDeleteMessage, conversationId, deleteTarget, deletedMessageIds, deletingMessageIds, isConversationContextActive, messages, registerDeletedMessageId]);
 
   const handlePickAttachments = useCallback((event: ChangeEvent<HTMLInputElement>): void => {
     const pickedFiles = Array.from(event.currentTarget.files ?? []);
@@ -5725,7 +5840,7 @@ export default function DirectMessageChatView({
     [messageRenderEntries, virtualEndIndex, virtualStartIndex],
   );
   const isLoadingMessages = isInitialConversationLoading;
-  const shouldShowMessagesSkeleton = !loadError && isLoadingMessages && messages.length === 0;
+  const shouldShowMessagesSkeleton = !loadError && isLoadingMessages && messages.length === 0 && allowMessageSkeleton;
   const composerPlaceholder = `Conversar com @${safeTargetUsername}`;
   const currentViewerItem = mediaViewerState ? mediaViewerState.items[mediaViewerState.index] ?? null : null;
   const shouldShowSidebarProfileMetaCard = Boolean(targetAboutText) || Boolean(targetMemberSinceLabel);
@@ -6435,7 +6550,6 @@ export default function DirectMessageChatView({
               ref={scrollContainerRef}
               onScroll={handleMessagesScroll}
             >
-          {isLoadingOlder ? <p className="dm-chat__state">Carregando mensagens antigas...</p> : null}
           {loadError ? <p className="dm-chat__state dm-chat__state--error">{loadError}</p> : null}
           {shouldShowMessagesSkeleton ? <MessagesSkeleton /> : null}
           {!loadError ? (
