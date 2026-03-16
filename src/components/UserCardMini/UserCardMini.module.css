@@ -67,6 +67,28 @@
   border: 2px solid var(--mini-card-bg);
 }
 
+.voiceStatusBadge {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  width: 17px;
+  height: 17px;
+  border-radius: 999px;
+  border: 2px solid var(--mini-card-bg);
+  background: #e5485a;
+  color: #ffffff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.voiceStatusIcon {
+  width: 10px;
+  height: 10px;
+  min-width: 10px;
+  min-height: 10px;
+}
+
 .presenceOnline {
   background: var(--profile-presence-online);
 }

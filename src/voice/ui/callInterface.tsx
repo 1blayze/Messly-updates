@@ -7,6 +7,7 @@ import "../../styles/components/VoiceCallInterface.css";
 
 const micIconUrl = new URL("../../assets/icons/ui/Microphone 1.svg", import.meta.url).href;
 const micOffIconUrl = new URL("../../assets/icons/ui/Microphone Off.svg", import.meta.url).href;
+const headphoneIconUrl = new URL("../../assets/icons/ui/headphone.svg", import.meta.url).href;
 const cameraIconUrl = new URL("../../assets/icons/ui/Video.svg", import.meta.url).href;
 const screenIconUrl = new URL("../../assets/icons/ui/screen.svg", import.meta.url).href;
 const endCallIconUrl = new URL("../../assets/icons/ui/Call-Missed.svg", import.meta.url).href;
@@ -17,6 +18,7 @@ export interface VoiceCallInterfaceProps {
   connectionState: VoiceConnectionState;
   participants: VoiceParticipantState[];
   localMuted: boolean;
+  localDeafened: boolean;
   elapsedSeconds: number | null;
   diagnostics: VoiceDiagnosticsPeerSnapshot[];
   errorMessage?: string | null;
@@ -30,6 +32,7 @@ export default function VoiceCallInterface({
   isConnecting,
   participants,
   localMuted,
+  localDeafened,
   connectionState,
   elapsedSeconds,
   diagnostics,
@@ -38,6 +41,7 @@ export default function VoiceCallInterface({
   onToggleMute,
   onLeave,
 }: VoiceCallInterfaceProps) {
+  void isConnecting;
   void connectionState;
   void elapsedSeconds;
   void diagnostics;
@@ -54,20 +58,36 @@ export default function VoiceCallInterface({
   return (
     <aside className="voice-call-panel" aria-label="Chamada de voz">
       <section className="voice-call-panel__avatars" aria-label="Participantes da chamada">
-        {avatarParticipants.map((participant) => (
-          <div
-            key={participant.userId}
-            className={`voice-call-panel__avatar-wrap${participant.speaking ? " voice-call-panel__avatar-wrap--speaking" : ""}`}
-          >
-            <img
-              className="voice-call-panel__avatar"
-              src={participant.avatarSrc}
-              alt={`Avatar de ${participant.displayName}`}
-              loading="eager"
-              decoding="sync"
-            />
-          </div>
-        ))}
+        {avatarParticipants.map((participant) => {
+          const showDeafened = participant.isLocal ? localDeafened : participant.deafened;
+          const showMuted = participant.muted && !showDeafened;
+          const statusIconUrl = showDeafened
+            ? headphoneIconUrl
+            : (showMuted ? micOffIconUrl : "");
+          const statusLabel = showDeafened
+            ? "Usuario ensurdecido"
+            : (showMuted ? "Usuario mutado" : "");
+
+          return (
+            <div
+              key={participant.userId}
+              className={`voice-call-panel__avatar-wrap${participant.speaking ? " voice-call-panel__avatar-wrap--speaking" : ""}`}
+            >
+              <img
+                className="voice-call-panel__avatar"
+                src={participant.avatarSrc}
+                alt={`Avatar de ${participant.displayName}`}
+                loading="eager"
+                decoding="sync"
+              />
+              {statusIconUrl ? (
+                <span className="voice-call-panel__avatar-status" role="img" aria-label={statusLabel}>
+                  <img className="voice-call-panel__avatar-status-icon" src={statusIconUrl} alt="" aria-hidden="true" />
+                </span>
+              ) : null}
+            </div>
+          );
+        })}
       </section>
 
       <section className="voice-call-panel__controls" aria-label="Controles da chamada">

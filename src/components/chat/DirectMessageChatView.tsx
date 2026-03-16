@@ -59,6 +59,11 @@ import {
   VoiceCallPresenceClient,
   type VoiceCallStateUpdate,
 } from "../../voice/client/presence";
+import {
+  publishVoiceCallUiSnapshot,
+  resetVoiceCallUiSnapshot,
+  subscribeVoiceCallUiCommand,
+} from "../../voice/client/uiState";
 import "../../styles/components/DirectMessageChat.css";
 
 gsap.registerPlugin(ScrollToPlugin);
@@ -1880,6 +1885,7 @@ export default function DirectMessageChatView({
   const [isVoiceCallActive, setIsVoiceCallActive] = useState(false);
   const [isVoiceCallConnecting, setIsVoiceCallConnecting] = useState(false);
   const [isVoiceCallMuted, setIsVoiceCallMuted] = useState(false);
+  const [isVoiceCallDeafened, setIsVoiceCallDeafened] = useState(false);
   const [voiceCallUiState, setVoiceCallUiState] = useState<VoiceCallUiState>("IDLE");
   const [voiceCallParticipants, setVoiceCallParticipants] = useState<VoiceParticipantState[]>([]);
   const [voiceCallDiagnostics, setVoiceCallDiagnostics] = useState<VoiceDiagnosticsPeerSnapshot[]>([]);
@@ -3519,6 +3525,21 @@ export default function DirectMessageChatView({
   }, [isVoiceCallConnecting]);
 
   useEffect(() => {
+    publishVoiceCallUiSnapshot({
+      callActive: isVoiceCallActive,
+      callConnecting: isVoiceCallConnecting,
+      muted: isVoiceCallMuted,
+      deafened: isVoiceCallDeafened,
+    });
+  }, [isVoiceCallActive, isVoiceCallConnecting, isVoiceCallMuted, isVoiceCallDeafened]);
+
+  useEffect(() => {
+    return () => {
+      resetVoiceCallUiSnapshot();
+    };
+  }, []);
+
+  useEffect(() => {
     voiceCallUiStateRef.current = voiceCallUiState;
   }, [voiceCallUiState]);
 
@@ -4318,6 +4339,7 @@ export default function DirectMessageChatView({
     setIsVoiceCallActive(false);
     setIsVoiceCallConnecting(false);
     setIsVoiceCallMuted(false);
+    setIsVoiceCallDeafened(false);
     setVoiceCallUiState("IDLE");
     setVoiceCallParticipants([]);
     setVoiceCallDiagnostics([]);
@@ -5497,6 +5519,7 @@ export default function DirectMessageChatView({
     setIsVoiceCallActive(false);
     setIsVoiceCallConnecting(false);
     setIsVoiceCallMuted(false);
+    setIsVoiceCallDeafened(false);
     setVoiceCallUiState("ENDED");
     setVoiceCallParticipants([]);
     setVoiceCallDiagnostics([]);
@@ -5556,6 +5579,7 @@ export default function DirectMessageChatView({
         ...localIdentity,
         isLocal: true,
         muted: false,
+        deafened: false,
         speaking: false,
         speakingLevel: 0,
         connectionState: "connecting",
@@ -5566,6 +5590,7 @@ export default function DirectMessageChatView({
         ...remoteIdentity,
         isLocal: false,
         muted: false,
+        deafened: false,
         speaking: false,
         speakingLevel: 0,
         connectionState: "connecting",
@@ -5648,6 +5673,7 @@ export default function DirectMessageChatView({
         const localParticipant = normalizedParticipants.find((participant) => participant.isLocal);
         if (localParticipant) {
           setIsVoiceCallMuted(localParticipant.muted);
+          setIsVoiceCallDeafened(localParticipant.deafened);
         }
       },
       onDiagnostics: (snapshot) => {
@@ -5696,6 +5722,7 @@ export default function DirectMessageChatView({
         setVoiceCallStartedAtMs(Date.now());
         setVoiceCallElapsedTick(0);
         setIsVoiceCallMuted(voiceCallClient.isMuted());
+        setIsVoiceCallDeafened(voiceCallClient.isDeafened());
       })
       .catch((error) => {
         if (voiceCallClientRef.current === voiceCallClient) {
@@ -5748,6 +5775,27 @@ export default function DirectMessageChatView({
     existingVoiceCallClient.toggleMuted();
     setIsVoiceCallMuted(existingVoiceCallClient.isMuted());
   }, []);
+
+  const handleToggleVoiceDeafen = useCallback(() => {
+    const existingVoiceCallClient = voiceCallClientRef.current;
+    if (!existingVoiceCallClient) {
+      return;
+    }
+    existingVoiceCallClient.toggleDeafened();
+    setIsVoiceCallDeafened(existingVoiceCallClient.isDeafened());
+  }, []);
+
+  useEffect(() => {
+    return subscribeVoiceCallUiCommand((command) => {
+      if (command === "toggle-mute") {
+        handleToggleVoiceMute();
+        return;
+      }
+      if (command === "toggle-deafen") {
+        handleToggleVoiceDeafen();
+      }
+    });
+  }, [handleToggleVoiceDeafen, handleToggleVoiceMute]);
 
   const handleAcceptIncomingVoiceInvite = useCallback(() => {
     const inviteRoomId = String(incomingVoiceInviteRoomId ?? "").trim();
@@ -6049,6 +6097,7 @@ export default function DirectMessageChatView({
                 connectionState={voiceCallConnectionState}
                 participants={voiceCallParticipants}
                 localMuted={isVoiceCallMuted}
+                localDeafened={isVoiceCallDeafened}
                 elapsedSeconds={voiceCallElapsedSeconds}
                 diagnostics={voiceCallDiagnostics}
                 errorMessage={voiceCallError}

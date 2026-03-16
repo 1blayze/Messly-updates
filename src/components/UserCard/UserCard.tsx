@@ -12,6 +12,11 @@ import {
   type SpotifyConnectionState,
 } from "../../services/connections/spotifyConnection";
 import { supabase } from "../../services/supabase";
+import {
+  emitVoiceCallUiCommand,
+  getVoiceCallUiSnapshot,
+  subscribeVoiceCallUiSnapshot,
+} from "../../voice/client/uiState";
 import UserCardMini from "../UserCardMini/UserCardMini";
 import UserProfilePopover from "../UserProfilePopover/UserProfilePopover";
 import styles from "./UserCard.module.css";
@@ -123,6 +128,7 @@ export default function UserCard({
     readProfilePlusThemeState(authUser?.uid ?? currentUserId),
   );
   const [spotifyConnection, setSpotifyConnection] = useState<SpotifyConnectionState>(() => readSpotifyConnection(userId));
+  const [voiceCallUiSnapshot, setVoiceCallUiSnapshot] = useState(() => getVoiceCallUiSnapshot());
   const fallbackMemberSinceLabel = useMemo(
     () => formatMemberSinceDate(currentAuthCreationTime) || "Data nao disponivel",
     [currentAuthCreationTime, currentAuthUid],
@@ -177,10 +183,15 @@ export default function UserCard({
     const trackTitle = String(spotifyConnection.playback.trackTitle ?? "").trim();
     return artistNames || trackTitle;
   }, [hasActiveSpotifyPlayback, spotifyConnection.connected, spotifyConnection.playback, spotifyConnection.showAsStatus]);
+  const voiceStatusIndicator = voiceCallUiSnapshot.deafened
+    ? "deafened"
+    : (voiceCallUiSnapshot.muted ? "muted" : "none");
 
   useEffect(() => {
     setProfileThemeState(readProfilePlusThemeState(authUser?.uid ?? currentUserId));
   }, [authUser?.uid, currentUserId, userId]);
+
+  useEffect(() => subscribeVoiceCallUiSnapshot(setVoiceCallUiSnapshot), []);
 
   useEffect(() => {
     setSpotifyConnection(readSpotifyConnection(spotifyScope));
@@ -352,7 +363,16 @@ export default function UserCard({
         username={safeUsername}
         presenceLabel={presenceLabel}
         presenceState={presenceState}
+        voiceStatusIndicator={voiceStatusIndicator}
         spotifyStatusText={miniSpotifyStatusText}
+        isMicEnabled={!voiceCallUiSnapshot.muted}
+        isSoundEnabled={!voiceCallUiSnapshot.deafened}
+        onToggleMic={() => {
+          emitVoiceCallUiCommand("toggle-mute");
+        }}
+        onToggleSound={() => {
+          emitVoiceCallUiCommand("toggle-deafen");
+        }}
         onOpenSettings={handleOpenSettings}
         isProfileOpen={isProfileOpen}
         onToggleProfile={() => setIsProfileOpen((current) => !current)}

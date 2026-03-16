@@ -7,6 +7,7 @@ import {
   createVoiceAudioPipeline,
   removeRemoteAudioPlayback,
   setAudioTrackMuted,
+  setRemoteAudioPlaybackMuted,
   stopMediaStream,
   type VoiceAudioPipelineSession,
   type VoiceInputQualityReport,
@@ -47,6 +48,7 @@ export interface VoiceUserIdentity {
 export interface VoiceParticipantState extends VoiceUserIdentity {
   isLocal: boolean;
   muted: boolean;
+  deafened: boolean;
   speaking: boolean;
   speakingLevel: number;
   connectionState: VoicePeerConnectionState;
@@ -502,6 +504,7 @@ export class VoiceCallClient {
   private state: VoiceConnectionState = "idle";
   private joinedRoom = false;
   private localMuted = false;
+  private localDeafened = false;
   private socket: WebSocket | null = null;
   private reconnectTimerId: number | null = null;
   private reconnectAttempt = 0;
@@ -556,6 +559,7 @@ export class VoiceCallClient {
       ...this.self,
       isLocal: true,
       muted: false,
+      deafened: false,
       speaking: false,
       speakingLevel: 0,
       connectionState: "idle",
@@ -569,6 +573,10 @@ export class VoiceCallClient {
 
   isMuted(): boolean {
     return this.localMuted;
+  }
+
+  isDeafened(): boolean {
+    return this.localDeafened;
   }
 
   updatePeerDirectory(entry: VoiceUserIdentity): void {
@@ -636,8 +644,10 @@ export class VoiceCallClient {
         this.onMicrophoneWarningChanged?.(null);
       }
       this.localMuted = false;
+      this.localDeafened = false;
       this.updateLocalParticipant({
         muted: false,
+        deafened: false,
         speaking: false,
         speakingLevel: 0,
         connectionState: "connecting",
@@ -687,6 +697,7 @@ export class VoiceCallClient {
   async leave(): Promise<void> {
     this.leaving = true;
     this.joinedRoom = false;
+    this.localDeafened = false;
     this.clearReconnectTimer();
     this.clearIntervals();
     this.clearJoinRetryLoop();
@@ -730,6 +741,7 @@ export class VoiceCallClient {
       ...this.self,
       isLocal: true,
       muted: false,
+      deafened: false,
       speaking: false,
       speakingLevel: 0,
       connectionState: "idle",
@@ -755,6 +767,21 @@ export class VoiceCallClient {
 
   toggleMuted(): void {
     this.setMuted(!this.localMuted);
+  }
+
+  setDeafened(deafened: boolean): void {
+    if (this.localDeafened === deafened) {
+      return;
+    }
+    this.localDeafened = deafened;
+    setRemoteAudioPlaybackMuted(this.remoteAudioElements, deafened);
+    this.updateLocalParticipant({
+      deafened,
+    });
+  }
+
+  toggleDeafened(): void {
+    this.setDeafened(!this.localDeafened);
   }
 
   private async connectSignaling(): Promise<void> {
@@ -1079,6 +1106,7 @@ export class VoiceCallClient {
       attachRemoteAudioPlayback(remoteStream, userId, this.remoteAudioElements, {
         outputDeviceId: this.mediaPreferences.outputDeviceId,
         outputVolumePercent: this.mediaPreferences.outputVolumePercent,
+        muted: this.localDeafened,
       });
     };
 
@@ -1613,7 +1641,7 @@ export class VoiceCallClient {
   }
 
   private updateLocalParticipant(
-    patch: Partial<Pick<VoiceParticipantState, "muted" | "speaking" | "speakingLevel" | "connectionState">>,
+    patch: Partial<Pick<VoiceParticipantState, "muted" | "deafened" | "speaking" | "speakingLevel" | "connectionState">>,
   ): void {
     const current = this.participants.get(this.self.userId);
     if (!current) {
@@ -1631,7 +1659,7 @@ export class VoiceCallClient {
   private ensureRemoteParticipant(
     userId: string,
     displayName: string,
-    patch: Partial<Pick<VoiceParticipantState, "muted" | "speaking" | "speakingLevel" | "connectionState">>,
+    patch: Partial<Pick<VoiceParticipantState, "muted" | "deafened" | "speaking" | "speakingLevel" | "connectionState">>,
   ): void {
     const directoryEntry = this.peerDirectory.get(userId);
     const nextIdentity: VoiceUserIdentity = directoryEntry ?? {
@@ -1646,6 +1674,7 @@ export class VoiceCallClient {
       avatarSrc: String(nextIdentity.avatarSrc ?? "").trim(),
       isLocal: false,
       muted: patch.muted ?? false,
+      deafened: patch.deafened ?? false,
       speaking: patch.speaking ?? false,
       speakingLevel: patch.speakingLevel ?? 0,
       connectionState: patch.connectionState ?? "connecting",
@@ -1655,7 +1684,7 @@ export class VoiceCallClient {
 
   private updateRemoteParticipant(
     userIdRaw: string,
-    patch: Partial<Pick<VoiceParticipantState, "muted" | "speaking" | "speakingLevel" | "connectionState">>,
+    patch: Partial<Pick<VoiceParticipantState, "muted" | "deafened" | "speaking" | "speakingLevel" | "connectionState">>,
   ): void {
     const userId = String(userIdRaw ?? "").trim();
     if (!userId || userId === this.self.userId) {

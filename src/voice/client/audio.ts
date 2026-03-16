@@ -342,6 +342,7 @@ export function attachRemoteAudioPlayback(
   options?: {
     outputDeviceId?: string | null;
     outputVolumePercent?: number | null;
+    muted?: boolean;
   },
 ): HTMLAudioElement {
   const existing = targetMap.get(userId);
@@ -370,6 +371,7 @@ function applyRemoteAudioOptions(
   options?: {
     outputDeviceId?: string | null;
     outputVolumePercent?: number | null;
+    muted?: boolean;
   },
 ): void {
   const requestedOutputVolumePercent = Number(options?.outputVolumePercent ?? 100);
@@ -377,6 +379,9 @@ function applyRemoteAudioOptions(
     ? Math.max(0, Math.min(200, requestedOutputVolumePercent))
     : 100;
   audioElement.volume = Math.max(0, Math.min(1, normalizedOutputVolumePercent / 100));
+  if (typeof options?.muted === "boolean") {
+    audioElement.muted = options.muted;
+  }
 
   const outputDeviceId = String(options?.outputDeviceId ?? "").trim();
   if (!outputDeviceId) {
@@ -412,5 +417,14 @@ export function removeRemoteAudioPlayback(userId: string, targetMap: Map<string,
 export function clearRemoteAudioPlayback(targetMap: Map<string, HTMLAudioElement>): void {
   for (const [userId] of targetMap) {
     removeRemoteAudioPlayback(userId, targetMap);
+  }
+}
+
+export function setRemoteAudioPlaybackMuted(
+  targetMap: Map<string, HTMLAudioElement>,
+  muted: boolean,
+): void {
+  for (const audioElement of targetMap.values()) {
+    audioElement.muted = muted;
   }
 }

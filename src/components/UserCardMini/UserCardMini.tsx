@@ -11,6 +11,7 @@ interface UserCardMiniProps {
   username?: string;
   presenceLabel: string;
   presenceState: PresenceState;
+  voiceStatusIndicator?: "none" | "muted" | "deafened";
   spotifyStatusText?: string;
   isMicEnabled?: boolean;
   isSoundEnabled?: boolean;
@@ -35,6 +36,7 @@ export default function UserCardMini({
   username = "",
   presenceLabel,
   presenceState,
+  voiceStatusIndicator = "none",
   spotifyStatusText = "",
   isMicEnabled = true,
   isSoundEnabled = true,
@@ -46,6 +48,11 @@ export default function UserCardMini({
   onToggleProfile,
 }: UserCardMiniProps) {
   const badgeClass = BADGE_BY_STATE[presenceState];
+  const showVoiceStatusBadge = voiceStatusIndicator !== "none";
+  const voiceStatusLabel = voiceStatusIndicator === "deafened"
+    ? "Ensurdecido"
+    : (voiceStatusIndicator === "muted" ? "Microfone mutado" : "");
+  const voiceStatusIcon = voiceStatusIndicator === "deafened" ? "headset" : "mic_off";
   const safeSpotifyStatusText = String(spotifyStatusText ?? "").trim();
   const safeUsername = String(username ?? "").trim().replace(/^@+/, "");
   const shouldShowSpotifyStatus = safeSpotifyStatusText.length > 0;
@@ -66,7 +73,13 @@ export default function UserCardMini({
             name={displayName}
             alt={`Avatar de ${displayName}`}
           />
-          <span className={`${styles.presenceBadge} ${badgeClass}`} role="img" aria-label={`Status atual: ${presenceLabel}`} />
+          {showVoiceStatusBadge ? (
+            <span className={styles.voiceStatusBadge} role="img" aria-label={voiceStatusLabel}>
+              <MaterialSymbolIcon className={styles.voiceStatusIcon} name={voiceStatusIcon} size={10} />
+            </span>
+          ) : (
+            <span className={`${styles.presenceBadge} ${badgeClass}`} role="img" aria-label={`Status atual: ${presenceLabel}`} />
+          )}
         </span>
 
         <span className={styles.meta}>
