@@ -1909,6 +1909,8 @@ export default function DirectMessageChatView({
   const voiceCallClientRef = useRef<VoiceCallClient | null>(null);
   const dmRealtimeChannelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const voiceSignalMessageIdsRef = useRef<Set<string>>(new Set());
+  const latestVoiceSignalBySenderRef = useRef<Map<string, number>>(new Map());
+  const incomingVoiceInviteFromUserIdRef = useRef<string | null>(null);
   const isVoiceCallActiveRef = useRef(false);
   const isVoiceCallConnectingRef = useRef(false);
   const openPerfRef = useRef<{ conversationId: string; openedAt: number; firstPaintLogged: boolean }>({
@@ -3175,6 +3177,24 @@ export default function DirectMessageChatView({
     [currentUserId],
   );
 
+  const shouldProcessVoiceSignal = useCallback((senderUserIdRaw: string, sentAtRaw: number): boolean => {
+    const senderUserId = String(senderUserIdRaw ?? "").trim();
+    if (!senderUserId) {
+      return false;
+    }
+    if (!Number.isFinite(sentAtRaw) || sentAtRaw <= 0) {
+      return false;
+    }
+
+    const latestBySender = latestVoiceSignalBySenderRef.current;
+    const knownSentAt = latestBySender.get(senderUserId) ?? 0;
+    if (sentAtRaw < knownSentAt) {
+      return false;
+    }
+    latestBySender.set(senderUserId, sentAtRaw);
+    return true;
+  }, []);
+
   const sendVoiceSignal = useCallback(
     async (action: VoiceCallSignalAction, roomIdOverride?: string | null): Promise<void> => {
       const senderUserId = String(currentUser.userId ?? "").trim() || String(currentUserId ?? "").trim();
@@ -3250,9 +3270,13 @@ export default function DirectMessageChatView({
       if (!fromRemote) {
         return true;
       }
+      const sentAt = Number(signal.sentAt ?? 0);
+      if (!shouldProcessVoiceSignal(senderUserId, sentAt)) {
+        return true;
+      }
 
       if (signal.action === "invite") {
-        if (Date.now() - signal.sentAt > VOICE_CALL_INVITE_TTL_MS) {
+        if (Date.now() - sentAt > VOICE_CALL_INVITE_TTL_MS) {
           return true;
         }
         if (!isVoiceCallActiveRef.current && !isVoiceCallConnectingRef.current) {
@@ -3263,7 +3287,7 @@ export default function DirectMessageChatView({
       }
 
       if (signal.action === "cancel") {
-        if (incomingVoiceInviteFromUserId === senderUserId) {
+        if (incomingVoiceInviteFromUserIdRef.current === senderUserId) {
           setIncomingVoiceInviteFromUserId(null);
           setIncomingVoiceInviteRoomId(null);
         }
@@ -3272,7 +3296,7 @@ export default function DirectMessageChatView({
 
       return true;
     },
-    [currentUser.userId, currentUserId, incomingVoiceInviteFromUserId, markConversationAsRead, voiceRoomId],
+    [currentUser.userId, currentUserId, markConversationAsRead, shouldProcessVoiceSignal, voiceRoomId],
   );
 
   useEffect(() => {
@@ -3294,6 +3318,10 @@ export default function DirectMessageChatView({
   useEffect(() => {
     isVoiceCallConnectingRef.current = isVoiceCallConnecting;
   }, [isVoiceCallConnecting]);
+
+  useEffect(() => {
+    incomingVoiceInviteFromUserIdRef.current = incomingVoiceInviteFromUserId;
+  }, [incomingVoiceInviteFromUserId]);
 
   useEffect(() => {
     if (messages.length <= ACTIVE_MESSAGE_WINDOW_MAX) {
@@ -3879,6 +3907,9 @@ export default function DirectMessageChatView({
 
             if (action === "invite") {
               const sentAt = Number(raw.sentAt ?? 0);
+              if (!shouldProcessVoiceSignal(senderUserId, sentAt)) {
+                return;
+              }
               if (!Number.isFinite(sentAt) || Date.now() - sentAt > VOICE_CALL_INVITE_TTL_MS) {
                 return;
               }
@@ -3889,7 +3920,12 @@ export default function DirectMessageChatView({
               return;
             }
 
-            if (incomingVoiceInviteFromUserId === senderUserId) {
+            const sentAt = Number(raw.sentAt ?? 0);
+            if (!shouldProcessVoiceSignal(senderUserId, sentAt)) {
+              return;
+            }
+
+            if (incomingVoiceInviteFromUserIdRef.current === senderUserId) {
               setIncomingVoiceInviteFromUserId(null);
               setIncomingVoiceInviteRoomId(null);
             }
@@ -3919,10 +3955,10 @@ export default function DirectMessageChatView({
     conversationId,
     currentUser.userId,
     currentUserId,
-    incomingVoiceInviteFromUserId,
     loadConversationMessages,
     markConversationAsRead,
     registerDeletedMessageId,
+    shouldProcessVoiceSignal,
     voiceRoomId,
   ]);
 
@@ -4034,6 +4070,7 @@ export default function DirectMessageChatView({
     setIncomingVoiceInviteFromUserId(null);
     setIncomingVoiceInviteRoomId(null);
     voiceSignalMessageIdsRef.current.clear();
+    latestVoiceSignalBySenderRef.current.clear();
 
     const existingVoiceCallClient = voiceCallClientRef.current;
     voiceCallClientRef.current = null;
