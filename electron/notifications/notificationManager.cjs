@@ -7,6 +7,7 @@ const MESSAGE_NOTIFICATION_MAX_AUTHOR_NAME_LENGTH = 80;
 const MESSAGE_NOTIFICATION_MAX_PREVIEW_LENGTH = 180;
 const MESSAGE_NOTIFICATION_MAX_CONTEXT_LENGTH = 96;
 const CALL_NOTIFICATION_MAX_AVATAR_URL_LENGTH = 2_048;
+const SHOULD_GROUP_MESSAGE_NOTIFICATIONS = process.platform !== "win32";
 
 function sanitizeIdentifier(rawValue) {
   const normalized = String(rawValue ?? "").trim();
@@ -196,6 +197,14 @@ class NotificationManager {
       return { ok: true, reason: "duplicate" };
     }
 
+    if (!SHOULD_GROUP_MESSAGE_NOTIFICATIONS) {
+      const shown = await this.dispatchSingleMessageNotification({
+        ...payload,
+        batchCount: 1,
+      });
+      return { ok: shown, reason: shown ? "shown" : "show_failed" };
+    }
+
     this.groupingService.enqueue(payload);
     return { ok: true, reason: "queued" };
   }
@@ -298,27 +307,12 @@ class NotificationManager {
       ...payload,
       batchCount,
     };
-    const notificationOptions = await this.buildNotificationOptions(notificationPayload);
-    if (!notificationOptions) {
-      this.debugLog("dispatch_skipped", {
-        reason: "invalid_options",
-        conversationId: notificationPayload.conversationId,
-        messageId: notificationPayload.messageId,
-      });
-      return;
-    }
-
-    const shown = this.showNotificationWithFallback(notificationOptions, {
-      conversationId: notificationPayload.conversationId,
-      messageId: notificationPayload.messageId,
-      eventId: notificationPayload.eventId,
-      source: "native-notification",
-    });
+    const shown = await this.dispatchSingleMessageNotification(notificationPayload);
     if (!shown) {
-      this.debugLog("show_failed", {
+      this.debugLog("dispatch_skipped", {
+        reason: "show_failed",
         conversationId: notificationPayload.conversationId,
         messageId: notificationPayload.messageId,
-        reason: "notification_show_failed",
       });
       return;
     }
@@ -362,6 +356,19 @@ class NotificationManager {
       options.icon = fallbackIcon;
     }
     return options;
+  }
+
+  async dispatchSingleMessageNotification(notificationPayload) {
+    const notificationOptions = await this.buildNotificationOptions(notificationPayload);
+    if (!notificationOptions) {
+      return false;
+    }
+    return this.showNotificationWithFallback(notificationOptions, {
+      conversationId: notificationPayload.conversationId,
+      messageId: notificationPayload.messageId,
+      eventId: notificationPayload.eventId,
+      source: "native-notification",
+    });
   }
 
   async buildCallNotificationOptions(payload) {

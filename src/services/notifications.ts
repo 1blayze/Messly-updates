@@ -168,7 +168,7 @@ class NotificationsService {
     try {
       const result = await notifyMessage(batch.payload);
       const normalizedReason = String(result?.reason ?? "").trim().toLowerCase();
-      const shouldPlaySound = Boolean(result?.ok) && normalizedReason === "queued";
+      const shouldPlaySound = Boolean(result?.ok) && (normalizedReason === "queued" || normalizedReason === "shown");
       if (shouldPlaySound) {
         notificationSoundService.play();
         if (!this.policyService.getContext().isWindowFocused) {
