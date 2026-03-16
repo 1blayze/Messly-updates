@@ -3445,10 +3445,59 @@ export default function DirectMessageChatView({
 
   const sendVoiceSignal = useCallback(
     async (action: VoiceCallSignalAction, roomIdOverride?: string | null): Promise<void> => {
-      void action;
-      void roomIdOverride;
+      const senderUserId = String(currentUser.userId ?? "").trim() || String(currentUserId ?? "").trim();
+      if (!senderUserId) {
+        return;
+      }
+
+      const roomId = String(roomIdOverride ?? activeVoiceRoomIdRef.current ?? voiceRoomId).trim() || voiceRoomId;
+      if (!roomId) {
+        return;
+      }
+
+      const signal: VoiceCallSignalPayload = {
+        version: 1,
+        action,
+        roomId,
+        senderUserId,
+        sentAt: Date.now(),
+      };
+
+      latestVoiceSignalBySenderRef.current.set(senderUserId, signal.sentAt);
+
+      let realtimeDelivered = false;
+      const activeChannel = dmRealtimeChannelRef.current;
+      if (activeChannel) {
+        try {
+          const realtimeResult = await activeChannel.send({
+            type: "broadcast",
+            event: "voice-signal",
+            payload: signal,
+          });
+          realtimeDelivered = realtimeResult === "ok";
+        } catch {
+          realtimeDelivered = false;
+        }
+      }
+
+      const encodedSignal = encodeVoiceCallSignal(signal);
+      try {
+        await sendChatMessage({
+          conversationId,
+          clientId: createClientMessageId(),
+          type: "text",
+          content: encodedSignal,
+          replyToId: null,
+          replyToSnapshot: null,
+          attachment: null,
+        });
+      } catch (error) {
+        if (!realtimeDelivered) {
+          throw error;
+        }
+      }
     },
-    [],
+    [conversationId, currentUser.userId, currentUserId, voiceRoomId],
   );
 
   const consumeVoiceSignalMessage = useCallback(
