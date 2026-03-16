@@ -61,6 +61,7 @@ gsap.registerPlugin(ScrollToPlugin);
 
 const headerVoiceCallIconUrl = new URL("../../assets/icons/ui/Calling.svg", import.meta.url).href;
 const headerVideoOffIconUrl = new URL("../../assets/icons/ui/video-off.svg", import.meta.url).href;
+const rejoinCameraIconUrl = new URL("../../assets/icons/ui/Camera.svg", import.meta.url).href;
 const VOICE_CALL_SIGNAL_PREFIX = "__messly_voice_call_signal__:";
 const VOICE_CALL_INVITE_TTL_MS = 45_000;
 const AUDIO_SETTINGS_STORAGE_KEY_PREFIX = "messly:audio-settings:";
@@ -5580,16 +5581,16 @@ export default function DirectMessageChatView({
 
       <div className={`dm-chat__body${shouldHideVoiceCallChrome ? " dm-chat__body--voice-call-focus" : ""}`}>
         <div className="dm-chat__main">
-          {hasIncomingVoiceInvite || hasVoiceCallRejoinFallback ? (
+          {hasIncomingVoiceInvite ? (
             <section
               className="dm-chat__rejoin-stage"
-              aria-label={hasIncomingVoiceInvite ? "Convite de chamada de voz" : "Retorno para chamada de voz"}
+              aria-label="Convite de chamada de voz"
             >
               <div className="dm-chat__rejoin-stage-surface">
                 <img
                   className="dm-chat__rejoin-stage-avatar"
-                  src={hasIncomingVoiceInvite ? targetAvatarSrc : voiceCallRejoinAvatarSrc}
-                  alt={`Avatar de ${hasIncomingVoiceInvite ? incomingVoiceInviteDisplayName : voiceCallRejoinDisplayName}`}
+                  src={targetAvatarSrc}
+                  alt={`Avatar de ${incomingVoiceInviteDisplayName}`}
                   loading="lazy"
                   onError={(event) => {
                     const target = event.currentTarget;
@@ -5599,31 +5600,65 @@ export default function DirectMessageChatView({
                   }}
                 />
                 <p className="dm-chat__rejoin-stage-title">
-                  {hasIncomingVoiceInvite
-                    ? `${incomingVoiceInviteDisplayName} iniciou uma chamada de voz`
-                    : `${voiceCallRejoinDisplayName} continua na chamada de voz`}
+                  {`${incomingVoiceInviteDisplayName} iniciou uma chamada de voz`}
                 </p>
                 <div
                   className="dm-chat__rejoin-stage-controls"
                   role="group"
-                  aria-label={hasIncomingVoiceInvite ? "Acoes do convite de chamada" : "Acoes para voltar para chamada"}
+                  aria-label="Acoes do convite de chamada"
                 >
                   <button
                     type="button"
                     className="dm-chat__rejoin-stage-btn dm-chat__rejoin-stage-btn--accept"
-                    onClick={hasIncomingVoiceInvite ? handleAcceptIncomingVoiceInvite : handleRejoinVoiceCall}
+                    onClick={handleAcceptIncomingVoiceInvite}
                   >
-                    {hasIncomingVoiceInvite ? "Entrar" : "Voltar"}
+                    Entrar
                   </button>
-                  {hasIncomingVoiceInvite ? (
-                    <button
-                      type="button"
-                      className="dm-chat__rejoin-stage-btn dm-chat__rejoin-stage-btn--dismiss"
-                      onClick={handleDismissIncomingVoiceInvite}
-                    >
-                      Agora nao
-                    </button>
-                  ) : null}
+                  <button
+                    type="button"
+                    className="dm-chat__rejoin-stage-btn dm-chat__rejoin-stage-btn--dismiss"
+                    onClick={handleDismissIncomingVoiceInvite}
+                  >
+                    Agora nao
+                  </button>
+                </div>
+              </div>
+            </section>
+          ) : null}
+          {hasVoiceCallRejoinFallback ? (
+            <section className="dm-chat__rejoin-stage dm-chat__rejoin-stage--compact" aria-label="Retorno para chamada de voz">
+              <div className="dm-chat__rejoin-stage-surface dm-chat__rejoin-stage-surface--compact">
+                <img
+                  className="dm-chat__rejoin-stage-avatar"
+                  src={voiceCallRejoinAvatarSrc}
+                  alt={`Avatar de ${voiceCallRejoinDisplayName}`}
+                  loading="lazy"
+                  onError={(event) => {
+                    const target = event.currentTarget;
+                    if (target.src !== targetFallbackAvatar) {
+                      target.src = targetFallbackAvatar;
+                    }
+                  }}
+                />
+                <div className="dm-chat__rejoin-stage-controls dm-chat__rejoin-stage-controls--icon" role="group" aria-label="Acoes para voltar para chamada">
+                  <button
+                    type="button"
+                    className="dm-chat__rejoin-stage-btn dm-chat__rejoin-stage-btn--icon dm-chat__rejoin-stage-btn--accept"
+                    onClick={handleRejoinVoiceCall}
+                    aria-label="Entrar na chamada"
+                    title="Entrar na chamada"
+                  >
+                    <img className="dm-chat__rejoin-stage-btn-icon" src={headerVoiceCallIconUrl} alt="" aria-hidden="true" />
+                  </button>
+                  <button
+                    type="button"
+                    className="dm-chat__rejoin-stage-btn dm-chat__rejoin-stage-btn--icon"
+                    aria-label="Camera em breve"
+                    title="Camera em breve"
+                    disabled
+                  >
+                    <img className="dm-chat__rejoin-stage-btn-icon" src={rejoinCameraIconUrl} alt="" aria-hidden="true" />
+                  </button>
                 </div>
               </div>
             </section>
