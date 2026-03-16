@@ -9,7 +9,7 @@ const micIconUrl = new URL("../../assets/icons/ui/Microphone 1.svg", import.meta
 const micOffIconUrl = new URL("../../assets/icons/ui/Microphone Off.svg", import.meta.url).href;
 const cameraIconUrl = new URL("../../assets/icons/ui/Video.svg", import.meta.url).href;
 const screenIconUrl = new URL("../../assets/icons/ui/screen.svg", import.meta.url).href;
-const endCallIconUrl = new URL("../../assets/icons/ui/Call.svg", import.meta.url).href;
+const endCallIconUrl = new URL("../../assets/icons/ui/Call-Missed.svg", import.meta.url).href;
 
 export interface VoiceCallInterfaceProps {
   isOpen: boolean;
