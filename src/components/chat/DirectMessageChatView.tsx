@@ -5232,10 +5232,6 @@ export default function DirectMessageChatView({
   const stopVoiceCallSession = useCallback(async (): Promise<void> => {
     const existingVoiceCallClient = voiceCallClientRef.current;
     voiceCallClientRef.current = null;
-    if (existingVoiceCallClient) {
-      await existingVoiceCallClient.leave().catch(() => undefined);
-    }
-
     setIsVoiceCallActive(false);
     setIsVoiceCallConnecting(false);
     setIsVoiceCallMuted(false);
@@ -5248,6 +5244,9 @@ export default function DirectMessageChatView({
     clearIncomingVoiceInviteState();
     voiceCallParticipantsRef.current = [];
     hadRemoteParticipantInSessionRef.current = false;
+    if (existingVoiceCallClient) {
+      await existingVoiceCallClient.leave().catch(() => undefined);
+    }
   }, [clearIncomingVoiceInviteState]);
 
   const startVoiceCallWithRoomId = useCallback((roomIdOverride?: string | null, options?: { suppressInvite?: boolean }) => {
@@ -5300,6 +5299,7 @@ export default function DirectMessageChatView({
     setVoiceCallParticipants(initialParticipants);
     voiceCallParticipantsRef.current = initialParticipants;
 
+    let currentSessionClient: VoiceCallClient | null = null;
     const voiceCallClient = new VoiceCallClient({
       roomId: activeVoiceRoomId,
       self: localIdentity,
@@ -5308,7 +5308,7 @@ export default function DirectMessageChatView({
       },
       mediaPreferences,
       onParticipantsChanged: (participants) => {
-        if (voiceCallClientRef.current !== voiceCallClient) {
+        if (currentSessionClient && voiceCallClientRef.current !== currentSessionClient) {
           return;
         }
 
@@ -5358,6 +5358,7 @@ export default function DirectMessageChatView({
         setVoiceCallError(String(error.message ?? "").trim() || "Falha na chamada de voz.");
       },
     });
+    currentSessionClient = voiceCallClient;
 
     voiceCallClientRef.current = voiceCallClient;
     void voiceCallClient
