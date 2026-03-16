@@ -550,6 +550,7 @@ export class VoiceCallClient {
   private lastSignalingRttMs: number | null = null;
   private lastSignalingPongAtMs = 0;
   private localMicrophoneWarning: string | null = null;
+  private mutedBeforeDeafen: boolean | null = null;
   private lastSpeakingLevelSignalAtMs = 0;
   private lastLocalLevelUiUpdateAtMs = 0;
   private leaving = false;
@@ -674,6 +675,10 @@ export class VoiceCallClient {
         this.localMicrophoneWarning = null;
         this.onMicrophoneWarningChanged?.(null);
       }
+      this.applyMutedState(this.localMuted, {
+        skipParticipantSync: true,
+        skipSignal: true,
+      });
       setAudioTrackMuted(this.localStream, this.localMuted);
       setAudioTrackMuted(this.capturedMicrophoneStream, this.localMuted);
       this.updateLocalParticipant({
@@ -741,6 +746,7 @@ export class VoiceCallClient {
     this.pendingSpeakingState = null;
     this.lastSignalingRttMs = null;
     this.lastSignalingPongAtMs = 0;
+    this.mutedBeforeDeafen = null;
     this.lastSpeakingLevelSignalAtMs = 0;
     this.lastLocalLevelUiUpdateAtMs = 0;
 
@@ -790,19 +796,35 @@ export class VoiceCallClient {
     this.setConnectionState("closed");
   }
 
-  setMuted(muted: boolean): void {
-    this.localMuted = muted;
-    setAudioTrackMuted(this.localStream, muted);
-    setAudioTrackMuted(this.capturedMicrophoneStream, muted);
-    this.updateLocalParticipant({
-      muted,
-    });
-    if (this.joinedRoom) {
-      this.sendSignal({
-        type: "mute-state",
-        muted,
+  private applyMutedState(
+    muted: boolean,
+    options?: {
+      skipParticipantSync?: boolean;
+      skipSignal?: boolean;
+    },
+  ): void {
+    const nextMuted = this.localDeafened ? true : muted;
+    if (this.localMuted === nextMuted) {
+      return;
+    }
+    this.localMuted = nextMuted;
+    setAudioTrackMuted(this.localStream, nextMuted);
+    setAudioTrackMuted(this.capturedMicrophoneStream, nextMuted);
+    if (!options?.skipParticipantSync) {
+      this.updateLocalParticipant({
+        muted: nextMuted,
       });
     }
+    if (!options?.skipSignal && this.joinedRoom) {
+      this.sendSignal({
+        type: "mute-state",
+        muted: nextMuted,
+      });
+    }
+  }
+
+  setMuted(muted: boolean): void {
+    this.applyMutedState(muted);
   }
 
   toggleMuted(): void {
@@ -813,10 +835,31 @@ export class VoiceCallClient {
     if (this.localDeafened === deafened) {
       return;
     }
+
+    if (deafened) {
+      this.mutedBeforeDeafen = this.localMuted;
+      this.localDeafened = true;
+      setRemoteAudioPlaybackMuted(this.remoteAudioElements, true);
+      this.applyMutedState(true, {
+        skipParticipantSync: true,
+      });
+      this.updateLocalParticipant({
+        muted: this.localMuted,
+        deafened: true,
+      });
+      return;
+    }
+
     this.localDeafened = deafened;
-    setRemoteAudioPlaybackMuted(this.remoteAudioElements, deafened);
+    setRemoteAudioPlaybackMuted(this.remoteAudioElements, false);
+    const restoreMuted = this.mutedBeforeDeafen ?? false;
+    this.mutedBeforeDeafen = null;
+    this.applyMutedState(restoreMuted, {
+      skipParticipantSync: true,
+    });
     this.updateLocalParticipant({
-      deafened,
+      muted: this.localMuted,
+      deafened: false,
     });
   }
 

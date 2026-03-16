@@ -2038,6 +2038,9 @@ export default function DirectMessageChatView({
   const voiceRealtimeEventDedupRef = useRef<Map<string, number>>(new Map());
   const isVoiceCallActiveRef = useRef(false);
   const isVoiceCallConnectingRef = useRef(false);
+  const isVoiceCallMutedRef = useRef(initialVoiceCallUiSnapshotRef.current.muted);
+  const isVoiceCallDeafenedRef = useRef(initialVoiceCallUiSnapshotRef.current.deafened);
+  const mutedBeforeDeafenRef = useRef<boolean | null>(null);
   const voiceCallUiStateRef = useRef<VoiceCallUiState>("IDLE");
   const outgoingVoiceRingTimerRef = useRef<number | null>(null);
   const singleParticipantTimerRef = useRef<number | null>(null);
@@ -4025,6 +4028,14 @@ export default function DirectMessageChatView({
   useEffect(() => {
     isVoiceCallConnectingRef.current = isVoiceCallConnecting;
   }, [isVoiceCallConnecting]);
+
+  useEffect(() => {
+    isVoiceCallMutedRef.current = isVoiceCallMuted;
+  }, [isVoiceCallMuted]);
+
+  useEffect(() => {
+    isVoiceCallDeafenedRef.current = isVoiceCallDeafened;
+  }, [isVoiceCallDeafened]);
 
   useEffect(() => {
     publishVoiceCallUiSnapshot({
@@ -6485,21 +6496,35 @@ export default function DirectMessageChatView({
   const handleToggleVoiceMute = useCallback(() => {
     const existingVoiceCallClient = voiceCallClientRef.current;
     if (!existingVoiceCallClient) {
+      if (isVoiceCallDeafenedRef.current) {
+        setIsVoiceCallMuted(true);
+        return;
+      }
       setIsVoiceCallMuted((current) => !current);
       return;
     }
     existingVoiceCallClient.toggleMuted();
     setIsVoiceCallMuted(existingVoiceCallClient.isMuted());
+    setIsVoiceCallDeafened(existingVoiceCallClient.isDeafened());
   }, []);
 
   const handleToggleVoiceDeafen = useCallback(() => {
     const existingVoiceCallClient = voiceCallClientRef.current;
     if (!existingVoiceCallClient) {
-      setIsVoiceCallDeafened((current) => !current);
+      if (!isVoiceCallDeafenedRef.current) {
+        mutedBeforeDeafenRef.current = isVoiceCallMutedRef.current;
+        setIsVoiceCallDeafened(true);
+        setIsVoiceCallMuted(true);
+        return;
+      }
+      setIsVoiceCallDeafened(false);
+      setIsVoiceCallMuted(mutedBeforeDeafenRef.current ?? false);
+      mutedBeforeDeafenRef.current = null;
       return;
     }
     existingVoiceCallClient.toggleDeafened();
     setIsVoiceCallDeafened(existingVoiceCallClient.isDeafened());
+    setIsVoiceCallMuted(existingVoiceCallClient.isMuted());
   }, []);
 
   useEffect(() => {

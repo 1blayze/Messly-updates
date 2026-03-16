@@ -366,14 +366,21 @@ export default function UserCard({
         isSoundEnabled={!voiceCallUiSnapshot.deafened}
         onToggleMic={() => {
           publishVoiceCallUiSnapshot({
-            muted: !voiceCallUiSnapshot.muted,
+            muted: voiceCallUiSnapshot.deafened ? true : !voiceCallUiSnapshot.muted,
           });
           emitVoiceCallUiCommand("toggle-mute");
         }}
         onToggleSound={() => {
-          publishVoiceCallUiSnapshot({
-            deafened: !voiceCallUiSnapshot.deafened,
-          });
+          if (!voiceCallUiSnapshot.deafened) {
+            publishVoiceCallUiSnapshot({
+              deafened: true,
+              muted: true,
+            });
+          } else {
+            publishVoiceCallUiSnapshot({
+              deafened: false,
+            });
+          }
           emitVoiceCallUiCommand("toggle-deafen");
         }}
         onOpenSettings={handleOpenSettings}

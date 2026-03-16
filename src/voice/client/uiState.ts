@@ -26,9 +26,10 @@ function readStoredControls(): Pick<VoiceCallUiSnapshot, "muted" | "deafened"> {
       };
     }
     const parsed = JSON.parse(raw) as Partial<Pick<VoiceCallUiSnapshot, "muted" | "deafened">>;
+    const deafened = Boolean(parsed.deafened);
     return {
-      muted: Boolean(parsed.muted),
-      deafened: Boolean(parsed.deafened),
+      muted: deafened ? true : Boolean(parsed.muted),
+      deafened,
     };
   } catch {
     return {
@@ -91,10 +92,16 @@ export function getVoiceCallUiSnapshot(): VoiceCallUiSnapshot {
 }
 
 export function publishVoiceCallUiSnapshot(partialSnapshot: Partial<VoiceCallUiSnapshot>): void {
-  const nextSnapshot: VoiceCallUiSnapshot = {
+  const nextSnapshotBase: VoiceCallUiSnapshot = {
     ...currentSnapshot,
     ...partialSnapshot,
   };
+  const nextSnapshot: VoiceCallUiSnapshot = nextSnapshotBase.deafened
+    ? {
+        ...nextSnapshotBase,
+        muted: true,
+      }
+    : nextSnapshotBase;
   if (isSnapshotEqual(currentSnapshot, nextSnapshot)) {
     return;
   }
