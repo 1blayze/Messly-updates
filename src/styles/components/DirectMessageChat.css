@@ -110,7 +110,7 @@
 
 .dm-chat__rejoin-stage-controls--icon {
   gap: 0;
-  padding: 4px 6px;
+  padding: 7px 8px;
   border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   background: #131416;
@@ -165,8 +165,8 @@
 
 .dm-chat__rejoin-stage-btn--icon {
   min-width: 0;
-  width: 42px;
-  height: 36px;
+  width: 44px;
+  height: 42px;
   padding: 0;
   border-radius: 8px;
   display: inline-flex;
@@ -179,10 +179,6 @@
 
 .dm-chat__rejoin-stage-btn--icon.dm-chat__rejoin-stage-btn--accept {
   background: transparent;
-}
-
-.dm-chat__rejoin-stage-btn--icon + .dm-chat__rejoin-stage-btn--icon {
-  border-left: 1px solid rgba(255, 255, 255, 0.14);
 }
 
 .dm-chat__rejoin-stage-btn--icon:hover,
@@ -202,8 +198,8 @@
 }
 
 .dm-chat__rejoin-stage-btn-icon {
-  width: 18px;
-  height: 18px;
+  width: 19px;
+  height: 19px;
   display: block;
   object-fit: contain;
 }

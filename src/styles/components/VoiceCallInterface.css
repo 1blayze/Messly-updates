@@ -50,7 +50,7 @@
   display: inline-flex;
   align-items: center;
   gap: 0;
-  padding: 4px 6px;
+  padding: 7px 8px;
   border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   background: #131416;
@@ -58,8 +58,8 @@
 }
 
 .voice-call-panel__control-btn {
-  width: 42px;
-  height: 36px;
+  width: 44px;
+  height: 42px;
   border-radius: 8px;
   border: 0;
   background: transparent;
@@ -69,10 +69,6 @@
   justify-content: center;
   cursor: pointer;
   transition: background-color 120ms ease, opacity 120ms ease;
-}
-
-.voice-call-panel__control-btn + .voice-call-panel__control-btn {
-  border-left: 1px solid rgba(255, 255, 255, 0.14);
 }
 
 .voice-call-panel__control-btn:hover,
@@ -90,7 +86,12 @@
 }
 
 .voice-call-panel__control-btn--danger {
-  background: transparent;
+  background: #e5485a;
+}
+
+.voice-call-panel__control-btn--danger:hover,
+.voice-call-panel__control-btn--danger:focus-visible {
+  background: #d63c4f;
 }
 
 .voice-call-panel__control-btn:disabled {
@@ -104,8 +105,8 @@
 }
 
 .voice-call-panel__control-icon {
-  width: 18px;
-  height: 18px;
+  width: 19px;
+  height: 19px;
   display: block;
   object-fit: contain;
 }
