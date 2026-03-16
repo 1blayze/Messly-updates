@@ -29,6 +29,7 @@ const colorizeIconUrl = new URL("../../assets/icons/ui/colorize.svg", import.met
 const copyIconUrl = new URL("../../assets/icons/ui/copy-alt.svg", import.meta.url).href;
 const deleteIconUrl = new URL("../../assets/icons/ui/delete.svg", import.meta.url).href;
 const deviceIconUrl = new URL("../../assets/icons/ui/device.svg", import.meta.url).href;
+const deafenIconUrl = new URL("../../assets/icons/ui/deafen.svg", import.meta.url).href;
 const displayIconUrl = new URL("../../assets/icons/ui/Display 1.svg", import.meta.url).href;
 const downloadIconUrl = new URL("../../assets/icons/ui/Download.svg", import.meta.url).href;
 const editIconUrl = new URL("../../assets/icons/ui/edit-2.svg", import.meta.url).href;
@@ -97,7 +98,7 @@ const ICON_URLS: Record<string, string> = {
   groups: groupIconUrl,
   headphones: headphoneIconUrl,
   headset: headphoneIconUrl,
-  headset_off: headphoneIconUrl,
+  headset_off: deafenIconUrl,
   image: imageIconUrl,
   keyboard_return: returnIconUrl,
   link: linkIconUrl,

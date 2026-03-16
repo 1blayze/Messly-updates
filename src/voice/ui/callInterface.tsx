@@ -7,7 +7,7 @@ import "../../styles/components/VoiceCallInterface.css";
 
 const micIconUrl = new URL("../../assets/icons/ui/Microphone 1.svg", import.meta.url).href;
 const micOffIconUrl = new URL("../../assets/icons/ui/Microphone Off.svg", import.meta.url).href;
-const headphoneIconUrl = new URL("../../assets/icons/ui/headphone.svg", import.meta.url).href;
+const deafenIconUrl = new URL("../../assets/icons/ui/deafen.svg", import.meta.url).href;
 const cameraIconUrl = new URL("../../assets/icons/ui/Video.svg", import.meta.url).href;
 const screenIconUrl = new URL("../../assets/icons/ui/screen.svg", import.meta.url).href;
 const endCallIconUrl = new URL("../../assets/icons/ui/Call-Missed.svg", import.meta.url).href;
@@ -62,7 +62,7 @@ export default function VoiceCallInterface({
           const showDeafened = participant.isLocal ? localDeafened : participant.deafened;
           const showMuted = participant.muted && !showDeafened;
           const statusIconUrl = showDeafened
-            ? headphoneIconUrl
+            ? deafenIconUrl
             : (showMuted ? micOffIconUrl : "");
           const statusLabel = showDeafened
             ? "Usuario ensurdecido"
