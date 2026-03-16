@@ -3,4 +3,8 @@
 /media/* https://gateway.messly.site/media/:splat 200
 /gateway https://gateway.messly.site/gateway 307
 /gateway/* https://gateway.messly.site/gateway/:splat 307
+/landing /landing/ 301
+/landing/* /landing/:splat 200
+/terms /landing/terms.html 200
+/privacy /landing/privacy.html 200
 /* /index.html 200
