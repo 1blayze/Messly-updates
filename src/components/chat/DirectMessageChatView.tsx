@@ -406,7 +406,10 @@ function buildAudioSettingsStorageKey(userIdRaw: string | null | undefined): str
   return `${AUDIO_SETTINGS_STORAGE_KEY_PREFIX}${normalizedUserId}`;
 }
 
-function readVoiceCallMediaPreferences(userIdRaw: string | null | undefined): VoiceCallMediaPreferences {
+function readVoiceCallMediaPreferences(
+  userIdRaw: string | null | undefined,
+  fallbackUserIdRaw?: string | null | undefined,
+): VoiceCallMediaPreferences {
   const fallback: VoiceCallMediaPreferences = {
     inputDeviceId: "",
     outputDeviceId: "",
@@ -422,13 +425,30 @@ function readVoiceCallMediaPreferences(userIdRaw: string | null | undefined): Vo
     return fallback;
   }
 
+  const candidateStorageKeys = Array.from(
+    new Set(
+      [
+        buildAudioSettingsStorageKey(userIdRaw),
+        buildAudioSettingsStorageKey(fallbackUserIdRaw),
+      ].filter((value) => value !== `${AUDIO_SETTINGS_STORAGE_KEY_PREFIX}guest`),
+    ),
+  );
+  if (candidateStorageKeys.length === 0) {
+    candidateStorageKeys.push(buildAudioSettingsStorageKey("guest"));
+  }
+
   try {
-    const storageKey = buildAudioSettingsStorageKey(userIdRaw);
-    const raw = window.localStorage.getItem(storageKey);
+    let raw: string | null = null;
+    for (const storageKey of candidateStorageKeys) {
+      raw = window.localStorage.getItem(storageKey);
+      if (raw) {
+        break;
+      }
+    }
+
     if (!raw) {
       return fallback;
     }
-
     const parsed = JSON.parse(raw) as Partial<PersistedAudioSettingsSnapshot> | null;
     if (!parsed || Number(parsed.v ?? 0) !== 1) {
       return fallback;
@@ -5753,7 +5773,7 @@ export default function DirectMessageChatView({
       avatarSrc: targetAvatarSrc,
     };
     const activeVoiceRoomId = String(roomIdOverride ?? voiceRoomId).trim() || voiceRoomId;
-    const mediaPreferences = readVoiceCallMediaPreferences(localIdentity.userId);
+    const mediaPreferences = readVoiceCallMediaPreferences(localIdentity.userId, currentUser.firebaseUid);
     activeVoiceRoomIdRef.current = activeVoiceRoomId;
     hadRemoteParticipantInSessionRef.current = false;
     connectedRemoteParticipantsCountRef.current = 0;
@@ -5952,6 +5972,7 @@ export default function DirectMessageChatView({
     currentFallbackAvatar,
     currentUser.avatarSrc,
     currentUser.displayName,
+    currentUser.firebaseUid,
     currentUser.userId,
     clearVoiceCallRejoinFallback,
     setVoiceCallRejoinFallbackWithTtl,

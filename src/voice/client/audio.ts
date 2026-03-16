@@ -55,7 +55,11 @@ const HIGH_PASS_CUTOFF_HZ = 80;
 const VOICE_LOW_CUT_HZ = 200;
 const VOICE_PRESENCE_HZ = 3_000;
 const NOISE_GATE_OPEN_GAIN = 1;
-const NOISE_GATE_CLOSED_GAIN = 0.42;
+const NOISE_GATE_CLOSED_GAIN = 0.08;
+const NOISE_GATE_TRANSIENT_SUPPRESS_GAIN = 0.02;
+const NOISE_GATE_OPEN_CONFIDENCE = 0.4;
+const NOISE_GATE_CONFIDENCE_ATTACK = 0.16;
+const NOISE_GATE_CONFIDENCE_RELEASE = 0.08;
 const QUALITY_EMIT_INTERVAL_MS = 120;
 const RNNOISE_MAX_CHANNELS = 1;
 
@@ -150,6 +154,26 @@ async function tryEnableNativeNoiseSuppression(stream: MediaStream): Promise<voi
   );
 }
 
+async function tryApplyNativeProcessingConstraints(
+  stream: MediaStream,
+  constraints: Pick<MediaTrackConstraints, "echoCancellation" | "noiseSuppression" | "autoGainControl" | "sampleRate" | "channelCount">,
+): Promise<void> {
+  const audioTracks = stream.getAudioTracks();
+  if (audioTracks.length === 0) {
+    return;
+  }
+
+  await Promise.all(
+    audioTracks.map(async (track) => {
+      try {
+        await track.applyConstraints(constraints);
+      } catch {
+        // Ignore unsupported runtime constraints.
+      }
+    }),
+  );
+}
+
 export async function captureMicrophoneStream(
   options: MicrophoneCaptureOptions = DEFAULT_MIC_OPTIONS,
 ): Promise<MediaStream> {
@@ -215,10 +239,18 @@ export async function captureMicrophoneStream(
   let lastError: unknown = null;
   for (const audioConstraints of constraintsQueue) {
     try {
-      return await navigator.mediaDevices.getUserMedia({
+      const stream = await navigator.mediaDevices.getUserMedia({
         video: false,
         audio: audioConstraints,
       });
+      await tryApplyNativeProcessingConstraints(stream, {
+        echoCancellation: normalizedEchoCancellation,
+        noiseSuppression: noiseSuppressionMode === "webrtc",
+        autoGainControl: normalizedAutoGain,
+        sampleRate: normalizedSampleRate,
+        channelCount: normalizedChannelCount,
+      });
+      return stream;
     } catch (error) {
       lastError = error;
     }
@@ -359,6 +391,7 @@ export async function createVoiceAudioPipeline(
   let clippingScore = 0;
   let noiseScore = 0;
   let distortionScore = 0;
+  let speechConfidence = 0;
   let lastQualityEmitAt = 0;
 
   const tick = (): void => {
@@ -386,16 +419,24 @@ export async function createVoiceAudioPipeline(
     const currentLevel = toNormalizedLevel(currentDb);
     const zeroCrossRate = zeroCrossings / Math.max(1, sampleBuffer.length);
     const speakingLikely = currentDb >= Math.max(-42, noiseFloorDb + 10);
+    const likelyTransientImpulse = peak >= 0.84 && currentDb >= Math.max(noiseFloorDb + 12, -30) && !speakingLikely;
+    const speechFrameLikely = speakingLikely && zeroCrossRate <= 0.24 && !likelyTransientImpulse;
 
     if (!speakingLikely) {
       noiseFloorDb = clamp((noiseFloorDb * 0.98) + (currentDb * 0.02), -85, -40);
     }
 
     if (adaptiveNoiseGate) {
-      const noiseGateThresholdDb = noiseFloorDb + 8;
-      const gateOpen = currentDb >= noiseGateThresholdDb;
-      const gateTargetGain = gateOpen ? NOISE_GATE_OPEN_GAIN : NOISE_GATE_CLOSED_GAIN;
-      adaptiveNoiseGate.gain.setTargetAtTime(gateTargetGain, context.currentTime, gateOpen ? 0.015 : 0.06);
+      speechConfidence = clamp(
+        speechConfidence + (speechFrameLikely ? NOISE_GATE_CONFIDENCE_ATTACK : -NOISE_GATE_CONFIDENCE_RELEASE),
+        0,
+        1,
+      );
+      const gateOpen = speechConfidence >= NOISE_GATE_OPEN_CONFIDENCE;
+      const gateTargetGain = gateOpen
+        ? NOISE_GATE_OPEN_GAIN
+        : (likelyTransientImpulse ? NOISE_GATE_TRANSIENT_SUPPRESS_GAIN : NOISE_GATE_CLOSED_GAIN);
+      adaptiveNoiseGate.gain.setTargetAtTime(gateTargetGain, context.currentTime, gateOpen ? 0.012 : 0.045);
     }
 
     const clipping = peak >= 0.985;
