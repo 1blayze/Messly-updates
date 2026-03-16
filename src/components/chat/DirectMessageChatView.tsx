@@ -6119,10 +6119,10 @@ export default function DirectMessageChatView({
             </section>
           ) : null}
           {hasVoiceCallRejoinFallback ? (
-            <section className="dm-chat__rejoin-stage dm-chat__rejoin-stage--compact" aria-label="Retorno para chamada de voz">
-              <div className="dm-chat__rejoin-stage-surface dm-chat__rejoin-stage-surface--compact">
+            <section className="dm-chat__rejoin-stage dm-chat__rejoin-stage--compact dm-chat__rejoin-stage--return" aria-label="Retorno para chamada de voz">
+              <div className="dm-chat__rejoin-stage-surface dm-chat__rejoin-stage-surface--compact dm-chat__rejoin-stage-surface--return">
                 <img
-                  className="dm-chat__rejoin-stage-avatar"
+                  className="dm-chat__rejoin-stage-avatar dm-chat__rejoin-stage-avatar--return"
                   src={voiceCallRejoinAvatarSrc}
                   alt={`Avatar de ${voiceCallRejoinDisplayName}`}
                   loading="lazy"
@@ -6133,26 +6133,26 @@ export default function DirectMessageChatView({
                     }
                   }}
                 />
-                <div className="dm-chat__rejoin-stage-controls dm-chat__rejoin-stage-controls--icon" role="group" aria-label="Acoes para voltar para chamada">
-                  <button
-                    type="button"
-                    className="dm-chat__rejoin-stage-btn dm-chat__rejoin-stage-btn--icon dm-chat__rejoin-stage-btn--accept"
-                    onClick={handleRejoinVoiceCall}
-                    aria-label="Entrar na chamada"
-                    title="Entrar na chamada"
-                  >
-                    <img className="dm-chat__rejoin-stage-btn-icon" src={headerVoiceCallIconUrl} alt="" aria-hidden="true" />
-                  </button>
-                  <button
-                    type="button"
-                    className="dm-chat__rejoin-stage-btn dm-chat__rejoin-stage-btn--icon"
-                    aria-label="Camera em breve"
-                    title="Camera em breve"
-                    disabled
-                  >
-                    <img className="dm-chat__rejoin-stage-btn-icon" src={rejoinCameraIconUrl} alt="" aria-hidden="true" />
-                  </button>
-                </div>
+              </div>
+              <div className="dm-chat__rejoin-stage-controls dm-chat__rejoin-stage-controls--rejoin" role="group" aria-label="Acoes para voltar para chamada">
+                <button
+                  type="button"
+                  className="dm-chat__rejoin-stage-btn dm-chat__rejoin-stage-btn--rejoin dm-chat__rejoin-stage-btn--rejoin-accept"
+                  onClick={handleRejoinVoiceCall}
+                  aria-label="Entrar na chamada"
+                  title="Entrar na chamada"
+                >
+                  <img className="dm-chat__rejoin-stage-btn-icon dm-chat__rejoin-stage-btn-icon--rejoin" src={headerVoiceCallIconUrl} alt="" aria-hidden="true" />
+                </button>
+                <button
+                  type="button"
+                  className="dm-chat__rejoin-stage-btn dm-chat__rejoin-stage-btn--rejoin dm-chat__rejoin-stage-btn--rejoin-video"
+                  aria-label="Camera em breve"
+                  title="Camera em breve"
+                  disabled
+                >
+                  <img className="dm-chat__rejoin-stage-btn-icon dm-chat__rejoin-stage-btn-icon--rejoin" src={rejoinCameraIconUrl} alt="" aria-hidden="true" />
+                </button>
               </div>
             </section>
           ) : null}

@@ -105,20 +105,21 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 10px;
 }
 
 .dm-chat__rejoin-stage-avatar--incoming {
-  width: 84px;
-  height: 84px;
+  width: 70px;
+  height: 70px;
 }
 
 .dm-chat__rejoin-stage-avatar--incoming-local {
-  margin-right: -16px;
-  z-index: 1;
+  margin-right: 0;
+  z-index: auto;
 }
 
 .dm-chat__rejoin-stage-avatar--incoming-remote {
-  z-index: 2;
+  z-index: auto;
 }
 
 .dm-chat__rejoin-stage-controls {
@@ -138,6 +139,30 @@
 }
 
 .dm-chat__rejoin-stage-controls--incoming {
+  gap: 12px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.dm-chat__rejoin-stage--return {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+
+.dm-chat__rejoin-stage-surface--return {
+  gap: 0;
+}
+
+.dm-chat__rejoin-stage-avatar--return {
+  width: 70px;
+  height: 70px;
+}
+
+.dm-chat__rejoin-stage-controls--rejoin {
   gap: 12px;
   padding: 0;
   border: 0;
@@ -282,6 +307,54 @@
 }
 
 .dm-chat__rejoin-stage-btn-icon--incoming {
+  width: 22px;
+  height: 22px;
+}
+
+.dm-chat__rejoin-stage-btn--rejoin {
+  width: 68px;
+  height: 48px;
+  min-width: 0;
+  padding: 0;
+  border-radius: 12px;
+  border: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 120ms ease, filter 120ms ease, background-color 120ms ease;
+}
+
+.dm-chat__rejoin-stage-btn--rejoin:hover,
+.dm-chat__rejoin-stage-btn--rejoin:focus-visible {
+  transform: translateY(-1px);
+  filter: brightness(1.06);
+}
+
+.dm-chat__rejoin-stage-btn--rejoin:active {
+  transform: translateY(0);
+  filter: brightness(1);
+}
+
+.dm-chat__rejoin-stage-btn--rejoin:disabled {
+  opacity: 1;
+  cursor: not-allowed;
+}
+
+.dm-chat__rejoin-stage-btn--rejoin:disabled:hover,
+.dm-chat__rejoin-stage-btn--rejoin:disabled:focus-visible {
+  transform: none;
+  filter: none;
+}
+
+.dm-chat__rejoin-stage-btn--rejoin-accept {
+  background: #40b46a;
+}
+
+.dm-chat__rejoin-stage-btn--rejoin-video {
+  background: #1f6a3b;
+}
+
+.dm-chat__rejoin-stage-btn-icon--rejoin {
   width: 22px;
   height: 22px;
 }
