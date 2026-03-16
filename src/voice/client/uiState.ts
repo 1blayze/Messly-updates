@@ -7,11 +7,62 @@ export interface VoiceCallUiSnapshot {
 
 export type VoiceCallUiCommand = "toggle-mute" | "toggle-deafen";
 
+const VOICE_CALL_UI_STORAGE_KEY = "messly:voice-ui-controls:v1";
+
+function readStoredControls(): Pick<VoiceCallUiSnapshot, "muted" | "deafened"> {
+  if (typeof window === "undefined") {
+    return {
+      muted: false,
+      deafened: false,
+    };
+  }
+
+  try {
+    const raw = window.localStorage.getItem(VOICE_CALL_UI_STORAGE_KEY);
+    if (!raw) {
+      return {
+        muted: false,
+        deafened: false,
+      };
+    }
+    const parsed = JSON.parse(raw) as Partial<Pick<VoiceCallUiSnapshot, "muted" | "deafened">>;
+    return {
+      muted: Boolean(parsed.muted),
+      deafened: Boolean(parsed.deafened),
+    };
+  } catch {
+    return {
+      muted: false,
+      deafened: false,
+    };
+  }
+}
+
+function persistControls(snapshot: VoiceCallUiSnapshot): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(
+      VOICE_CALL_UI_STORAGE_KEY,
+      JSON.stringify({
+        muted: snapshot.muted,
+        deafened: snapshot.deafened,
+      }),
+    );
+  } catch {
+    // Ignore storage write failures.
+  }
+}
+
+const storedControls = readStoredControls();
+
 const DEFAULT_SNAPSHOT: VoiceCallUiSnapshot = {
   callActive: false,
   callConnecting: false,
-  muted: false,
-  deafened: false,
+  muted: storedControls.muted,
+  deafened: storedControls.deafened,
 };
 
 let currentSnapshot: VoiceCallUiSnapshot = { ...DEFAULT_SNAPSHOT };
@@ -48,14 +99,21 @@ export function publishVoiceCallUiSnapshot(partialSnapshot: Partial<VoiceCallUiS
     return;
   }
   currentSnapshot = nextSnapshot;
+  persistControls(currentSnapshot);
   emitSnapshot();
 }
 
 export function resetVoiceCallUiSnapshot(): void {
-  if (isSnapshotEqual(currentSnapshot, DEFAULT_SNAPSHOT)) {
+  const nextSnapshot: VoiceCallUiSnapshot = {
+    ...currentSnapshot,
+    callActive: false,
+    callConnecting: false,
+  };
+  if (isSnapshotEqual(currentSnapshot, nextSnapshot)) {
     return;
   }
-  currentSnapshot = { ...DEFAULT_SNAPSHOT };
+  currentSnapshot = nextSnapshot;
+  persistControls(currentSnapshot);
   emitSnapshot();
 }
 

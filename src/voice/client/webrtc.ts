@@ -643,11 +643,11 @@ export class VoiceCallClient {
         this.localMicrophoneWarning = null;
         this.onMicrophoneWarningChanged?.(null);
       }
-      this.localMuted = false;
-      this.localDeafened = false;
+      setAudioTrackMuted(this.localStream, this.localMuted);
+      setAudioTrackMuted(this.capturedMicrophoneStream, this.localMuted);
       this.updateLocalParticipant({
-        muted: false,
-        deafened: false,
+        muted: this.localMuted,
+        deafened: this.localDeafened,
         speaking: false,
         speakingLevel: 0,
         connectionState: "connecting",
@@ -697,7 +697,6 @@ export class VoiceCallClient {
   async leave(): Promise<void> {
     this.leaving = true;
     this.joinedRoom = false;
-    this.localDeafened = false;
     this.clearReconnectTimer();
     this.clearIntervals();
     this.clearJoinRetryLoop();
@@ -740,8 +739,8 @@ export class VoiceCallClient {
     this.participants.set(this.self.userId, {
       ...this.self,
       isLocal: true,
-      muted: false,
-      deafened: false,
+      muted: this.localMuted,
+      deafened: this.localDeafened,
       speaking: false,
       speakingLevel: 0,
       connectionState: "idle",

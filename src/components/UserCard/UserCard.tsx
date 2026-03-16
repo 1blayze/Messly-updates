@@ -15,6 +15,7 @@ import { supabase } from "../../services/supabase";
 import {
   emitVoiceCallUiCommand,
   getVoiceCallUiSnapshot,
+  publishVoiceCallUiSnapshot,
   subscribeVoiceCallUiSnapshot,
 } from "../../voice/client/uiState";
 import UserCardMini from "../UserCardMini/UserCardMini";
@@ -368,9 +369,15 @@ export default function UserCard({
         isMicEnabled={!voiceCallUiSnapshot.muted}
         isSoundEnabled={!voiceCallUiSnapshot.deafened}
         onToggleMic={() => {
+          publishVoiceCallUiSnapshot({
+            muted: !voiceCallUiSnapshot.muted,
+          });
           emitVoiceCallUiCommand("toggle-mute");
         }}
         onToggleSound={() => {
+          publishVoiceCallUiSnapshot({
+            deafened: !voiceCallUiSnapshot.deafened,
+          });
           emitVoiceCallUiCommand("toggle-deafen");
         }}
         onOpenSettings={handleOpenSettings}
