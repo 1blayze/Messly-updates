@@ -1206,13 +1206,12 @@ export class VoiceCallClient {
       if (capabilities.length > 0) {
         const opusCodecs = capabilities.filter((codec) => codec.mimeType.toLowerCase() === "audio/opus");
         if (opusCodecs.length > 0) {
-          const preferredOpus = opusCodecs.map((codec) => ({
-            ...codec,
-            channels: 1,
-            sdpFmtpLine: `maxaveragebitrate=${targetBitrate};stereo=0;sprop-stereo=0;useinbandfec=1;usedtx=1;minptime=10`,
-          }));
           const fallbackCodecs = capabilities.filter((codec) => codec.mimeType.toLowerCase() !== "audio/opus");
-          transceiver.setCodecPreferences([...preferredOpus, ...fallbackCodecs]);
+          try {
+            transceiver.setCodecPreferences([...opusCodecs, ...fallbackCodecs]);
+          } catch {
+            // Keep browser defaults if codec preference negotiation is unsupported.
+          }
         }
       }
     }
