@@ -1,6 +1,7 @@
-ï»¿import type { ReactNode } from "react";
+import type { ReactNode } from "react";
 import MaterialSymbolIcon from "../ui/MaterialSymbolIcon";
 import AvatarImage from "../ui/AvatarImage";
+import VoiceMicToggleButton from "../voice/VoiceMicToggleButton";
 import type { PresenceState } from "../../services/presence/presenceTypes";
 import musicalIcon from "../../assets/icons/ui/musical.svg";
 import styles from "./UserCardMini.module.css";
@@ -51,7 +52,7 @@ export default function UserCardMini({
   const shouldShowSpotifyStatus = safeSpotifyStatusText.length > 0;
   const shouldShowUsername = safeUsername.length > 0;
   return (
-    <div className={styles.card} role="group" aria-label="Card de usuÃ¡rio">
+    <div className={styles.card} role="group" aria-label="Card de usuário">
       {callContent ? <div className={styles.callSection}>{callContent}</div> : null}
 
       <button
@@ -88,20 +89,16 @@ export default function UserCardMini({
       </button>
 
       <div className={styles.actions}>
-        <button
+        <VoiceMicToggleButton
+          isMicEnabled={isMicEnabled}
           className={`${styles.actionButton} ${styles.actionButtonVoice}${!isMicEnabled ? ` ${styles.actionButtonActive}` : ""}`}
-          type="button"
-          aria-label={isMicEnabled ? "Silenciar microfone" : "Ativar microfone"}
-          title={isMicEnabled ? "Silenciar" : "Ativar"}
           onClick={onToggleMic}
-        >
-          <MaterialSymbolIcon name={isMicEnabled ? "mic" : "mic_off"} size={18} />
-        </button>
+        />
         <button
           className={`${styles.actionButton} ${styles.actionButtonVoice}${!isSoundEnabled ? ` ${styles.actionButtonActive}` : ""}`}
           type="button"
-          aria-label={isSoundEnabled ? "Ensurdecer" : "Ativar Ã¡udio"}
-          title={isSoundEnabled ? "Ensurdecer" : "Ativar Ã¡udio"}
+          aria-label={isSoundEnabled ? "Ensurdecer" : "Ativar áudio"}
+          data-tooltip={isSoundEnabled ? "Ensurdecer" : "Ativar áudio"}
           onClick={onToggleSound}
         >
           <MaterialSymbolIcon name={isSoundEnabled ? "headset" : "headset_off"} size={18} />
@@ -109,8 +106,8 @@ export default function UserCardMini({
         <button
           className={styles.actionButton}
           type="button"
-          aria-label="Abrir configuraÃ§Ãµes"
-          title="ConfiguraÃ§Ãµes"
+          aria-label="Abrir configurações"
+          data-tooltip="Configurações"
           onClick={() => onOpenSettings?.("account")}
         >
           <MaterialSymbolIcon name="settings" size={18} />

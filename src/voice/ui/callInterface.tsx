@@ -3,9 +3,9 @@ import type {
   VoiceDiagnosticsPeerSnapshot,
   VoiceParticipantState,
 } from "../client/webrtc";
+import VoiceMicToggleButton from "../../components/voice/VoiceMicToggleButton";
 import "../../styles/components/VoiceCallInterface.css";
 
-const micIconUrl = new URL("../../assets/icons/ui/Microphone 1.svg", import.meta.url).href;
 const micOffIconUrl = new URL("../../assets/icons/ui/Microphone Off.svg", import.meta.url).href;
 const deafenIconUrl = new URL("../../assets/icons/ui/deafen.svg", import.meta.url).href;
 const cameraIconUrl = new URL("../../assets/icons/ui/Video.svg", import.meta.url).href;
@@ -59,8 +59,10 @@ export default function VoiceCallInterface({
     <aside className="voice-call-panel" aria-label="Chamada de voz">
       <section className="voice-call-panel__avatars" aria-label="Participantes da chamada">
         {avatarParticipants.map((participant) => {
-          const showDeafened = participant.isLocal ? localDeafened : participant.deafened;
-          const showMuted = participant.muted && !showDeafened;
+          const participantMuted = participant.isLocal ? localMuted : participant.muted;
+          const participantDeafened = participant.isLocal ? localDeafened : participant.deafened;
+          const showDeafened = participantDeafened;
+          const showMuted = participantMuted && !participantDeafened;
           const statusIconUrl = showDeafened
             ? deafenIconUrl
             : (showMuted ? micOffIconUrl : "");
@@ -91,25 +93,16 @@ export default function VoiceCallInterface({
       </section>
 
       <section className="voice-call-panel__controls" aria-label="Controles da chamada">
-        <button
-          type="button"
+        <VoiceMicToggleButton
+          isMicEnabled={!localMuted}
           className={`voice-call-panel__control-btn${localMuted ? " voice-call-panel__control-btn--active" : ""}`}
           onClick={onToggleMute}
-          aria-label={localMuted ? "Desmutar microfone" : "Mutar microfone"}
-          title={localMuted ? "Desmutar microfone" : "Mutar microfone"}
-        >
-          <img
-            className="voice-call-panel__control-icon"
-            src={localMuted ? micOffIconUrl : micIconUrl}
-            alt=""
-            aria-hidden="true"
-          />
-        </button>
+        />
         <button
           type="button"
           className="voice-call-panel__control-btn"
           aria-label="Video em breve"
-          title="Video em breve"
+          data-tooltip="Video em breve"
           disabled
         >
           <img
@@ -123,7 +116,7 @@ export default function VoiceCallInterface({
           type="button"
           className="voice-call-panel__control-btn"
           aria-label="Transmitir tela em breve"
-          title="Transmitir tela em breve"
+          data-tooltip="Transmitir tela em breve"
           disabled
         >
           <img
@@ -138,7 +131,7 @@ export default function VoiceCallInterface({
           className="voice-call-panel__control-btn voice-call-panel__control-btn--danger"
           onClick={onLeave}
           aria-label="Sair da chamada"
-          title="Sair da chamada"
+          data-tooltip="Sair da chamada"
         >
           <img
             className="voice-call-panel__control-icon"

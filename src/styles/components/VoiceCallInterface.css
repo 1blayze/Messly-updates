@@ -24,7 +24,7 @@
   width: 70px;
   height: 70px;
   border-radius: 999px;
-  overflow: hidden;
+  overflow: visible;
   border: 0;
   box-shadow: 0 6px 16px rgba(0, 0, 0, 0.45);
   background: #111111;
@@ -44,6 +44,31 @@
   height: 100%;
   display: block;
   object-fit: cover;
+  border-radius: inherit;
+}
+
+.voice-call-panel__avatar-status {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  border: 2px solid #000000;
+  background: #e5485a;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 3;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.42);
+}
+
+.voice-call-panel__avatar-status-icon {
+  width: 13px;
+  height: 13px;
+  display: block;
+  object-fit: contain;
 }
 
 .voice-call-panel__controls {
@@ -118,4 +143,9 @@
   height: 20px;
   display: block;
   object-fit: contain;
+}
+
+.voice-call-panel__control-btn .ms-icon {
+  font-size: 20px;
+  line-height: 1;
 }

@@ -6799,7 +6799,7 @@ export default function DirectMessageChatView({
                     type="button"
                     className="dm-chat__rejoin-stage-btn dm-chat__rejoin-stage-btn--incoming dm-chat__rejoin-stage-btn--incoming-video"
                     aria-label="Entrar com video em breve"
-                    title="Entrar com video em breve"
+                    data-tooltip="Entrar com video em breve"
                     disabled
                   >
                     <img className="dm-chat__rejoin-stage-btn-icon dm-chat__rejoin-stage-btn-icon--incoming" src={rejoinCameraIconUrl} alt="" aria-hidden="true" />
@@ -6809,7 +6809,7 @@ export default function DirectMessageChatView({
                     className="dm-chat__rejoin-stage-btn dm-chat__rejoin-stage-btn--incoming dm-chat__rejoin-stage-btn--incoming-accept"
                     onClick={handleAcceptIncomingVoiceInvite}
                     aria-label="Atender chamada"
-                    title="Atender chamada"
+                    data-tooltip="Atender chamada"
                   >
                     <img className="dm-chat__rejoin-stage-btn-icon dm-chat__rejoin-stage-btn-icon--incoming" src={headerVoiceCallIconUrl} alt="" aria-hidden="true" />
                   </button>
@@ -6818,7 +6818,7 @@ export default function DirectMessageChatView({
                     className="dm-chat__rejoin-stage-btn dm-chat__rejoin-stage-btn--incoming dm-chat__rejoin-stage-btn--incoming-decline"
                     onClick={handleDismissIncomingVoiceInvite}
                     aria-label="Ignorar chamada"
-                    title="Ignorar chamada"
+                    data-tooltip="Ignorar chamada"
                   >
                     <MaterialSymbolIcon className="dm-chat__rejoin-stage-btn-glyph dm-chat__rejoin-stage-btn-glyph--incoming" name="close" size={22} />
                   </button>
@@ -6848,7 +6848,7 @@ export default function DirectMessageChatView({
                   className="dm-chat__rejoin-stage-btn dm-chat__rejoin-stage-btn--rejoin dm-chat__rejoin-stage-btn--rejoin-accept"
                   onClick={handleRejoinVoiceCall}
                   aria-label="Entrar na chamada"
-                  title="Entrar na chamada"
+                  data-tooltip="Entrar na chamada"
                 >
                   <img className="dm-chat__rejoin-stage-btn-icon dm-chat__rejoin-stage-btn-icon--rejoin" src={headerVoiceCallIconUrl} alt="" aria-hidden="true" />
                 </button>
@@ -6856,7 +6856,7 @@ export default function DirectMessageChatView({
                   type="button"
                   className="dm-chat__rejoin-stage-btn dm-chat__rejoin-stage-btn--rejoin dm-chat__rejoin-stage-btn--rejoin-video"
                   aria-label="Camera em breve"
-                  title="Camera em breve"
+                  data-tooltip="Camera em breve"
                   disabled
                 >
                   <img className="dm-chat__rejoin-stage-btn-icon dm-chat__rejoin-stage-btn-icon--rejoin" src={rejoinCameraIconUrl} alt="" aria-hidden="true" />
