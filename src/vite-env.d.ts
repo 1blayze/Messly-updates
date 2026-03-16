@@ -208,6 +208,15 @@ interface MessageNotificationPayload {
   muted?: boolean;
 }
 
+interface VoiceCallNotificationPayload {
+  conversationId: string;
+  roomId: string;
+  callerUserId: string;
+  callerName?: string;
+  callerAvatarUrl?: string;
+  sentAt?: number;
+}
+
 interface MessageNotificationOpenPayload {
   conversationId: string;
   messageId?: string;
@@ -462,6 +471,7 @@ interface ElectronApi {
 
 interface NotificationsApi {
   notifyMessage?: (payload: MessageNotificationPayload) => Promise<{ ok: boolean; reason?: string }>;
+  notifyCall?: (payload: VoiceCallNotificationPayload) => Promise<{ ok: boolean; reason?: string }>;
   onOpenConversation?: (listener: (payload: MessageNotificationOpenPayload) => void) => () => void;
   notifyRendererReady?: () => void;
   consumePendingOpenConversations?: () => MessageNotificationOpenPayload[];

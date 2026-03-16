@@ -3374,6 +3374,35 @@ export default function DirectMessageChatView({
     setIncomingVoiceInviteExpiresAtMs(null);
   }, [clearIncomingVoiceInviteTimer]);
 
+  const notifyIncomingVoiceCallDesktop = useCallback(
+    (senderUserIdRaw: string, roomIdRaw: string, sentAtRaw: number): void => {
+      const notifyCall = window.notifications?.notifyCall;
+      if (typeof notifyCall !== "function") {
+        return;
+      }
+      if (!document.hidden && document.hasFocus()) {
+        return;
+      }
+
+      const callerUserId = String(senderUserIdRaw ?? "").trim();
+      const roomId = String(roomIdRaw ?? "").trim() || voiceRoomId;
+      const sentAt = Number(sentAtRaw);
+      if (!callerUserId || !roomId || !conversationId) {
+        return;
+      }
+
+      void notifyCall({
+        conversationId,
+        roomId,
+        callerUserId,
+        callerName: safeTargetDisplayName,
+        callerAvatarUrl: targetAvatarSrc,
+        sentAt: Number.isFinite(sentAt) ? sentAt : Date.now(),
+      }).catch(() => undefined);
+    },
+    [conversationId, safeTargetDisplayName, targetAvatarSrc, voiceRoomId],
+  );
+
   const applyIncomingVoiceInviteState = useCallback(
     (senderUserIdRaw: string, roomIdRaw: string, sentAtRaw: number): void => {
       const senderUserId = String(senderUserIdRaw ?? "").trim();
@@ -3397,11 +3426,18 @@ export default function DirectMessageChatView({
       if (!isVoiceCallActiveRef.current && !isVoiceCallConnectingRef.current) {
         setVoiceCallUiState("RINGING");
       }
+      notifyIncomingVoiceCallDesktop(senderUserId, roomId, sentAtRaw);
       incomingVoiceInviteTimerRef.current = window.setTimeout(() => {
         clearIncomingVoiceInviteState();
       }, remainingMs);
     },
-    [clearIncomingVoiceInviteState, clearIncomingVoiceInviteTimer, isIncomingVoiceInviteSuppressed, voiceRoomId],
+    [
+      clearIncomingVoiceInviteState,
+      clearIncomingVoiceInviteTimer,
+      isIncomingVoiceInviteSuppressed,
+      notifyIncomingVoiceCallDesktop,
+      voiceRoomId,
+    ],
   );
 
   const clearVoiceCallRejoinFallback = useCallback(() => {

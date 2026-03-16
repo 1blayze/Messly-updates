@@ -163,6 +163,7 @@ ipcRenderer.on("notifications:open-conversation", (_event, payload) => {
 
 const notificationsAPI = Object.freeze({
   notifyMessage: (payload) => ipcRenderer.invoke("notifications:notify-message", payload),
+  notifyCall: (payload) => ipcRenderer.invoke("notifications:notify-call", payload),
   onOpenConversation: (listener) => {
     if (typeof listener !== "function") {
       return () => {};

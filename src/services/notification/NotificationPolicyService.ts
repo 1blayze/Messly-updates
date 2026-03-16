@@ -4,6 +4,7 @@ export interface NotificationRuntimeContext {
   currentUserId: string | null;
   activeConversationId: string | null;
   isWindowFocused: boolean;
+  isDesktopRuntime: boolean;
 }
 
 export interface NotificationPolicyDecision {
@@ -23,6 +24,7 @@ export class NotificationPolicyService {
     currentUserId: null,
     activeConversationId: null,
     isWindowFocused: true,
+    isDesktopRuntime: false,
   };
 
   updateContext(next: Partial<NotificationRuntimeContext>): void {
@@ -32,6 +34,7 @@ export class NotificationPolicyService {
       currentUserId: this.normalizeIdentifier(next.currentUserId ?? this.context.currentUserId),
       activeConversationId: this.normalizeIdentifier(next.activeConversationId ?? this.context.activeConversationId),
       isWindowFocused: Boolean(next.isWindowFocused ?? this.context.isWindowFocused),
+      isDesktopRuntime: Boolean(next.isDesktopRuntime ?? this.context.isDesktopRuntime),
     };
   }
 
@@ -50,7 +53,7 @@ export class NotificationPolicyService {
 
     const isWindowFocused = this.context.isWindowFocused;
     const activeConversationId = this.normalizeIdentifier(this.context.activeConversationId);
-    if (isWindowFocused && activeConversationId && activeConversationId === conversationId) {
+    if (!this.context.isDesktopRuntime && isWindowFocused && activeConversationId && activeConversationId === conversationId) {
       return { allow: false, reason: "same_conversation_visible" };
     }
 

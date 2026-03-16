@@ -1476,6 +1476,7 @@ export default function AppShell() {
       currentUserId,
       activeConversationId: activeDirectMessage?.conversationId ?? null,
       isWindowFocused,
+      isDesktopRuntime: Boolean(window.electronAPI),
     });
   }, [activeDirectMessage?.conversationId, currentUserId, isWindowFocused]);
 

@@ -3341,8 +3341,16 @@ function queueConversationMessageNotification(payload) {
   return getNotificationManager().notifyMessage(payload);
 }
 
+function queueIncomingVoiceCallNotification(payload) {
+  return getNotificationManager().notifyCall(payload);
+}
+
 async function notifyMessageHandler(_event, payload) {
   return queueConversationMessageNotification(payload);
+}
+
+async function notifyCallHandler(_event, payload) {
+  return queueIncomingVoiceCallNotification(payload);
 }
 
 function notificationsRendererReadyHandler(event) {
@@ -5026,6 +5034,7 @@ function registerIpcHandlers() {
   ipcMain.removeHandler("spotify:presence:poll-once");
   ipcMain.removeHandler("spotify:presence:debug-state");
   ipcMain.removeHandler("notifications:notify-message");
+  ipcMain.removeHandler("notifications:notify-call");
   ipcMain.handle("media:get-signed-url", getSignedMediaUrlHandler);
   ipcMain.handle("media:upload-profile", uploadProfileMediaHandler);
   ipcMain.handle("media:upload-attachment", uploadAttachmentHandler);
@@ -5172,6 +5181,7 @@ function registerIpcHandlers() {
     return service.getDebugState(payload?.scope);
   });
   ipcMain.handle("notifications:notify-message", notifyMessageHandler);
+  ipcMain.handle("notifications:notify-call", notifyCallHandler);
   ipcMain.on("notifications:renderer-ready", notificationsRendererReadyHandler);
   ipcMain.on("app:renderer-first-frame-ready", handleRendererFirstFrameReady);
 }

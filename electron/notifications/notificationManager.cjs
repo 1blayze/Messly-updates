@@ -6,6 +6,7 @@ const MESSAGE_NOTIFICATION_MAX_ID_LENGTH = 160;
 const MESSAGE_NOTIFICATION_MAX_AUTHOR_NAME_LENGTH = 80;
 const MESSAGE_NOTIFICATION_MAX_PREVIEW_LENGTH = 180;
 const MESSAGE_NOTIFICATION_MAX_CONTEXT_LENGTH = 96;
+const CALL_NOTIFICATION_MAX_AVATAR_URL_LENGTH = 2_048;
 
 function sanitizeIdentifier(rawValue) {
   const normalized = String(rawValue ?? "").trim();
@@ -103,6 +104,30 @@ function normalizeMessageNotificationPayload(rawPayload) {
   };
 }
 
+function normalizeVoiceCallNotificationPayload(rawPayload) {
+  const conversationId = sanitizeIdentifier(rawPayload?.conversationId);
+  const roomId = sanitizeIdentifier(rawPayload?.roomId);
+  const callerUserId = sanitizeIdentifier(rawPayload?.callerUserId);
+  if (!conversationId || !roomId || !callerUserId) {
+    return null;
+  }
+
+  const callerName =
+    sanitizeText(rawPayload?.callerName, MESSAGE_NOTIFICATION_MAX_AUTHOR_NAME_LENGTH) || "Nova chamada";
+  const callerAvatarUrl = sanitizeText(rawPayload?.callerAvatarUrl, CALL_NOTIFICATION_MAX_AVATAR_URL_LENGTH) || null;
+  const sentAtRaw = Number(rawPayload?.sentAt);
+  const sentAt = Number.isFinite(sentAtRaw) ? Math.max(0, Math.trunc(sentAtRaw)) : Date.now();
+
+  return {
+    conversationId,
+    roomId,
+    callerUserId,
+    callerName,
+    callerAvatarUrl,
+    sentAt,
+  };
+}
+
 function createNotificationManager(options = {}) {
   return new NotificationManager(options);
 }
@@ -175,6 +200,61 @@ class NotificationManager {
     return { ok: true, reason: "queued" };
   }
 
+  async notifyCall(rawPayload) {
+    const payload = normalizeVoiceCallNotificationPayload(rawPayload);
+    if (!payload) {
+      return { ok: false, reason: "invalid_payload" };
+    }
+    if (typeof this.NotificationCtor !== "function") {
+      this.debugLog("notification_unavailable", {
+        reason: "notification_ctor_missing",
+      });
+      return { ok: false, reason: "notification_unavailable" };
+    }
+    if (typeof this.NotificationCtor.isSupported === "function" && !this.NotificationCtor.isSupported()) {
+      this.debugLog("notification_unavailable", {
+        reason: "notification_not_supported",
+      });
+      return { ok: false, reason: "not_supported" };
+    }
+
+    const dedupSecondBucket = Math.floor(payload.sentAt / 1_000);
+    const dedupKeys = [
+      `call:room:${payload.roomId}:second:${dedupSecondBucket}`,
+      `call:room:${payload.roomId}:caller:${payload.callerUserId}:second:${dedupSecondBucket}`,
+      `call:conversation:${payload.conversationId}:caller:${payload.callerUserId}:second:${dedupSecondBucket}`,
+    ];
+    if (this.dedupStore.checkAndMark(dedupKeys)) {
+      this.debugLog("call_deduplicated", {
+        conversationId: payload.conversationId,
+        roomId: payload.roomId,
+        callerUserId: payload.callerUserId,
+      });
+      return { ok: true, reason: "duplicate" };
+    }
+
+    const notificationOptions = await this.buildCallNotificationOptions(payload);
+    if (!notificationOptions) {
+      return { ok: false, reason: "invalid_options" };
+    }
+
+    const shown = this.showNotificationWithFallback(notificationOptions, {
+      conversationId: payload.conversationId,
+      source: "voice-call-notification",
+    });
+
+    if (!shown) {
+      return { ok: false, reason: "show_failed" };
+    }
+
+    this.debugLog("call_shown", {
+      conversationId: payload.conversationId,
+      roomId: payload.roomId,
+      callerUserId: payload.callerUserId,
+    });
+    return { ok: true, reason: "shown" };
+  }
+
   dispose() {
     this.groupingService.clear();
     this.dedupStore.clear();
@@ -228,50 +308,19 @@ class NotificationManager {
       return;
     }
 
-    const notification = new this.NotificationCtor(notificationOptions);
-    notification.once("click", () => {
-      this.navigationCoordinator.handleNotificationClick({
+    const shown = this.showNotificationWithFallback(notificationOptions, {
+      conversationId: notificationPayload.conversationId,
+      messageId: notificationPayload.messageId,
+      eventId: notificationPayload.eventId,
+      source: "native-notification",
+    });
+    if (!shown) {
+      this.debugLog("show_failed", {
         conversationId: notificationPayload.conversationId,
         messageId: notificationPayload.messageId,
-        eventId: notificationPayload.eventId,
-        source: "native-notification",
+        reason: "notification_show_failed",
       });
-    });
-    try {
-      notification.show();
-    } catch (error) {
-      const hasIcon = Boolean(notificationOptions.icon);
-      if (!hasIcon) {
-        this.debugLog("show_failed", {
-          conversationId: notificationPayload.conversationId,
-          messageId: notificationPayload.messageId,
-          reason: error instanceof Error ? error.message : String(error),
-        });
-        return;
-      }
-
-      const fallbackOptions = { ...notificationOptions };
-      delete fallbackOptions.icon;
-
-      try {
-        const fallbackNotification = new this.NotificationCtor(fallbackOptions);
-        fallbackNotification.once("click", () => {
-          this.navigationCoordinator.handleNotificationClick({
-            conversationId: notificationPayload.conversationId,
-            messageId: notificationPayload.messageId,
-            eventId: notificationPayload.eventId,
-            source: "native-notification",
-          });
-        });
-        fallbackNotification.show();
-      } catch (fallbackError) {
-        this.debugLog("show_failed", {
-          conversationId: notificationPayload.conversationId,
-          messageId: notificationPayload.messageId,
-          reason: fallbackError instanceof Error ? fallbackError.message : String(fallbackError),
-        });
-        return;
-      }
+      return;
     }
     this.debugLog("shown", {
       conversationId: notificationPayload.conversationId,
@@ -313,6 +362,87 @@ class NotificationManager {
       options.icon = fallbackIcon;
     }
     return options;
+  }
+
+  async buildCallNotificationOptions(payload) {
+    const callerName = sanitizeText(payload.callerName, MESSAGE_NOTIFICATION_MAX_AUTHOR_NAME_LENGTH) || "Nova chamada";
+    const appName = sanitizeText(this.appName, 40);
+    const title = appName && !callerName.toLowerCase().includes(appName.toLowerCase())
+      ? `${callerName} • ${appName}`
+      : callerName;
+    const body = `${callerName} iniciou uma chamada.`;
+
+    if (!title || !body) {
+      return null;
+    }
+
+    const options = {
+      title,
+      body,
+      subtitle: this.appName,
+      silent: false,
+    };
+    if (this.appId) {
+      options.appID = this.appId;
+    }
+
+    const avatarPath = await this.avatarCacheService.resolveAvatarPath({
+      authorId: payload.callerUserId,
+      avatarUrl: payload.callerAvatarUrl,
+      avatarVersion: String(payload.sentAt),
+    });
+    if (avatarPath) {
+      options.icon = avatarPath;
+      return options;
+    }
+
+    const fallbackIcon = this.getAppNotificationIcon?.();
+    if (fallbackIcon) {
+      options.icon = fallbackIcon;
+    }
+    return options;
+  }
+
+  showNotificationWithFallback(notificationOptions, openPayload) {
+    if (typeof this.NotificationCtor !== "function" || !notificationOptions) {
+      return false;
+    }
+
+    const showWithOptions = (options) => {
+      const notification = new this.NotificationCtor(options);
+      if (openPayload && this.navigationCoordinator) {
+        notification.once("click", () => {
+          this.navigationCoordinator.handleNotificationClick(openPayload);
+        });
+      }
+      notification.show();
+    };
+
+    try {
+      showWithOptions(notificationOptions);
+      return true;
+    } catch (error) {
+      const hasIcon = Boolean(notificationOptions.icon);
+      if (!hasIcon) {
+        this.debugLog("show_failed", {
+          reason: error instanceof Error ? error.message : String(error),
+        });
+        return false;
+      }
+
+      const fallbackOptions = { ...notificationOptions };
+      delete fallbackOptions.icon;
+
+      try {
+        showWithOptions(fallbackOptions);
+        return true;
+      } catch (fallbackError) {
+        this.debugLog("show_failed", {
+          reason: fallbackError instanceof Error ? fallbackError.message : String(fallbackError),
+        });
+        return false;
+      }
+    }
   }
 
   buildTitle(payload) {
@@ -366,4 +496,5 @@ class NotificationManager {
 module.exports = {
   createNotificationManager,
   normalizeMessageNotificationPayload,
+  normalizeVoiceCallNotificationPayload,
 };
