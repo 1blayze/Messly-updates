@@ -379,7 +379,7 @@ function readVoiceCallMediaPreferences(userIdRaw: string | null | undefined): Vo
     outputVolumePercent: 100,
     echoCancellation: true,
     noiseSuppression: true,
-    autoGainControl: true,
+    autoGainControl: false,
   };
 
   if (typeof window === "undefined") {
@@ -408,7 +408,7 @@ function readVoiceCallMediaPreferences(userIdRaw: string | null | undefined): Vo
       outputVolumePercent,
       echoCancellation: typeof parsed.echoCancellation === "boolean" ? parsed.echoCancellation : true,
       noiseSuppression: typeof parsed.noiseSuppression === "boolean" ? parsed.noiseSuppression : true,
-      autoGainControl: typeof parsed.autoGain === "boolean" ? parsed.autoGain : true,
+      autoGainControl: typeof parsed.autoGain === "boolean" ? parsed.autoGain : false,
     };
   } catch {
     return fallback;
@@ -1865,6 +1865,7 @@ export default function DirectMessageChatView({
   const [voiceCallDiagnostics, setVoiceCallDiagnostics] = useState<VoiceDiagnosticsPeerSnapshot[]>([]);
   const [voiceCallConnectionState, setVoiceCallConnectionState] = useState<VoiceConnectionState>("idle");
   const [voiceCallError, setVoiceCallError] = useState<string | null>(null);
+  const [voiceCallMicWarning, setVoiceCallMicWarning] = useState<string | null>(null);
   const [voiceCallStartedAtMs, setVoiceCallStartedAtMs] = useState<number | null>(null);
   const [voiceCallElapsedTick, setVoiceCallElapsedTick] = useState(0);
   const [incomingVoiceInviteFromUserId, setIncomingVoiceInviteFromUserId] = useState<string | null>(null);
@@ -5083,6 +5084,7 @@ export default function DirectMessageChatView({
     setVoiceCallParticipants([]);
     setVoiceCallDiagnostics([]);
     setVoiceCallConnectionState("idle");
+    setVoiceCallMicWarning(null);
     setVoiceCallStartedAtMs(null);
     setVoiceCallElapsedTick(0);
   }, []);
@@ -5109,6 +5111,7 @@ export default function DirectMessageChatView({
     void sendVoiceSignal("invite").catch(() => undefined);
 
     setVoiceCallError(null);
+    setVoiceCallMicWarning(null);
     setIsVoiceCallConnecting(true);
     setVoiceCallConnectionState("connecting");
     setVoiceCallDiagnostics([]);
@@ -5147,6 +5150,9 @@ export default function DirectMessageChatView({
       },
       onConnectionStateChanged: (state) => {
         setVoiceCallConnectionState(state);
+      },
+      onMicrophoneWarningChanged: (warningMessage) => {
+        setVoiceCallMicWarning(warningMessage);
       },
       onError: (error) => {
         setVoiceCallError(String(error.message ?? "").trim() || "Falha na chamada de voz.");
@@ -5375,6 +5381,7 @@ export default function DirectMessageChatView({
                 elapsedSeconds={voiceCallElapsedSeconds}
                 diagnostics={voiceCallDiagnostics}
                 errorMessage={voiceCallError}
+                microphoneWarning={voiceCallMicWarning}
                 onToggleMute={handleToggleVoiceMute}
                 onLeave={handleLeaveVoiceCall}
               />

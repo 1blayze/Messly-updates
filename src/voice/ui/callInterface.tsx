@@ -15,6 +15,7 @@ export interface VoiceCallInterfaceProps {
   elapsedSeconds: number | null;
   diagnostics: VoiceDiagnosticsPeerSnapshot[];
   errorMessage?: string | null;
+  microphoneWarning?: string | null;
   onToggleMute: () => void;
   onLeave: () => void;
 }
@@ -78,6 +79,7 @@ export default function VoiceCallInterface({
   elapsedSeconds,
   diagnostics,
   errorMessage,
+  microphoneWarning,
   onToggleMute,
   onLeave,
 }: VoiceCallInterfaceProps) {
@@ -91,17 +93,19 @@ export default function VoiceCallInterface({
         <div className="voice-call-panel__header-copy">
           <p className="voice-call-panel__title">Canal de voz</p>
           <p className="voice-call-panel__subtitle">
-            {getConnectionLabel(connectionState)} • {formatElapsed(elapsedSeconds)}
+            {getConnectionLabel(connectionState)} | {formatElapsed(elapsedSeconds)}
           </p>
         </div>
       </header>
 
       {errorMessage ? <p className="voice-call-panel__error">{errorMessage}</p> : null}
+      {microphoneWarning ? <p className="voice-call-panel__warning">{microphoneWarning}</p> : null}
 
       <section className="voice-call-panel__participants" aria-label="Participantes da chamada">
         {participants.map((participant) => {
           const speakingClass = participant.speaking ? " voice-call-participant--speaking" : "";
           const mutedClass = participant.muted ? " voice-call-participant--muted" : "";
+          const normalizedLevel = Math.max(0, Math.min(1, participant.speakingLevel));
           return (
             <article
               key={participant.userId}
@@ -119,7 +123,7 @@ export default function VoiceCallInterface({
                   <span
                     className="voice-call-participant__speaking-ring"
                     style={{
-                      opacity: Math.max(0.45, Math.min(1, participant.speakingLevel)),
+                      opacity: Math.max(0.45, Math.min(1, normalizedLevel)),
                     }}
                     aria-hidden="true"
                   />
@@ -131,8 +135,16 @@ export default function VoiceCallInterface({
                   {participant.isLocal ? " (Voce)" : ""}
                 </p>
                 <p className="voice-call-participant__status">
-                  {participant.muted ? "Microfone mutado" : "Microfone ativo"} • {participant.connectionState}
+                  {participant.muted ? "Microfone mutado" : "Microfone ativo"} | {participant.connectionState}
                 </p>
+                <div className="voice-call-participant__level-meter" aria-hidden="true">
+                  <span
+                    className="voice-call-participant__level-fill"
+                    style={{
+                      width: `${Math.max(2, Math.round(normalizedLevel * 100))}%`,
+                    }}
+                  />
+                </div>
               </div>
             </article>
           );
@@ -173,6 +185,7 @@ export default function VoiceCallInterface({
               <article key={row.userId} className="voice-call-panel__debug-row">
                 <p className="voice-call-panel__debug-user">{row.userId}</p>
                 <p className="voice-call-panel__debug-metric">Ping: {formatMetric(row.pingMs, " ms")}</p>
+                <p className="voice-call-panel__debug-metric">Latencia: {formatMetric(row.latencyMs, " ms")}</p>
                 <p className="voice-call-panel__debug-metric">Jitter: {formatMetric(row.jitterMs, " ms")}</p>
                 <p className="voice-call-panel__debug-metric">Loss: {formatMetric(row.packetLossPercent, "%")}</p>
                 <p className="voice-call-panel__debug-metric">In: {formatMetric(row.inboundBitrateKbps, " kbps")}</p>

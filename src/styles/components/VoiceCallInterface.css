@@ -38,6 +38,13 @@
   line-height: 1.3;
 }
 
+.voice-call-panel__warning {
+  margin: 0;
+  color: #ffd587;
+  font-size: 12px;
+  line-height: 1.3;
+}
+
 .voice-call-panel__participants {
   display: grid;
   gap: 8px;
@@ -117,6 +124,24 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.voice-call-participant__level-meter {
+  margin-top: 6px;
+  width: 100%;
+  height: 6px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.voice-call-participant__level-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #2bcf80, #6df2af);
+  box-shadow: 0 0 8px rgba(58, 224, 143, 0.48);
+  transition: width 90ms linear;
 }
 
 .voice-call-panel__controls {
@@ -222,4 +247,3 @@
   font-size: 11px;
   line-height: 1.2;
 }
-

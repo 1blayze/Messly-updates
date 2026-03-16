@@ -4,9 +4,12 @@ import {
   attachRemoteAudioPlayback,
   captureMicrophoneStream,
   clearRemoteAudioPlayback,
+  createVoiceAudioPipeline,
   removeRemoteAudioPlayback,
   setAudioTrackMuted,
   stopMediaStream,
+  type VoiceAudioPipelineSession,
+  type VoiceInputQualityReport,
 } from "./audio";
 import { VoiceActivityDetector } from "./voiceDetection";
 
@@ -16,13 +19,15 @@ const SIGNALING_RECONNECT_BASE_DELAY_MS = 800;
 const SIGNALING_RECONNECT_MAX_DELAY_MS = 8_000;
 const DIAGNOSTICS_POLL_INTERVAL_MS = 2_000;
 const JOIN_RETRY_INTERVAL_MS = 2_500;
-const VOICE_AUDIO_TARGET_MAX_BITRATE = 256_000;
-const VOICE_AUDIO_FLOOR_MAX_BITRATE = 64_000;
+const VOICE_AUDIO_TARGET_MAX_BITRATE = 192_000;
+const VOICE_AUDIO_FLOOR_MAX_BITRATE = 48_000;
 const VOICE_AUDIO_STEP_UP_BITRATE = 16_000;
 const VOICE_AUDIO_STEP_DOWN_SOFT_FACTOR = 0.75;
 const VOICE_AUDIO_STEP_DOWN_HARD_FACTOR = 0.55;
 const VOICE_AUDIO_GOOD_SAMPLE_THRESHOLD = 3;
 const VOICE_AUDIO_DEGRADED_SAMPLE_THRESHOLD = 2;
+const SPEAKING_LEVEL_SIGNAL_INTERVAL_MS = 220;
+const LOCAL_LEVEL_UI_INTERVAL_MS = 80;
 
 const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
   {
@@ -50,6 +55,7 @@ export interface VoiceParticipantState extends VoiceUserIdentity {
 export interface VoiceDiagnosticsPeerSnapshot {
   userId: string;
   pingMs: number | null;
+  latencyMs: number | null;
   jitterMs: number | null;
   packetLossPercent: number | null;
   inboundBitrateKbps: number | null;
@@ -84,6 +90,7 @@ export interface VoiceCallClientOptions {
   onParticipantsChanged?: (participants: VoiceParticipantState[]) => void;
   onDiagnostics?: (snapshot: VoiceDiagnosticsSnapshot) => void;
   onConnectionStateChanged?: (state: VoiceConnectionState) => void;
+  onMicrophoneWarningChanged?: (warningMessage: string | null) => void;
   onError?: (error: Error) => void;
 }
 
@@ -472,7 +479,7 @@ function normalizeMediaPreferences(preferences: VoiceCallMediaPreferences | null
     targetBitrate: normalizedTargetBitrate,
     echoCancellation: preferences?.echoCancellation ?? true,
     noiseSuppression: preferences?.noiseSuppression ?? true,
-    autoGainControl: preferences?.autoGainControl ?? true,
+    autoGainControl: preferences?.autoGainControl ?? false,
   };
 }
 
@@ -485,6 +492,7 @@ export class VoiceCallClient {
   private readonly onParticipantsChanged: ((participants: VoiceParticipantState[]) => void) | null;
   private readonly onDiagnostics: ((snapshot: VoiceDiagnosticsSnapshot) => void) | null;
   private readonly onConnectionStateChanged: ((state: VoiceConnectionState) => void) | null;
+  private readonly onMicrophoneWarningChanged: ((warningMessage: string | null) => void) | null;
   private readonly onError: ((error: Error) => void) | null;
 
   private state: VoiceConnectionState = "idle";
@@ -496,13 +504,18 @@ export class VoiceCallClient {
   private pingIntervalId: number | null = null;
   private diagnosticsIntervalId: number | null = null;
   private joinRetryIntervalId: number | null = null;
+  private capturedMicrophoneStream: MediaStream | null = null;
   private localStream: MediaStream | null = null;
+  private localAudioPipeline: VoiceAudioPipelineSession | null = null;
   private localVoiceDetector: VoiceActivityDetector | null = null;
   private readonly participants = new Map<string, VoiceParticipantState>();
   private readonly peers = new Map<string, PeerConnectionContext>();
   private readonly remoteAudioElements = new Map<string, HTMLAudioElement>();
   private pendingSpeakingState: PendingSpeakingState | null = null;
   private lastSignalingRttMs: number | null = null;
+  private localMicrophoneWarning: string | null = null;
+  private lastSpeakingLevelSignalAtMs = 0;
+  private lastLocalLevelUiUpdateAtMs = 0;
   private leaving = false;
 
   constructor(options: VoiceCallClientOptions) {
@@ -517,6 +530,7 @@ export class VoiceCallClient {
     this.onParticipantsChanged = options.onParticipantsChanged ?? null;
     this.onDiagnostics = options.onDiagnostics ?? null;
     this.onConnectionStateChanged = options.onConnectionStateChanged ?? null;
+    this.onMicrophoneWarningChanged = options.onMicrophoneWarningChanged ?? null;
     this.onError = options.onError ?? null;
 
     if (options.peerDirectory) {
@@ -596,15 +610,27 @@ export class VoiceCallClient {
     this.leaving = false;
     this.setConnectionState("connecting");
     try {
-      this.localStream = await captureMicrophoneStream({
+      const capturedMicrophoneStream = await captureMicrophoneStream({
         echoCancellation: this.mediaPreferences.echoCancellation,
         noiseSuppression: this.mediaPreferences.noiseSuppression,
-        autoGainControl: this.mediaPreferences.autoGainControl,
+        autoGainControl: false,
         sampleRate: this.mediaPreferences.sampleRate ?? 48_000,
         channelCount: this.mediaPreferences.channelCount ?? 1,
+        latency: 0,
         deviceId: this.mediaPreferences.inputDeviceId,
         inputVolumePercent: this.mediaPreferences.inputVolumePercent,
       });
+      this.capturedMicrophoneStream = capturedMicrophoneStream;
+      this.localAudioPipeline = await createVoiceAudioPipeline(capturedMicrophoneStream, {
+        onQuality: (report) => {
+          this.handleLocalMicrophoneQualityReport(report);
+        },
+      });
+      this.localStream = this.localAudioPipeline.stream;
+      if (this.localMicrophoneWarning) {
+        this.localMicrophoneWarning = null;
+        this.onMicrophoneWarningChanged?.(null);
+      }
       this.localMuted = false;
       this.updateLocalParticipant({
         muted: false,
@@ -623,6 +649,7 @@ export class VoiceCallClient {
             speaking,
             level: normalizedLevel,
           };
+          this.lastSpeakingLevelSignalAtMs = 0;
           if (this.joinedRoom) {
             this.sendSignal({
               type: "speaking-state",
@@ -632,13 +659,15 @@ export class VoiceCallClient {
           }
         },
         onLevel: (level) => {
-          const current = this.participants.get(this.self.userId);
-          if (!current || !current.speaking) {
-            return;
+          const normalizedLevel = clamp(level, 0, 1);
+          const now = performance.now();
+          if (now - this.lastLocalLevelUiUpdateAtMs >= LOCAL_LEVEL_UI_INTERVAL_MS) {
+            this.lastLocalLevelUiUpdateAtMs = now;
+            this.updateLocalParticipant({
+              speakingLevel: normalizedLevel,
+            });
           }
-          this.updateLocalParticipant({
-            speakingLevel: level,
-          });
+          this.maybeBroadcastSpeakingLevel(normalizedLevel);
         },
       });
       await this.localVoiceDetector.start();
@@ -659,9 +688,13 @@ export class VoiceCallClient {
     this.clearJoinRetryLoop();
     this.pendingSpeakingState = null;
     this.lastSignalingRttMs = null;
+    this.lastSpeakingLevelSignalAtMs = 0;
+    this.lastLocalLevelUiUpdateAtMs = 0;
 
     this.localVoiceDetector?.stop();
     this.localVoiceDetector = null;
+    this.localAudioPipeline?.stop();
+    this.localAudioPipeline = null;
 
     if (this.socket && this.socket.readyState === WebSocket.OPEN) {
       this.sendSignal({ type: "leave" });
@@ -681,6 +714,12 @@ export class VoiceCallClient {
     clearRemoteAudioPlayback(this.remoteAudioElements);
     stopMediaStream(this.localStream);
     this.localStream = null;
+    stopMediaStream(this.capturedMicrophoneStream);
+    this.capturedMicrophoneStream = null;
+    if (this.localMicrophoneWarning) {
+      this.localMicrophoneWarning = null;
+      this.onMicrophoneWarningChanged?.(null);
+    }
 
     this.participants.clear();
     this.participants.set(this.self.userId, {
@@ -698,6 +737,7 @@ export class VoiceCallClient {
   setMuted(muted: boolean): void {
     this.localMuted = muted;
     setAudioTrackMuted(this.localStream, muted);
+    setAudioTrackMuted(this.capturedMicrophoneStream, muted);
     this.updateLocalParticipant({
       muted,
     });
@@ -1013,6 +1053,17 @@ export class VoiceCallClient {
     };
 
     connection.ontrack = (event) => {
+      const receiver = event.receiver as RTCRtpReceiver & {
+        playoutDelayHint?: number;
+        jitterBufferTarget?: number;
+      };
+      if ("playoutDelayHint" in receiver) {
+        receiver.playoutDelayHint = 0.04;
+      }
+      if ("jitterBufferTarget" in receiver) {
+        receiver.jitterBufferTarget = 0.035;
+      }
+
       const stream = event.streams[0] ?? remoteStream;
       if (stream !== remoteStream) {
         for (const track of stream.getAudioTracks()) {
@@ -1158,7 +1209,7 @@ export class VoiceCallClient {
           const preferredOpus = opusCodecs.map((codec) => ({
             ...codec,
             channels: 1,
-            sdpFmtpLine: "maxaveragebitrate=256000;stereo=0;sprop-stereo=0;useinbandfec=1;usedtx=1;minptime=10",
+            sdpFmtpLine: `maxaveragebitrate=${targetBitrate};stereo=0;sprop-stereo=0;useinbandfec=1;usedtx=1;minptime=10`,
           }));
           const fallbackCodecs = capabilities.filter((codec) => codec.mimeType.toLowerCase() !== "audio/opus");
           transceiver.setCodecPreferences([...preferredOpus, ...fallbackCodecs]);
@@ -1251,6 +1302,35 @@ export class VoiceCallClient {
     void sender.setParameters(parameters).catch(() => undefined);
   }
 
+  private maybeBroadcastSpeakingLevel(level: number): void {
+    if (!this.joinedRoom || this.localMuted) {
+      return;
+    }
+    const localParticipant = this.participants.get(this.self.userId);
+    if (!localParticipant || !localParticipant.speaking) {
+      return;
+    }
+
+    const now = Date.now();
+    if (now - this.lastSpeakingLevelSignalAtMs < SPEAKING_LEVEL_SIGNAL_INTERVAL_MS) {
+      return;
+    }
+    this.lastSpeakingLevelSignalAtMs = now;
+    this.sendSignal({
+      type: "speaking-state",
+      speaking: true,
+      level: clamp(level, 0, 1),
+    });
+  }
+
+  private handleLocalMicrophoneQualityReport(report: VoiceInputQualityReport): void {
+    const warningMessage = String(report.warningMessage ?? "").trim() || null;
+    if (this.localMicrophoneWarning !== warningMessage) {
+      this.localMicrophoneWarning = warningMessage;
+      this.onMicrophoneWarningChanged?.(warningMessage);
+    }
+  }
+
   private async sendJoinSignal(): Promise<void> {
     const accessToken = await getSupabaseAccessToken().catch(() => null);
     this.sendSignal({
@@ -1336,12 +1416,15 @@ export class VoiceCallClient {
       }
 
       let pingMs: number | null = null;
+      let latencyMs: number | null = null;
       let jitterMs: number | null = null;
       let packetLossPercent: number | null = null;
       let inboundBytes = 0;
       let outboundBytes = 0;
       let inboundPacketsLost = 0;
       let inboundPacketsReceived = 0;
+      let jitterBufferDelaySeconds = 0;
+      let jitterBufferEmittedCount = 0;
       let selectedCandidatePairId: string | null = null;
       let candidatePairRttMs: number | null = null;
       let remoteInboundRttMs: number | null = null;
@@ -1379,6 +1462,8 @@ export class VoiceCallClient {
             jitter?: number;
             packetsLost?: number;
             packetsReceived?: number;
+            jitterBufferDelay?: number;
+            jitterBufferEmittedCount?: number;
           };
           inboundBytes += typeof inbound.bytesReceived === "number" ? inbound.bytesReceived : 0;
           if (typeof inbound.jitter === "number") {
@@ -1387,6 +1472,8 @@ export class VoiceCallClient {
           }
           inboundPacketsLost += typeof inbound.packetsLost === "number" ? inbound.packetsLost : 0;
           inboundPacketsReceived += typeof inbound.packetsReceived === "number" ? inbound.packetsReceived : 0;
+          jitterBufferDelaySeconds += typeof inbound.jitterBufferDelay === "number" ? inbound.jitterBufferDelay : 0;
+          jitterBufferEmittedCount += typeof inbound.jitterBufferEmittedCount === "number" ? inbound.jitterBufferEmittedCount : 0;
         }
 
         if (report.type === "outbound-rtp" && (report as RTCStats & { kind?: string }).kind === "audio") {
@@ -1417,6 +1504,9 @@ export class VoiceCallClient {
       const packetTotal = inboundPacketsLost + inboundPacketsReceived;
       packetLossPercent = packetTotal > 0 ? Number(((inboundPacketsLost / packetTotal) * 100).toFixed(2)) : null;
       pingMs = candidatePairRttMs ?? remoteInboundRttMs ?? remoteOutboundRttMs ?? this.lastSignalingRttMs;
+      latencyMs = jitterBufferEmittedCount > 0
+        ? Math.round((jitterBufferDelaySeconds / jitterBufferEmittedCount) * 1_000)
+        : (pingMs != null ? Math.round(pingMs / 2) : null);
       this.adjustPeerBitrate(peerContext, packetLossPercent, jitterMs);
       const connectionQuality = inferConnectionQuality(pingMs, jitterMs, packetLossPercent);
 
@@ -1439,6 +1529,7 @@ export class VoiceCallClient {
       peerSnapshots.push({
         userId,
         pingMs,
+        latencyMs,
         jitterMs,
         packetLossPercent,
         inboundBitrateKbps,
