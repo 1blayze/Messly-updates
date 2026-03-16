@@ -22,6 +22,7 @@ import {
   subscribeSpotifyListenAlongSession,
   type SpotifyListenAlongSession,
 } from "../services/connections/spotifyListenAlong";
+import { getVoiceCallUiSnapshot, subscribeVoiceCallUiSnapshot } from "../voice/client/uiState";
 import { getAvatarUrl, getBannerUrl, getNameAvatarUrl, isDefaultAvatarUrl, isDefaultBannerUrl } from "../services/cdn/mediaUrls";
 import { normalizeBannerColor } from "../services/profile/bannerColor";
 import { supabase } from "../lib/supabaseClient";
@@ -1147,6 +1148,8 @@ export default function AppShell() {
   const [activeFriendMenuUserId, setActiveFriendMenuUserId] = useState<string | null>(null);
   const [friendSearchTerm, setFriendSearchTerm] = useState("");
   const [activeDirectMessage, setActiveDirectMessage] = useState<SidebarDirectMessageSelection | null>(null);
+  const [pinnedDirectMessageDuringCall, setPinnedDirectMessageDuringCall] = useState<SidebarDirectMessageSelection | null>(null);
+  const [voiceCallUiSnapshot, setVoiceCallUiSnapshot] = useState(() => getVoiceCallUiSnapshot());
   const [activeDirectMessageMutualFriendIds, setActiveDirectMessageMutualFriendIds] = useState<string[]>([]);
   const [sidebarDirectMessages, setSidebarDirectMessages] = useState<SidebarDirectMessageSelection[]>([]);
   const [isSidebarHydrated, setIsSidebarHydrated] = useState(false);
@@ -1205,6 +1208,18 @@ export default function AppShell() {
   const handleChangePresence = (state: PresenceState): void => {
     presenceController.setPreferredState(state);
   };
+
+  useEffect(() => {
+    return subscribeVoiceCallUiSnapshot((snapshot) => {
+      setVoiceCallUiSnapshot(snapshot);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (activeDirectMessage) {
+      setPinnedDirectMessageDuringCall(activeDirectMessage);
+    }
+  }, [activeDirectMessage]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -3116,7 +3131,18 @@ export default function AppShell() {
   }, [allFriends, hasFriendSearch, normalizedFriendSearchTerm]);
   const visibleFriends = activeFriendsTab === "online" ? filteredAvailableFriends : filteredAllFriends;
   const canShowFriendsState = Boolean(currentUserId) && hasInitializedFriends;
-  const chatViewDirectMessage = activeDirectMessage;
+  const resolvedPinnedDirectMessageDuringCall = useMemo(() => {
+    if (!pinnedDirectMessageDuringCall) {
+      return null;
+    }
+    return (
+      sidebarDirectMessagesByConversationId.get(pinnedDirectMessageDuringCall.conversationId) ??
+      pinnedDirectMessageDuringCall
+    );
+  }, [pinnedDirectMessageDuringCall, sidebarDirectMessagesByConversationId]);
+  const shouldKeepDirectMessageMountedForVoiceCall =
+    !activeDirectMessage && (voiceCallUiSnapshot.callActive || voiceCallUiSnapshot.callConnecting);
+  const chatViewDirectMessage = activeDirectMessage ?? (shouldKeepDirectMessageMountedForVoiceCall ? resolvedPinnedDirectMessageDuringCall : null);
   const activeDirectMessageFriend = useMemo(() => {
     if (!chatViewDirectMessage) {
       return null;
