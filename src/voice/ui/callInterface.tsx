@@ -75,7 +75,6 @@ export default function VoiceCallInterface({
           type="button"
           className={`voice-call-panel__control-btn${localMuted ? " voice-call-panel__control-btn--active" : ""}`}
           onClick={onToggleMute}
-          disabled={isConnecting}
           aria-label={localMuted ? "Desmutar microfone" : "Mutar microfone"}
           title={localMuted ? "Desmutar microfone" : "Mutar microfone"}
         >

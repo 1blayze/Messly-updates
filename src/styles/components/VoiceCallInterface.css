@@ -73,9 +73,9 @@
 
 .voice-call-panel__control-btn:hover,
 .voice-call-panel__control-btn:focus-visible {
-  background: rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.24);
   transform: translateY(-1px);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.28);
 }
 
 .voice-call-panel__control-btn:focus-visible {
@@ -85,6 +85,11 @@
 
 .voice-call-panel__control-btn--active {
   background: rgba(255, 255, 255, 0.14);
+}
+
+.voice-call-panel__control-btn--active:hover,
+.voice-call-panel__control-btn--active:focus-visible {
+  background: rgba(255, 255, 255, 0.28);
 }
 
 .voice-call-panel__control-btn--danger {
