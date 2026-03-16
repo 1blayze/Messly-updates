@@ -88,6 +88,7 @@ const DEFAULT_WINDOWS_BEHAVIOR_SETTINGS = Object.freeze({
   startMinimized: true,
   closeToTray: true,
   launchAtStartup: true,
+  hardwareAcceleration: true,
 });
 const DEFAULT_HIDDEN_DIRECT_MESSAGES_STATE = Object.freeze({
   version: 1,
@@ -1415,6 +1416,7 @@ function normalizeWindowsBehaviorSettings(rawSettings) {
     startMinimized: clampBoolean(source.startMinimized, DEFAULT_WINDOWS_BEHAVIOR_SETTINGS.startMinimized),
     closeToTray: clampBoolean(source.closeToTray, DEFAULT_WINDOWS_BEHAVIOR_SETTINGS.closeToTray),
     launchAtStartup: clampBoolean(source.launchAtStartup, DEFAULT_WINDOWS_BEHAVIOR_SETTINGS.launchAtStartup),
+    hardwareAcceleration: clampBoolean(source.hardwareAcceleration, DEFAULT_WINDOWS_BEHAVIOR_SETTINGS.hardwareAcceleration),
   };
 }
 
@@ -1501,6 +1503,18 @@ function setWindowsBehaviorSettings(nextPartial) {
   syncLaunchAtStartupToSystem(next.launchAtStartup);
   writeWindowsBehaviorSettingsToDisk(next);
   return { ...next };
+}
+
+function applyHardwareAccelerationPreferenceAtStartup() {
+  const windowsSettings = loadWindowsBehaviorSettings();
+  if (windowsSettings.hardwareAcceleration) {
+    return;
+  }
+  try {
+    if (typeof app.disableHardwareAcceleration === "function") {
+      app.disableHardwareAcceleration();
+    }
+  } catch {}
 }
 
 function getHiddenDirectMessagesStatePath() {
@@ -5001,6 +5015,8 @@ function isUpdaterBlockingMainWindowCreation() {
     status === "retrying"
   );
 }
+
+applyHardwareAccelerationPreferenceAtStartup();
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 

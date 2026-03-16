@@ -266,6 +266,7 @@ const DEFAULT_WINDOWS_BEHAVIOR_SETTINGS: WindowsBehaviorSettings = {
   startMinimized: true,
   closeToTray: true,
   launchAtStartup: true,
+  hardwareAcceleration: true,
 };
 const SETTINGS_SIDEBAR_ITEMS: ReadonlyArray<{
   key: SettingsSection;
@@ -3280,6 +3281,7 @@ export default function AppSettingsView({
           startMinimized: launchAtStartup && Boolean(settings.startMinimized),
           closeToTray: Boolean(settings.closeToTray),
           launchAtStartup,
+          hardwareAcceleration: settings.hardwareAcceleration !== false,
         });
       })
       .catch(() => {
@@ -3932,6 +3934,7 @@ export default function AppSettingsView({
         startMinimized: launchAtStartup && Boolean(updated.startMinimized),
         closeToTray: Boolean(updated.closeToTray),
         launchAtStartup,
+        hardwareAcceleration: updated.hardwareAcceleration !== false,
       });
       windowsBehaviorLoadedRef.current = true;
     } catch {
@@ -6355,6 +6358,12 @@ export default function AppSettingsView({
                               key: "launchAtStartup",
                               title: "Abrir na inicialização",
                               description: "Inicia o Messly automaticamente quando o Windows ligar.",
+                            },
+                            {
+                              key: "hardwareAcceleration",
+                              title: "Aceleração de hardware",
+                              description:
+                                "Usa sua GPU para otimizar o Messly. Desative caso note problemas visuais.",
                             },
                           ] as const
                         ).map((item) => {

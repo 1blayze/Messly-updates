@@ -284,6 +284,7 @@ interface WindowsBehaviorSettings {
   startMinimized: boolean;
   closeToTray: boolean;
   launchAtStartup: boolean;
+  hardwareAcceleration: boolean;
 }
 
 interface WindowsBehaviorSettingsRestoreResult {
