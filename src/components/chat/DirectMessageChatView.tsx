@@ -6453,13 +6453,9 @@ export default function DirectMessageChatView({
                 }}
               />
               <h3 className="dm-chat__intro-name">{safeTargetDisplayName}</h3>
-              {safeTargetUsername ? <p className="dm-chat__intro-username">{safeTargetUsername}</p> : null}
               <p className="dm-chat__intro-copy">
                 Este e o inicio da sua conversa privada com {safeTargetDisplayName}.
               </p>
-              {messages.length === 0 && !shouldShowMessagesSkeleton ? (
-                <p className="dm-chat__intro-empty-note">Envie a primeira mensagem abaixo.</p>
-              ) : null}
             </section>
           ) : null}
 
