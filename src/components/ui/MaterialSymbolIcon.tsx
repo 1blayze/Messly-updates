@@ -37,7 +37,6 @@ const expandLessIconUrl = new URL("../../assets/icons/ui/expand-less.svg", impor
 const expandMoreIconUrl = new URL("../../assets/icons/ui/expand-more.svg", import.meta.url).href;
 const groupIconUrl = new URL("../../assets/icons/ui/Group 1.svg", import.meta.url).href;
 const headphoneIconUrl = new URL("../../assets/icons/ui/headphone.svg", import.meta.url).href;
-const hideIconUrl = new URL("../../assets/icons/ui/Hide.svg", import.meta.url).href;
 const imageIconUrl = new URL("../../assets/icons/ui/Image 2.svg", import.meta.url).href;
 const linkIconUrl = new URL("../../assets/icons/ui/Link.svg", import.meta.url).href;
 const lockIconUrl = new URL("../../assets/icons/ui/Lock 1.svg", import.meta.url).href;
@@ -120,7 +119,7 @@ const ICON_URLS: Record<string, string> = {
   search: searchIconUrl,
   sentiment_satisfied: smileIconUrl,
   settings: settingIconUrl,
-  stop_screen_share: hideIconUrl,
+  stop_screen_share: visibilityOffIconUrl,
   supervisor_account: groupIconUrl,
   sync: syncIconUrl,
   videocam: cameraIconUrl,

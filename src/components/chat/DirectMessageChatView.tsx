@@ -2031,8 +2031,8 @@ export default function DirectMessageChatView({
   const safeTargetDisplayName = targetDisplayNameForFallback;
   const safeTargetUsername = normalizedTargetUsername || "usuario";
   const voiceRoomId = useMemo(
-    () => buildVoiceRoomId(currentUser.userId, targetUser.userId, conversationId),
-    [conversationId, currentUser.userId, targetUser.userId],
+    () => buildVoiceRoomId(currentUser.userId || currentUserId, targetUser.userId, conversationId),
+    [conversationId, currentUser.userId, currentUserId, targetUser.userId],
   );
   const normalizedCurrentSidebarUserId = String(currentUserId ?? "").trim();
   const normalizedTargetSidebarUserId = String(targetUser.userId ?? "").trim();
