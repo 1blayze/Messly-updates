@@ -55,11 +55,16 @@ const HIGH_PASS_CUTOFF_HZ = 80;
 const VOICE_LOW_CUT_HZ = 200;
 const VOICE_PRESENCE_HZ = 3_000;
 const NOISE_GATE_OPEN_GAIN = 1;
-const NOISE_GATE_CLOSED_GAIN = 0.08;
-const NOISE_GATE_TRANSIENT_SUPPRESS_GAIN = 0.02;
-const NOISE_GATE_OPEN_CONFIDENCE = 0.4;
-const NOISE_GATE_CONFIDENCE_ATTACK = 0.16;
-const NOISE_GATE_CONFIDENCE_RELEASE = 0.08;
+const NOISE_GATE_CLOSED_GAIN = 0.008;
+const NOISE_GATE_TRANSIENT_SUPPRESS_GAIN = 0.00005;
+const NOISE_GATE_OPEN_CONFIDENCE = 0.44;
+const NOISE_GATE_CONFIDENCE_ATTACK = 0.18;
+const NOISE_GATE_CONFIDENCE_RELEASE = 0.09;
+const NOISE_GATE_TRANSIENT_HOLD_MS = 170;
+const SPEECH_BAND_MIN_HZ = 260;
+const SPEECH_BAND_MAX_HZ = 3_800;
+const HIGH_BAND_MIN_HZ = 4_800;
+const HIGH_BAND_MAX_HZ = 12_000;
 const QUALITY_EMIT_INTERVAL_MS = 120;
 const RNNOISE_MAX_CHANNELS = 1;
 
@@ -82,6 +87,13 @@ function resolveAudioContextCtor():
 
 function toNormalizedLevel(db: number): number {
   return clamp((db + 72) / 60, 0, 1);
+}
+
+function toLinearFromDecibel(db: number): number {
+  if (!Number.isFinite(db)) {
+    return 0;
+  }
+  return 10 ** (db / 20);
 }
 
 function resolveNoiseSuppressionMode(modeRaw: unknown, fallback: VoiceNoiseSuppressionMode = "webrtc"): VoiceNoiseSuppressionMode {
@@ -202,7 +214,7 @@ export async function captureMicrophoneStream(
 
   const baseConstraints: MediaTrackConstraints = {
     echoCancellation: normalizedEchoCancellation,
-    noiseSuppression: noiseSuppressionMode === "webrtc",
+    noiseSuppression: noiseSuppressionMode !== "off",
     autoGainControl: normalizedAutoGain,
     channelCount: normalizedChannelCount,
   };
@@ -245,7 +257,7 @@ export async function captureMicrophoneStream(
       });
       await tryApplyNativeProcessingConstraints(stream, {
         echoCancellation: normalizedEchoCancellation,
-        noiseSuppression: noiseSuppressionMode === "webrtc",
+        noiseSuppression: noiseSuppressionMode !== "off",
         autoGainControl: normalizedAutoGain,
         sampleRate: normalizedSampleRate,
         channelCount: normalizedChannelCount,
@@ -354,8 +366,8 @@ export async function createVoiceAudioPipeline(
 
   const destination = context.createMediaStreamDestination();
   const analyser = context.createAnalyser();
-  analyser.fftSize = 2_048;
-  analyser.smoothingTimeConstant = 0.12;
+  analyser.fftSize = 512;
+  analyser.smoothingTimeConstant = 0.06;
 
   if (effectiveNoiseSuppressionMode === "off") {
     source.connect(destination);
@@ -385,6 +397,7 @@ export async function createVoiceAudioPipeline(
   }
 
   const sampleBuffer = new Float32Array(analyser.fftSize);
+  const frequencyBuffer = new Float32Array(analyser.frequencyBinCount);
   let rafId: number | null = null;
   let noiseFloorDb = -62;
   let lowVolumeScore = 0;
@@ -393,9 +406,12 @@ export async function createVoiceAudioPipeline(
   let distortionScore = 0;
   let speechConfidence = 0;
   let lastQualityEmitAt = 0;
+  let transientSuppressUntilMs = 0;
+  let previousDb = -90;
 
   const tick = (): void => {
     analyser.getFloatTimeDomainData(sampleBuffer as Float32Array<ArrayBuffer>);
+    analyser.getFloatFrequencyData(frequencyBuffer as Float32Array<ArrayBuffer>);
     let sumSquares = 0;
     let peak = 0;
     let zeroCrossings = 0;
@@ -417,9 +433,48 @@ export async function createVoiceAudioPipeline(
     const rms = Math.sqrt(sumSquares / Math.max(1, sampleBuffer.length));
     const currentDb = 20 * Math.log10(Math.max(rms, 1e-8));
     const currentLevel = toNormalizedLevel(currentDb);
+    const dbJump = currentDb - previousDb;
+    previousDb = currentDb;
     const zeroCrossRate = zeroCrossings / Math.max(1, sampleBuffer.length);
-    const speakingLikely = currentDb >= Math.max(-42, noiseFloorDb + 10);
-    const likelyTransientImpulse = peak >= 0.84 && currentDb >= Math.max(noiseFloorDb + 12, -30) && !speakingLikely;
+    const crestFactor = peak / Math.max(rms, 1e-5);
+
+    const nyquist = context.sampleRate / 2;
+    const binWidthHz = nyquist / Math.max(1, frequencyBuffer.length - 1);
+    let speechBandEnergy = 0;
+    let highBandEnergy = 0;
+    let totalEnergy = 0;
+    for (let index = 0; index < frequencyBuffer.length; index += 1) {
+      const magnitude = toLinearFromDecibel(frequencyBuffer[index]);
+      if (magnitude <= 0) {
+        continue;
+      }
+      const frequencyHz = index * binWidthHz;
+      totalEnergy += magnitude;
+      if (frequencyHz >= SPEECH_BAND_MIN_HZ && frequencyHz <= SPEECH_BAND_MAX_HZ) {
+        speechBandEnergy += magnitude;
+      }
+      if (frequencyHz >= HIGH_BAND_MIN_HZ && frequencyHz <= HIGH_BAND_MAX_HZ) {
+        highBandEnergy += magnitude;
+      }
+    }
+    const speechBandRatio = speechBandEnergy / Math.max(totalEnergy, 1e-6);
+    const highBandRatio = highBandEnergy / Math.max(totalEnergy, 1e-6);
+
+    const speakingLikely = (
+      currentDb >= Math.max(-42, noiseFloorDb + 10)
+      && speechBandRatio >= 0.42
+      && highBandRatio <= 0.58
+    );
+    const likelyTransientImpulse = (
+      (
+        peak >= 0.6
+        && crestFactor >= 5.8
+        && dbJump >= 8
+        && (highBandRatio >= 0.34 || speechBandRatio <= 0.46)
+      )
+      || (peak >= 0.78 && crestFactor >= 7.2 && highBandRatio >= 0.28)
+      || (peak >= 0.9 && crestFactor >= 8.5)
+    );
     const speechFrameLikely = speakingLikely && zeroCrossRate <= 0.24 && !likelyTransientImpulse;
 
     if (!speakingLikely) {
@@ -427,16 +482,21 @@ export async function createVoiceAudioPipeline(
     }
 
     if (adaptiveNoiseGate) {
+      const nowMs = performance.now();
+      if (likelyTransientImpulse && !speechFrameLikely) {
+        transientSuppressUntilMs = Math.max(transientSuppressUntilMs, nowMs + NOISE_GATE_TRANSIENT_HOLD_MS);
+      }
+      const transientSuppressionActive = nowMs < transientSuppressUntilMs;
       speechConfidence = clamp(
         speechConfidence + (speechFrameLikely ? NOISE_GATE_CONFIDENCE_ATTACK : -NOISE_GATE_CONFIDENCE_RELEASE),
         0,
         1,
       );
-      const gateOpen = speechConfidence >= NOISE_GATE_OPEN_CONFIDENCE;
+      const gateOpen = speechConfidence >= NOISE_GATE_OPEN_CONFIDENCE && !transientSuppressionActive;
       const gateTargetGain = gateOpen
         ? NOISE_GATE_OPEN_GAIN
-        : (likelyTransientImpulse ? NOISE_GATE_TRANSIENT_SUPPRESS_GAIN : NOISE_GATE_CLOSED_GAIN);
-      adaptiveNoiseGate.gain.setTargetAtTime(gateTargetGain, context.currentTime, gateOpen ? 0.012 : 0.045);
+        : (transientSuppressionActive ? NOISE_GATE_TRANSIENT_SUPPRESS_GAIN : NOISE_GATE_CLOSED_GAIN);
+      adaptiveNoiseGate.gain.setTargetAtTime(gateTargetGain, context.currentTime, gateOpen ? 0.008 : 0.03);
     }
 
     const clipping = peak >= 0.985;

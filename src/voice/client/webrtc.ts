@@ -638,7 +638,7 @@ export class VoiceCallClient {
       const capturedMicrophoneStream = await captureMicrophoneStream({
         echoCancellation: this.mediaPreferences.echoCancellation,
         noiseSuppressionMode: this.mediaPreferences.noiseSuppressionMode,
-        noiseSuppression: this.mediaPreferences.noiseSuppressionMode === "webrtc",
+        noiseSuppression: this.mediaPreferences.noiseSuppressionMode !== "off",
         autoGainControl: this.mediaPreferences.autoGainControl,
         sampleRate: this.mediaPreferences.sampleRate ?? 48_000,
         channelCount: this.mediaPreferences.channelCount ?? 1,
