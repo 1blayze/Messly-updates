@@ -30,8 +30,6 @@ const {
   collectWindowsNetworkDiagnostics,
 } = require("./windows/firewall.cjs");
 
-// Keep Electron security warnings visible in production, but avoid noisy
-// dev-only CSP warnings caused by tooling that relies on eval checks.
 if (!app.isPackaged && process.env.ELECTRON_ENABLE_SECURITY_WARNINGS !== "true") {
   process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = "true";
 }
@@ -132,10 +130,6 @@ const TURNSTILE_CSP_SOURCE = "https://challenges.cloudflare.com";
 const CLOUDFLARE_INSIGHTS_SCRIPT_SOURCE = "https://static.cloudflareinsights.com";
 // Update UI is handled by the C# launcher only.
 const STATUS_PANEL_ENABLED = false;
-const STATUS_PANEL_PHASE = Object.freeze({
-  CHECKING: "checking",
-  LAUNCHING: "launching",
-});
 const MAIN_WINDOW_FIRST_FRAME_TIMEOUT_MS = 12_000;
 const STARTUP_AUTO_UPDATE_BLOCK_TIMEOUT_MS = readBoundedIntegerEnv(
   process.env.AUTO_UPDATE_BLOCK_TIMEOUT_MS,
@@ -1261,8 +1255,6 @@ function completeStartupStatusPanelLifecycle() {
   startupStatusPanelLifecycleActive = false;
 }
 
-function setStatusPanelPhase() {}
-
 function syncStatusPanelWithUpdaterStateV2() {}
 
 function trimTransparentEdges(image) {
@@ -2231,16 +2223,6 @@ function revealMainWindowAfterFirstFrame(options = {}) {
     startMinimized,
   });
   if (isStartupStatusPanelLifecycleActive()) {
-    setStatusPanelPhase(STATUS_PANEL_PHASE.READY, {
-      title: "Abrindo Messly",
-      subtitle: "Inicializando interface",
-      showProgressBar: true,
-      showProgress: false,
-      indeterminate: true,
-    }, {
-      force: true,
-    });
-    scheduleStatusPanelAutoHide(180, STATUS_PANEL_PHASE.READY);
     completeStartupStatusPanelLifecycle("main-window-revealed");
   } else {
     hideStatusPanel();
@@ -3127,23 +3109,7 @@ async function runStartupUpdateStepWithRetry(stepLabel, maxAttempts, executeStep
         throw error;
       }
 
-      const retryAttemptNumber = attempt + 1;
       const delayMs = buildStartupUpdateRetryDelayMs(attempt - 1);
-      if (isStartupStatusPanelLifecycleActive()) {
-        setStatusPanelPhase(
-          STATUS_PANEL_PHASE.RETRYING,
-          {
-            title: "Tentando novamente",
-            subtitle: `${safeStepLabel} (${retryAttemptNumber}/${safeMaxAttempts})`,
-            detail: message || "A conexão oscilou. Vamos tentar novamente.",
-            indeterminate: true,
-            showProgressBar: true,
-          },
-          {
-            force: true,
-          },
-        );
-      }
       console.warn(`[updater] ${safeStepLabel} falhou na tentativa ${attempt}/${safeMaxAttempts}: ${message}`);
       await waitForTimeout(delayMs);
       if (startupAutoUpdateGateExpired) {
@@ -3207,18 +3173,6 @@ async function runStartupAutoUpdateIfEnabled() {
         return;
       }
 
-      if (isStartupStatusPanelLifecycleActive()) {
-        setStatusPanelPhase(
-          STATUS_PANEL_PHASE.UPDATE_AVAILABLE,
-          {
-            detail: checkedState?.latestVersion
-              ? `Versão ${String(checkedState.latestVersion).trim()} encontrada.`
-              : "",
-          },
-          { force: true },
-        );
-      }
-
       await runStartupUpdateStepWithRetry(
         "Baixando atualização",
         STARTUP_AUTO_UPDATE_DOWNLOAD_RETRY_MAX,
@@ -3244,46 +3198,6 @@ async function runStartupAutoUpdateIfEnabled() {
       updaterAutoInstallInFlight = true;
       updaterInstallGuardActive = true;
 
-      setStatusPanelPhase(
-        STATUS_PANEL_PHASE.APPLYING,
-        {
-          title: "Preparando atualização",
-          subtitle: "Aplicando pacote baixado",
-          detail: "Validando arquivos para instalação.",
-          indeterminate: true,
-        },
-        {
-          force: true,
-        },
-      );
-      await waitForTimeout(420);
-
-      setStatusPanelPhase(
-        STATUS_PANEL_PHASE.INSTALLING,
-        {
-          title: "Instalando atualização",
-          subtitle: "Não feche o aplicativo",
-          detail: "A instalação está em andamento.",
-          indeterminate: true,
-        },
-        {
-          force: true,
-        },
-      );
-      await waitForTimeout(480);
-
-      setStatusPanelPhase(
-        STATUS_PANEL_PHASE.RELAUNCHING,
-        {
-          title: "Atualização concluída",
-          subtitle: "Reiniciando aplicativo",
-          indeterminate: true,
-        },
-        {
-          force: true,
-        },
-      );
-
       await appUpdater.installUpdate();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error ?? "unknown");
@@ -3293,23 +3207,6 @@ async function runStartupAutoUpdateIfEnabled() {
       }, "warn");
       updaterAutoInstallInFlight = false;
       updaterInstallGuardActive = false;
-      if (isStartupStatusPanelLifecycleActive()) {
-        setStatusPanelPhase(
-          STATUS_PANEL_PHASE.FAILED,
-          {
-            title: "Falha ao atualizar",
-            subtitle: "Abrindo a versão atual",
-            detail: message || "Não foi possível concluir a atualização automática.",
-            showProgressBar: true,
-            showProgress: false,
-            indeterminate: false,
-          },
-          {
-            force: true,
-          },
-        );
-        scheduleStatusPanelAutoHide(1_250, STATUS_PANEL_PHASE.FAILED);
-      }
       restoreWindowsAfterUpdateFlow();
     } finally {
       logStartupDiagnostic("updater:startup-sequence-finished", {
@@ -3376,16 +3273,6 @@ async function runStartupAutoUpdateWithGuardTimeout() {
     updaterAutoInstallInFlight = false;
     updaterInstallGuardActive = false;
     console.warn(`[updater] startup update check timed out after ${STARTUP_AUTO_UPDATE_BLOCK_TIMEOUT_MS}ms; continuing app launch.`);
-    if (isStartupStatusPanelLifecycleActive()) {
-      setStatusPanelPhase(STATUS_PANEL_PHASE.LOADING_SHELL, {
-        title: "Carregando Messly",
-        subtitle: "Abrindo aplicativo",
-        showProgressBar: true,
-        indeterminate: true,
-      }, {
-        force: true,
-      });
-    }
     restoreWindowsAfterUpdateFlow();
     logStartupDiagnostic("updater:startup-gate-timeout", {
       blockTimeoutMs: STARTUP_AUTO_UPDATE_BLOCK_TIMEOUT_MS,
@@ -4176,51 +4063,26 @@ function registerIpcHandlers() {
     if (!appUpdater?.checkForUpdates) {
       throw new Error("Updater indisponível.");
     }
-    setStatusPanelPhase(STATUS_PANEL_PHASE.CHECKING, {}, { force: true });
     return appUpdater.checkForUpdates();
   });
   ipcMain.handle("updater:download", async () => {
     if (!appUpdater?.downloadUpdate) {
       throw new Error("Updater indisponível.");
     }
-    setStatusPanelPhase(STATUS_PANEL_PHASE.DOWNLOADING, {
-      progressPercent: 4,
-      showProgress: true,
-    }, {
-      force: true,
-    });
     return appUpdater.downloadUpdate();
   });
   ipcMain.handle("updater:install", async () => {
     if (!appUpdater?.installUpdate) {
       throw new Error("Updater indisponível.");
     }
-    setStatusPanelPhase(STATUS_PANEL_PHASE.INSTALLING, {
-      indeterminate: true,
-    }, {
-      force: true,
-    });
     hideWindowsForUpdateFlow();
     updaterAutoInstallInFlight = true;
     updaterInstallGuardActive = true;
     try {
-      setStatusPanelPhase(STATUS_PANEL_PHASE.RELAUNCHING, {
-        title: "Atualização concluída",
-        subtitle: "Reiniciando aplicativo",
-        indeterminate: true,
-      }, {
-        force: true,
-      });
       return await appUpdater.installUpdate();
     } catch (error) {
       updaterAutoInstallInFlight = false;
       updaterInstallGuardActive = false;
-      setStatusPanelPhase(STATUS_PANEL_PHASE.FAILED, {
-        detail: "Não foi possível concluir a atualização.",
-      }, {
-        force: true,
-      });
-      scheduleStatusPanelAutoHide(1800, STATUS_PANEL_PHASE.FAILED);
       restoreWindowsAfterUpdateFlow();
       throw error;
     }
@@ -4352,15 +4214,6 @@ function createMainWindow() {
     shouldUseStartupStatusPanel,
   });
 
-  if (shouldUseStartupStatusPanel) {
-    setStatusPanelPhase(STATUS_PANEL_PHASE.LAUNCHING, {
-      progressPercent: 12,
-      indeterminate: true,
-    }, {
-      force: true,
-    });
-  }
-
   const mainWindow = new BrowserWindow({
     width: 1280,
     height: 720,
@@ -4397,20 +4250,6 @@ function createMainWindow() {
   mainWindow.on("close", (event) => {
     if (updaterInstallGuardActive && !isAppQuitting) {
       event.preventDefault();
-      if (isStartupStatusPanelLifecycleActive()) {
-        setStatusPanelPhase(
-          STATUS_PANEL_PHASE.INSTALLING,
-          {
-            title: "Instalando atualização",
-            subtitle: "Não feche o aplicativo",
-            detail: "A instalação precisa ser concluída para reiniciar.",
-            indeterminate: true,
-          },
-          {
-            force: true,
-          },
-        );
-      }
       return;
     }
 
@@ -4436,12 +4275,6 @@ function createMainWindow() {
     });
     if (mainWindow.isDestroyed()) {
       return;
-    }
-    if (!mainWindowFirstFrameReady && shouldUseStartupStatusPanel) {
-      setStatusPanelPhase(STATUS_PANEL_PHASE.LOADING_SHELL, {
-        progressPercent: 72,
-        indeterminate: true,
-      });
     }
     if (mainWindowFirstFrameReady) {
       revealMainWindowAfterFirstFrame({ startMinimized });
@@ -4729,19 +4562,6 @@ function createMainWindow() {
       validatedURL: String(context.validatedURL ?? "").trim() || null,
     }, "warn");
 
-    if (shouldUseStartupStatusPanel) {
-      setStatusPanelPhase(STATUS_PANEL_PHASE.RETRYING, {
-        title: "Reconectando ao Messly",
-        subtitle: `Tentativa ${Math.min(rendererRetryCount + 1, RENDERER_BOOTSTRAP_MAX_RETRIES + 1)} de ${RENDERER_BOOTSTRAP_MAX_RETRIES + 1}`,
-        showProgressBar: true,
-        showProgress: false,
-        indeterminate: true,
-        progressPercent: 34,
-      }, {
-        force: true,
-      });
-    }
-
     clearRendererRetryTimer();
     rendererRetryTimer = setTimeout(() => {
       rendererRetryTimer = null;
@@ -4812,19 +4632,6 @@ function createMainWindow() {
         reason: String(context.reason ?? "").trim() || null,
         details: failureDetails,
       }, "warn");
-      if (shouldUseStartupStatusPanel) {
-        setStatusPanelPhase(STATUS_PANEL_PHASE.LOADING_SHELL, {
-          title: "Carregando Messly",
-          subtitle: "Usando interface local",
-          detail: "Conexao com o servidor oscilando. Continuando com modo local.",
-          showProgressBar: true,
-          showProgress: false,
-          indeterminate: true,
-          progressPercent: 64,
-        }, {
-          force: true,
-        });
-      }
       rendererRetryCount = 0;
       rendererUrl = bundledRendererFallbackUrl;
       void loadMainRendererUrl("bundled-fallback");
@@ -4854,19 +4661,6 @@ function createMainWindow() {
     rendererFailureHandledForActiveAttempt = false;
     const normalizedSource = String(source ?? "initial").trim() || "initial";
     scheduleMainWindowFirstFrameFallback(mainWindow, startMinimized);
-
-    if (shouldUseStartupStatusPanel && (normalizedSource === "retry" || normalizedSource === "bundled-fallback")) {
-      setStatusPanelPhase(STATUS_PANEL_PHASE.LOADING_SHELL, {
-        title: "Carregando Messly",
-        subtitle: normalizedSource === "bundled-fallback" ? "Aplicando fallback local" : "Reconectando interface",
-        showProgressBar: true,
-        showProgress: false,
-        indeterminate: true,
-        progressPercent: 64,
-      }, {
-        force: true,
-      });
-    }
 
     logStartupDiagnostic("renderer:load-attempt", {
       source: normalizedSource,
@@ -5106,7 +4900,6 @@ app.whenReady().then(async () => {
     BLOCK_MAIN_WINDOW_ON_STARTUP_UPDATE;
   if (shouldUseStartupStatusPanel) {
     beginStartupStatusPanelLifecycle();
-    setStatusPanelPhase(STATUS_PANEL_PHASE.CHECKING, {}, { force: true });
   }
 
   const initializeTray = async () => {
@@ -5237,5 +5030,3 @@ app.on("window-all-closed", () => {
     app.quit();
   }
 });
-
-
