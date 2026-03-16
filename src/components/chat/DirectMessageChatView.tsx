@@ -5468,10 +5468,10 @@ export default function DirectMessageChatView({
   }, [voiceCallElapsedTick, voiceCallStartedAtMs]);
 
   const shouldShowVoiceCallPanel = isVoiceCallActive || isVoiceCallConnecting;
-  const shouldHideVoiceCallChrome = shouldShowVoiceCallPanel;
-  const voiceCallButtonActive = isVoiceCallActive || isVoiceCallConnecting;
   const hasIncomingVoiceInvite = Boolean(incomingVoiceInviteFromUserId) && !shouldShowVoiceCallPanel;
   const hasVoiceCallRejoinFallback = Boolean(voiceCallRejoinFallback) && !hasIncomingVoiceInvite && !shouldShowVoiceCallPanel;
+  const shouldHideVoiceCallChrome = shouldShowVoiceCallPanel || hasVoiceCallRejoinFallback;
+  const voiceCallButtonActive = isVoiceCallActive || isVoiceCallConnecting;
   const incomingVoiceInviteDisplayName =
     incomingVoiceInviteFromUserId && incomingVoiceInviteFromUserId === String(targetUser.userId ?? "").trim()
       ? safeTargetDisplayName

@@ -169,11 +169,12 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: #4b5563;
+  background: transparent;
+  border: 0;
 }
 
 .dm-chat__rejoin-stage-btn--icon.dm-chat__rejoin-stage-btn--accept {
-  background: #4b5563;
+  background: transparent;
 }
 
 .dm-chat__rejoin-stage-btn--icon:disabled {
