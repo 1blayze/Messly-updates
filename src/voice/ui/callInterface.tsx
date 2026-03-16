@@ -38,6 +38,17 @@ function formatMetric(value: number | null, suffix: string): string {
   return `${value}${suffix}`;
 }
 
+function formatTimeMetric(value: number | null): string {
+  if (value == null || !Number.isFinite(value)) {
+    return "--";
+  }
+  if (value <= 0) {
+    return "<1 ms";
+  }
+  const rounded = value >= 10 ? Math.round(value) : Number(value.toFixed(1));
+  return `${rounded} ms`;
+}
+
 function getConnectionLabel(state: VoiceConnectionState): string {
   switch (state) {
     case "connecting":
@@ -184,9 +195,9 @@ export default function VoiceCallInterface({
             {diagnostics.map((row) => (
               <article key={row.userId} className="voice-call-panel__debug-row">
                 <p className="voice-call-panel__debug-user">{row.userId}</p>
-                <p className="voice-call-panel__debug-metric">Ping: {formatMetric(row.pingMs, " ms")}</p>
-                <p className="voice-call-panel__debug-metric">Latencia: {formatMetric(row.latencyMs, " ms")}</p>
-                <p className="voice-call-panel__debug-metric">Jitter: {formatMetric(row.jitterMs, " ms")}</p>
+                <p className="voice-call-panel__debug-metric">Ping: {formatTimeMetric(row.pingMs)}</p>
+                <p className="voice-call-panel__debug-metric">Latencia: {formatTimeMetric(row.latencyMs)}</p>
+                <p className="voice-call-panel__debug-metric">Jitter: {formatTimeMetric(row.jitterMs)}</p>
                 <p className="voice-call-panel__debug-metric">Loss: {formatMetric(row.packetLossPercent, "%")}</p>
                 <p className="voice-call-panel__debug-metric">In: {formatMetric(row.inboundBitrateKbps, " kbps")}</p>
                 <p className="voice-call-panel__debug-metric">Out: {formatMetric(row.outboundBitrateKbps, " kbps")}</p>

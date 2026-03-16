@@ -275,6 +275,10 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
+function toMilliseconds(seconds: number): number {
+  return Number((seconds * 1_000).toFixed(1));
+}
+
 function toDisplayName(nameRaw: string | null | undefined, fallback: string): string {
   const normalized = String(nameRaw ?? "").trim();
   return normalized || fallback;
@@ -1449,9 +1453,9 @@ export class VoiceCallClient {
             candidatePair.nominated === true ||
             candidatePair.state === "succeeded";
           if (isActivePair && typeof candidatePair.currentRoundTripTime === "number") {
-            candidatePairRttMs = Math.round(candidatePair.currentRoundTripTime * 1_000);
+            candidatePairRttMs = toMilliseconds(candidatePair.currentRoundTripTime);
           } else if (candidatePairRttMs == null && typeof candidatePair.currentRoundTripTime === "number") {
-            candidatePairRttMs = Math.round(candidatePair.currentRoundTripTime * 1_000);
+            candidatePairRttMs = toMilliseconds(candidatePair.currentRoundTripTime);
           }
         }
 
@@ -1466,7 +1470,7 @@ export class VoiceCallClient {
           };
           inboundBytes += typeof inbound.bytesReceived === "number" ? inbound.bytesReceived : 0;
           if (typeof inbound.jitter === "number") {
-            const nextJitterMs = Math.round(inbound.jitter * 1_000);
+            const nextJitterMs = toMilliseconds(inbound.jitter);
             jitterMs = jitterMs == null ? nextJitterMs : Math.max(jitterMs, nextJitterMs);
           }
           inboundPacketsLost += typeof inbound.packetsLost === "number" ? inbound.packetsLost : 0;
@@ -1483,29 +1487,29 @@ export class VoiceCallClient {
         if (report.type === "remote-inbound-rtp" && (report as RTCStats & { kind?: string }).kind === "audio") {
           const remoteInbound = report as RTCStats & { roundTripTime?: number };
           if (typeof remoteInbound.roundTripTime === "number") {
-            remoteInboundRttMs = Math.round(remoteInbound.roundTripTime * 1_000);
+            remoteInboundRttMs = toMilliseconds(remoteInbound.roundTripTime);
           }
         }
 
         if (report.type === "remote-outbound-rtp" && (report as RTCStats & { kind?: string }).kind === "audio") {
           const remoteOutbound = report as RTCStats & { roundTripTime?: number };
           if (typeof remoteOutbound.roundTripTime === "number") {
-            remoteOutboundRttMs = Math.round(remoteOutbound.roundTripTime * 1_000);
+            remoteOutboundRttMs = toMilliseconds(remoteOutbound.roundTripTime);
           }
         }
       });
       if (selectedCandidatePairId) {
         const selectedPair = stats.get(selectedCandidatePairId) as (RTCStats & { currentRoundTripTime?: number }) | undefined;
         if (selectedPair && typeof selectedPair.currentRoundTripTime === "number") {
-          candidatePairRttMs = Math.round(selectedPair.currentRoundTripTime * 1_000);
+          candidatePairRttMs = toMilliseconds(selectedPair.currentRoundTripTime);
         }
       }
       const packetTotal = inboundPacketsLost + inboundPacketsReceived;
       packetLossPercent = packetTotal > 0 ? Number(((inboundPacketsLost / packetTotal) * 100).toFixed(2)) : null;
       pingMs = candidatePairRttMs ?? remoteInboundRttMs ?? remoteOutboundRttMs ?? this.lastSignalingRttMs;
       latencyMs = jitterBufferEmittedCount > 0
-        ? Math.round((jitterBufferDelaySeconds / jitterBufferEmittedCount) * 1_000)
-        : (pingMs != null ? Math.round(pingMs / 2) : null);
+        ? toMilliseconds(jitterBufferDelaySeconds / jitterBufferEmittedCount)
+        : (pingMs != null ? Number((pingMs / 2).toFixed(1)) : null);
       this.adjustPeerBitrate(peerContext, packetLossPercent, jitterMs);
       const connectionQuality = inferConnectionQuality(pingMs, jitterMs, packetLossPercent);
 
