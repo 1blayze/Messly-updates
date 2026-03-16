@@ -130,14 +130,8 @@ const PROJECT_SCOPED_REFRESH_TOKEN_STORAGE_KEY = (() => {
 })();
 const TURNSTILE_CSP_SOURCE = "https://challenges.cloudflare.com";
 const CLOUDFLARE_INSIGHTS_SCRIPT_SOURCE = "https://static.cloudflareinsights.com";
-const STATUS_PANEL_ENABLED = (() => {
-  const rawValue = String(process.env.MESSLY_ENABLE_STARTUP_STATUS_PANEL ?? "").trim().toLowerCase();
-  if (rawValue) {
-    return !["0", "false", "off", "no"].includes(rawValue);
-  }
-  // Enabled by default in packaged builds to guarantee pre-launch update visibility.
-  return app.isPackaged;
-})();
+// Startup update UI is handled by the C# launcher. Keep Electron panel disabled.
+const STATUS_PANEL_ENABLED = false;
 const STATUS_PANEL_PROGRESS_BYTES_VISIBILITY_THRESHOLD = 0;
 const STATUS_PANEL_PHASE = Object.freeze({
   IDLE: "idle",
