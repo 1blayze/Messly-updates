@@ -61,7 +61,7 @@ gsap.registerPlugin(ScrollToPlugin);
 
 const headerVoiceCallIconUrl = new URL("../../assets/icons/ui/Calling.svg", import.meta.url).href;
 const headerVideoOffIconUrl = new URL("../../assets/icons/ui/video-off.svg", import.meta.url).href;
-const rejoinCameraIconUrl = new URL("../../assets/icons/ui/Camera.svg", import.meta.url).href;
+const rejoinCameraIconUrl = new URL("../../assets/icons/ui/Video.svg", import.meta.url).href;
 const VOICE_CALL_SIGNAL_PREFIX = "__messly_voice_call_signal__:";
 const VOICE_CALL_INVITE_TTL_MS = 45_000;
 const AUDIO_SETTINGS_STORAGE_KEY_PREFIX = "messly:audio-settings:";
