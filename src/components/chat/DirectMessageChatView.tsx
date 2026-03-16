@@ -5941,40 +5941,63 @@ export default function DirectMessageChatView({
           {hasIncomingVoiceInvite ? (
             <section className="dm-chat__rejoin-stage dm-chat__rejoin-stage--compact" aria-label="Convite de chamada de voz">
               <div className="dm-chat__rejoin-stage-surface dm-chat__rejoin-stage-surface--compact">
-                <img
-                  className="dm-chat__rejoin-stage-avatar"
-                  src={targetAvatarSrc}
-                  alt={`Avatar de ${incomingVoiceInviteDisplayName}`}
-                  loading="lazy"
-                  onError={(event) => {
-                    const target = event.currentTarget;
-                    if (target.src !== targetFallbackAvatar) {
-                      target.src = targetFallbackAvatar;
-                    }
-                  }}
-                />
+                <div className="dm-chat__incoming-avatars" aria-hidden="true">
+                  <img
+                    className="dm-chat__rejoin-stage-avatar dm-chat__rejoin-stage-avatar--incoming dm-chat__rejoin-stage-avatar--incoming-local"
+                    src={currentAvatarSrc}
+                    alt=""
+                    loading="lazy"
+                    onError={(event) => {
+                      const target = event.currentTarget;
+                      if (target.src !== currentFallbackAvatar) {
+                        target.src = currentFallbackAvatar;
+                      }
+                    }}
+                  />
+                  <img
+                    className="dm-chat__rejoin-stage-avatar dm-chat__rejoin-stage-avatar--incoming dm-chat__rejoin-stage-avatar--incoming-remote"
+                    src={targetAvatarSrc}
+                    alt=""
+                    loading="lazy"
+                    onError={(event) => {
+                      const target = event.currentTarget;
+                      if (target.src !== targetFallbackAvatar) {
+                        target.src = targetFallbackAvatar;
+                      }
+                    }}
+                  />
+                </div>
                 <div
-                  className="dm-chat__rejoin-stage-controls dm-chat__rejoin-stage-controls--icon"
+                  className="dm-chat__rejoin-stage-controls dm-chat__rejoin-stage-controls--incoming"
                   role="group"
                   aria-label="Acoes do convite de chamada"
                 >
                   <button
                     type="button"
-                    className="dm-chat__rejoin-stage-btn dm-chat__rejoin-stage-btn--icon dm-chat__rejoin-stage-btn--accept"
-                    onClick={handleAcceptIncomingVoiceInvite}
-                    aria-label="Entrar na chamada"
-                    title="Entrar na chamada"
+                    className="dm-chat__rejoin-stage-btn dm-chat__rejoin-stage-btn--incoming dm-chat__rejoin-stage-btn--incoming-video"
+                    aria-label="Entrar com video em breve"
+                    title="Entrar com video em breve"
+                    disabled
                   >
-                    <img className="dm-chat__rejoin-stage-btn-icon" src={headerVoiceCallIconUrl} alt="" aria-hidden="true" />
+                    <img className="dm-chat__rejoin-stage-btn-icon dm-chat__rejoin-stage-btn-icon--incoming" src={rejoinCameraIconUrl} alt="" aria-hidden="true" />
                   </button>
                   <button
                     type="button"
-                    className="dm-chat__rejoin-stage-btn dm-chat__rejoin-stage-btn--icon dm-chat__rejoin-stage-btn--icon-danger"
+                    className="dm-chat__rejoin-stage-btn dm-chat__rejoin-stage-btn--incoming dm-chat__rejoin-stage-btn--incoming-accept"
+                    onClick={handleAcceptIncomingVoiceInvite}
+                    aria-label="Atender chamada"
+                    title="Atender chamada"
+                  >
+                    <img className="dm-chat__rejoin-stage-btn-icon dm-chat__rejoin-stage-btn-icon--incoming" src={headerVoiceCallIconUrl} alt="" aria-hidden="true" />
+                  </button>
+                  <button
+                    type="button"
+                    className="dm-chat__rejoin-stage-btn dm-chat__rejoin-stage-btn--incoming dm-chat__rejoin-stage-btn--incoming-decline"
                     onClick={handleDismissIncomingVoiceInvite}
                     aria-label="Ignorar chamada"
                     title="Ignorar chamada"
                   >
-                    <MaterialSymbolIcon className="dm-chat__rejoin-stage-btn-glyph" name="close" size={20} />
+                    <MaterialSymbolIcon className="dm-chat__rejoin-stage-btn-glyph dm-chat__rejoin-stage-btn-glyph--incoming" name="close" size={22} />
                   </button>
                 </div>
               </div>

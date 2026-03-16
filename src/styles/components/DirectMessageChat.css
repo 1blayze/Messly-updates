@@ -101,6 +101,26 @@
   box-shadow: 0 8px 18px rgba(0, 0, 0, 0.35);
 }
 
+.dm-chat__incoming-avatars {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.dm-chat__rejoin-stage-avatar--incoming {
+  width: 84px;
+  height: 84px;
+}
+
+.dm-chat__rejoin-stage-avatar--incoming-local {
+  margin-right: -16px;
+  z-index: 1;
+}
+
+.dm-chat__rejoin-stage-avatar--incoming-remote {
+  z-index: 2;
+}
+
 .dm-chat__rejoin-stage-controls {
   margin: 0 auto;
   display: inline-flex;
@@ -115,6 +135,14 @@
   border: 1px solid rgba(255, 255, 255, 0.12);
   background: #131416;
   box-shadow: 0 8px 18px rgba(0, 0, 0, 0.42);
+}
+
+.dm-chat__rejoin-stage-controls--incoming {
+  gap: 12px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
 .dm-chat__rejoin-stage-title {
@@ -204,6 +232,63 @@
 .dm-chat__rejoin-stage-btn--icon-danger:hover,
 .dm-chat__rejoin-stage-btn--icon-danger:focus-visible {
   background: #f05f70;
+}
+
+.dm-chat__rejoin-stage-btn--incoming {
+  width: 68px;
+  height: 48px;
+  min-width: 0;
+  padding: 0;
+  border-radius: 12px;
+  border: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 120ms ease, filter 120ms ease, background-color 120ms ease;
+}
+
+.dm-chat__rejoin-stage-btn--incoming:hover,
+.dm-chat__rejoin-stage-btn--incoming:focus-visible {
+  transform: translateY(-1px);
+  filter: brightness(1.06);
+}
+
+.dm-chat__rejoin-stage-btn--incoming:active {
+  transform: translateY(0);
+  filter: brightness(1);
+}
+
+.dm-chat__rejoin-stage-btn--incoming:disabled {
+  opacity: 1;
+  cursor: not-allowed;
+}
+
+.dm-chat__rejoin-stage-btn--incoming:disabled:hover,
+.dm-chat__rejoin-stage-btn--incoming:disabled:focus-visible {
+  transform: none;
+  filter: none;
+}
+
+.dm-chat__rejoin-stage-btn--incoming-video {
+  background: #1f6a3b;
+}
+
+.dm-chat__rejoin-stage-btn--incoming-accept {
+  background: #40b46a;
+}
+
+.dm-chat__rejoin-stage-btn--incoming-decline {
+  background: #de4454;
+}
+
+.dm-chat__rejoin-stage-btn-icon--incoming {
+  width: 22px;
+  height: 22px;
+}
+
+.dm-chat__rejoin-stage-btn-glyph--incoming {
+  font-size: 22px;
+  color: #ffffff;
 }
 
 .dm-chat__rejoin-stage-btn-icon {
