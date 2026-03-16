@@ -38,6 +38,10 @@
   grid-template-columns: minmax(0, 1fr) 320px;
 }
 
+.dm-chat__body--voice-call-focus {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .dm-chat__main {
   min-width: 0;
   min-height: 0;

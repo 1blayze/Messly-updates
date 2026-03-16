@@ -5467,6 +5467,7 @@ export default function DirectMessageChatView({
   }, [voiceCallElapsedTick, voiceCallStartedAtMs]);
 
   const shouldShowVoiceCallPanel = isVoiceCallActive || isVoiceCallConnecting;
+  const shouldHideVoiceCallChrome = shouldShowVoiceCallPanel;
   const voiceCallButtonActive = isVoiceCallActive || isVoiceCallConnecting;
   const hasIncomingVoiceInvite = Boolean(incomingVoiceInviteFromUserId) && !shouldShowVoiceCallPanel;
   const hasVoiceCallRejoinFallback = Boolean(voiceCallRejoinFallback) && !hasIncomingVoiceInvite && !shouldShowVoiceCallPanel;
@@ -5478,7 +5479,11 @@ export default function DirectMessageChatView({
   const voiceCallRejoinAvatarSrc = String(voiceCallRejoinFallback?.avatarSrc ?? "").trim() || targetAvatarSrc;
 
   return (
-    <section className="dm-chat" aria-label={`Conversa com ${safeTargetDisplayName}`}>
+    <section
+      className={`dm-chat${shouldHideVoiceCallChrome ? " dm-chat--voice-call-focus" : ""}`}
+      aria-label={`Conversa com ${safeTargetDisplayName}`}
+    >
+      {!shouldHideVoiceCallChrome ? (
       <header className="dm-chat__header" role="banner">
         <div className="dm-chat__header-user">
           <div className="dm-chat__header-avatar-wrap">
@@ -5571,8 +5576,9 @@ export default function DirectMessageChatView({
           </label>
         </div>
       </header>
+      ) : null}
 
-      <div className="dm-chat__body">
+      <div className={`dm-chat__body${shouldHideVoiceCallChrome ? " dm-chat__body--voice-call-focus" : ""}`}>
         <div className="dm-chat__main">
           {hasIncomingVoiceInvite || hasVoiceCallRejoinFallback ? (
             <section
@@ -6209,6 +6215,7 @@ export default function DirectMessageChatView({
       </form>
         </div>
 
+        {!shouldHideVoiceCallChrome ? (
         <aside
           className="dm-chat__profile-sidebar"
           aria-label={`Perfil de ${safeTargetDisplayName}`}
@@ -6419,6 +6426,7 @@ export default function DirectMessageChatView({
             </div>
           </section>
         </aside>
+        ) : null}
       </div>
 
       <EmojiPopover
