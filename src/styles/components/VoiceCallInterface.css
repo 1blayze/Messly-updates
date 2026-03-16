@@ -1,10 +1,12 @@
 .voice-call-panel {
-  width: min(360px, 100%);
+  --voice-call-card-bg: #1a1a1a;
+  width: 100%;
+  max-width: 100%;
   border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.12);
-  background: linear-gradient(180deg, rgba(24, 27, 34, 0.92), rgba(17, 20, 26, 0.94));
+  background: var(--voice-call-card-bg);
   box-shadow: 0 16px 34px rgba(0, 0, 0, 0.34);
-  padding: 12px;
+  padding: 0 12px 12px;
   display: grid;
   gap: 10px;
 }
@@ -53,7 +55,7 @@
 .voice-call-participant {
   border-radius: 10px;
   border: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--voice-call-card-bg);
   padding: 8px;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
@@ -154,7 +156,7 @@
   min-height: 36px;
   border-radius: 9px;
   border: 1px solid rgba(255, 255, 255, 0.14);
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--voice-call-card-bg);
   color: #f2f6ff;
   display: inline-flex;
   align-items: center;
@@ -167,7 +169,7 @@
 
 .voice-call-panel__control-btn:hover,
 .voice-call-panel__control-btn:focus-visible {
-  background: rgba(255, 255, 255, 0.12);
+  background: var(--voice-call-card-bg);
 }
 
 .voice-call-panel__control-btn:focus-visible {
@@ -177,17 +179,17 @@
 
 .voice-call-panel__control-btn--active {
   border-color: rgba(97, 132, 255, 0.55);
-  background: rgba(97, 132, 255, 0.2);
+  background: var(--voice-call-card-bg);
 }
 
 .voice-call-panel__control-btn--danger {
   border-color: rgba(240, 97, 97, 0.55);
-  background: rgba(240, 97, 97, 0.18);
+  background: var(--voice-call-card-bg);
 }
 
 .voice-call-panel__control-btn--danger:hover,
 .voice-call-panel__control-btn--danger:focus-visible {
-  background: rgba(240, 97, 97, 0.28);
+  background: var(--voice-call-card-bg);
 }
 
 .voice-call-panel__control-btn:disabled {
@@ -226,7 +228,7 @@
 .voice-call-panel__debug-row {
   border-radius: 8px;
   border: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--voice-call-card-bg);
   padding: 6px 8px;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
