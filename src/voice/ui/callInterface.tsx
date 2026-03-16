@@ -1,10 +1,15 @@
-import MaterialSymbolIcon from "../../components/ui/MaterialSymbolIcon";
 import type {
   VoiceConnectionState,
   VoiceDiagnosticsPeerSnapshot,
   VoiceParticipantState,
 } from "../client/webrtc";
 import "../../styles/components/VoiceCallInterface.css";
+
+const micIconUrl = new URL("../../assets/icons/ui/Microphone 1.svg", import.meta.url).href;
+const micOffIconUrl = new URL("../../assets/icons/ui/Microphone Off.svg", import.meta.url).href;
+const cameraIconUrl = new URL("../../assets/icons/ui/Video.svg", import.meta.url).href;
+const screenIconUrl = new URL("../../assets/icons/ui/screen.svg", import.meta.url).href;
+const endCallIconUrl = new URL("../../assets/icons/ui/Call.svg", import.meta.url).href;
 
 export interface VoiceCallInterfaceProps {
   isOpen: boolean;
@@ -20,73 +25,12 @@ export interface VoiceCallInterfaceProps {
   onLeave: () => void;
 }
 
-function formatElapsed(secondsRaw: number | null): string {
-  if (!secondsRaw || secondsRaw < 0) {
-    return "00:00";
-  }
-
-  const seconds = Math.floor(secondsRaw);
-  const minutes = Math.floor(seconds / 60);
-  const remaining = seconds % 60;
-  return `${String(minutes).padStart(2, "0")}:${String(remaining).padStart(2, "0")}`;
-}
-
-function formatMetric(value: number | null, suffix: string): string {
-  if (value == null || !Number.isFinite(value)) {
-    return "--";
-  }
-  return `${value}${suffix}`;
-}
-
-function formatTimeMetric(value: number | null): string {
-  if (value == null || !Number.isFinite(value)) {
-    return "--";
-  }
-  if (value <= 0) {
-    return "<1 ms";
-  }
-  const rounded = value >= 10 ? Math.round(value) : Number(value.toFixed(1));
-  return `${rounded} ms`;
-}
-
-function getConnectionLabel(state: VoiceConnectionState): string {
-  switch (state) {
-    case "connecting":
-      return "Conectando";
-    case "connected":
-      return "Conectado";
-    case "reconnecting":
-      return "Reconectando";
-    case "closed":
-      return "Encerrado";
-    case "idle":
-    default:
-      return "Aguardando";
-  }
-}
-
-function formatConnectionQuality(value: "excellent" | "good" | "fair" | "poor" | "unknown"): string {
-  switch (value) {
-    case "excellent":
-      return "Excelente";
-    case "good":
-      return "Boa";
-    case "fair":
-      return "Media";
-    case "poor":
-      return "Ruim";
-    case "unknown":
-    default:
-      return "Desconhecida";
-  }
-}
-
 export default function VoiceCallInterface({
   isOpen,
   isConnecting,
-  connectionState,
   participants,
   localMuted,
+  connectionState,
   elapsedSeconds,
   diagnostics,
   errorMessage,
@@ -94,72 +38,36 @@ export default function VoiceCallInterface({
   onToggleMute,
   onLeave,
 }: VoiceCallInterfaceProps) {
+  void connectionState;
+  void elapsedSeconds;
+  void diagnostics;
+  void errorMessage;
+  void microphoneWarning;
+
   if (!isOpen) {
     return null;
   }
 
+  const sortedParticipants = [...participants].sort((left, right) => Number(right.isLocal) - Number(left.isLocal));
+  const avatarParticipants = sortedParticipants.slice(0, 2);
+
   return (
     <aside className="voice-call-panel" aria-label="Chamada de voz">
-      <header className="voice-call-panel__header">
-        <div className="voice-call-panel__header-copy">
-          <p className="voice-call-panel__title">Canal de voz</p>
-          <p className="voice-call-panel__subtitle">
-            {getConnectionLabel(connectionState)} | {formatElapsed(elapsedSeconds)}
-          </p>
-        </div>
-      </header>
-
-      {errorMessage ? <p className="voice-call-panel__error">{errorMessage}</p> : null}
-      {microphoneWarning ? <p className="voice-call-panel__warning">{microphoneWarning}</p> : null}
-
-      <section className="voice-call-panel__participants" aria-label="Participantes da chamada">
-        {participants.map((participant) => {
-          const speakingClass = participant.speaking ? " voice-call-participant--speaking" : "";
-          const mutedClass = participant.muted ? " voice-call-participant--muted" : "";
-          const normalizedLevel = Math.max(0, Math.min(1, participant.speakingLevel));
-          return (
-            <article
-              key={participant.userId}
-              className={`voice-call-participant${speakingClass}${mutedClass}`}
-              aria-label={`${participant.displayName}${participant.speaking ? " falando" : ""}`}
-            >
-              <div className="voice-call-participant__avatar-wrap">
-                <img
-                  className="voice-call-participant__avatar"
-                  src={participant.avatarSrc}
-                  alt={`Avatar de ${participant.displayName}`}
-                  loading="lazy"
-                />
-                {participant.speaking ? (
-                  <span
-                    className="voice-call-participant__speaking-ring"
-                    style={{
-                      opacity: Math.max(0.45, Math.min(1, normalizedLevel)),
-                    }}
-                    aria-hidden="true"
-                  />
-                ) : null}
-              </div>
-              <div className="voice-call-participant__meta">
-                <p className="voice-call-participant__name">
-                  {participant.displayName}
-                  {participant.isLocal ? " (Voce)" : ""}
-                </p>
-                <p className="voice-call-participant__status">
-                  {participant.muted ? "Microfone mutado" : "Microfone ativo"} | {participant.connectionState}
-                </p>
-                <div className="voice-call-participant__level-meter" aria-hidden="true">
-                  <span
-                    className="voice-call-participant__level-fill"
-                    style={{
-                      width: `${Math.max(2, Math.round(normalizedLevel * 100))}%`,
-                    }}
-                  />
-                </div>
-              </div>
-            </article>
-          );
-        })}
+      <section className="voice-call-panel__avatars" aria-label="Participantes da chamada">
+        {avatarParticipants.map((participant, index) => (
+          <div
+            key={participant.userId}
+            className={`voice-call-panel__avatar-wrap${participant.speaking ? " voice-call-panel__avatar-wrap--speaking" : ""}`}
+            style={{ zIndex: avatarParticipants.length - index }}
+          >
+            <img
+              className="voice-call-panel__avatar"
+              src={participant.avatarSrc}
+              alt={`Avatar de ${participant.displayName}`}
+              loading="lazy"
+            />
+          </div>
+        ))}
       </section>
 
       <section className="voice-call-panel__controls" aria-label="Controles da chamada">
@@ -171,8 +79,40 @@ export default function VoiceCallInterface({
           aria-label={localMuted ? "Desmutar microfone" : "Mutar microfone"}
           title={localMuted ? "Desmutar microfone" : "Mutar microfone"}
         >
-          <MaterialSymbolIcon name={localMuted ? "mic_off" : "mic"} size={18} />
-          <span>{localMuted ? "Desmutar" : "Mutar"}</span>
+          <img
+            className="voice-call-panel__control-icon"
+            src={localMuted ? micOffIconUrl : micIconUrl}
+            alt=""
+            aria-hidden="true"
+          />
+        </button>
+        <button
+          type="button"
+          className="voice-call-panel__control-btn"
+          aria-label="Video em breve"
+          title="Video em breve"
+          disabled
+        >
+          <img
+            className="voice-call-panel__control-icon"
+            src={cameraIconUrl}
+            alt=""
+            aria-hidden="true"
+          />
+        </button>
+        <button
+          type="button"
+          className="voice-call-panel__control-btn"
+          aria-label="Transmitir tela em breve"
+          title="Transmitir tela em breve"
+          disabled
+        >
+          <img
+            className="voice-call-panel__control-icon"
+            src={screenIconUrl}
+            alt=""
+            aria-hidden="true"
+          />
         </button>
         <button
           type="button"
@@ -181,31 +121,13 @@ export default function VoiceCallInterface({
           aria-label="Sair da chamada"
           title="Sair da chamada"
         >
-          <MaterialSymbolIcon name="close" size={18} />
-          <span>Sair</span>
+          <img
+            className="voice-call-panel__control-icon"
+            src={endCallIconUrl}
+            alt=""
+            aria-hidden="true"
+          />
         </button>
-      </section>
-
-      <section className="voice-call-panel__debug" aria-label="Diagnostico da conexao">
-        <p className="voice-call-panel__debug-title">Diagnostico (WebRTC)</p>
-        {diagnostics.length === 0 ? (
-          <p className="voice-call-panel__debug-empty">Coletando metricas...</p>
-        ) : (
-          <div className="voice-call-panel__debug-list">
-            {diagnostics.map((row) => (
-              <article key={row.userId} className="voice-call-panel__debug-row">
-                <p className="voice-call-panel__debug-user">{row.userId}</p>
-                <p className="voice-call-panel__debug-metric">Ping: {formatTimeMetric(row.pingMs)}</p>
-                <p className="voice-call-panel__debug-metric">Latencia: {formatTimeMetric(row.latencyMs)}</p>
-                <p className="voice-call-panel__debug-metric">Jitter: {formatTimeMetric(row.jitterMs)}</p>
-                <p className="voice-call-panel__debug-metric">Loss: {formatMetric(row.packetLossPercent, "%")}</p>
-                <p className="voice-call-panel__debug-metric">In: {formatMetric(row.inboundBitrateKbps, " kbps")}</p>
-                <p className="voice-call-panel__debug-metric">Out: {formatMetric(row.outboundBitrateKbps, " kbps")}</p>
-                <p className="voice-call-panel__debug-metric">Qualidade: {formatConnectionQuality(row.connectionQuality)}</p>
-              </article>
-            ))}
-          </div>
-        )}
       </section>
     </aside>
   );
