@@ -2,9 +2,9 @@ import { z } from "zod";
 import { getGatewayUrl, getSupabaseAccessToken } from "../../api/client";
 
 const DEFAULT_SIGNALING_PATH = "/voice";
-const SIGNALING_PING_INTERVAL_MS = 10_000;
-const SIGNALING_RECONNECT_BASE_DELAY_MS = 1_000;
-const SIGNALING_RECONNECT_MAX_DELAY_MS = 10_000;
+const SIGNALING_PING_INTERVAL_MS = 3_000;
+const SIGNALING_RECONNECT_BASE_DELAY_MS = 800;
+const SIGNALING_RECONNECT_MAX_DELAY_MS = 8_000;
 
 export type VoicePresenceConnectionState = "idle" | "connecting" | "connected" | "reconnecting" | "closed";
 export type VoiceCallSessionStatus = "IDLE" | "RINGING" | "CONNECTED" | "RECONNECTING" | "ENDED";
@@ -192,6 +192,7 @@ export class VoiceCallPresenceClient {
   private reconnectAttempt = 0;
   private reconnectTimerId: number | null = null;
   private pingIntervalId: number | null = null;
+  private lastPongAtMs = 0;
   private stopRequested = false;
   private latestCallSnapshot: VoiceCallSessionSnapshot | null = null;
 
@@ -238,6 +239,7 @@ export class VoiceCallPresenceClient {
     this.stopRequested = true;
     this.clearReconnectTimer();
     this.clearPingLoop();
+    this.lastPongAtMs = 0;
 
     const socket = this.socket;
     this.socket = null;
@@ -306,6 +308,7 @@ export class VoiceCallPresenceClient {
       }
       throw new Error("Monitor de voz cancelado.");
     }
+    this.lastPongAtMs = Date.now();
 
     socket.addEventListener("message", (event) => {
       this.handleSignalingMessage(String(event.data ?? ""));
@@ -315,6 +318,7 @@ export class VoiceCallPresenceClient {
       if (this.socket === socket) {
         this.socket = null;
       }
+      this.lastPongAtMs = 0;
       if (this.stopRequested) {
         return;
       }
@@ -335,6 +339,7 @@ export class VoiceCallPresenceClient {
     if (!payload) {
       return;
     }
+    this.lastPongAtMs = Date.now();
 
     switch (payload.type) {
       case "connected":
@@ -386,8 +391,10 @@ export class VoiceCallPresenceClient {
 
   private startPingLoop(): void {
     this.clearPingLoop();
+    this.lastPongAtMs = Date.now();
     this.sendSignal({ type: "ping", timestamp: Date.now() });
     this.pingIntervalId = window.setInterval(() => {
+      this.ensureSocketHealth();
       this.sendSignal({ type: "ping", timestamp: Date.now() });
     }, SIGNALING_PING_INTERVAL_MS);
   }
@@ -396,6 +403,26 @@ export class VoiceCallPresenceClient {
     if (this.pingIntervalId != null) {
       window.clearInterval(this.pingIntervalId);
       this.pingIntervalId = null;
+    }
+  }
+
+  private ensureSocketHealth(): void {
+    const socket = this.socket;
+    if (!socket || socket.readyState !== WebSocket.OPEN || this.stopRequested) {
+      return;
+    }
+    if (this.lastPongAtMs <= 0) {
+      this.lastPongAtMs = Date.now();
+      return;
+    }
+    const silentMs = Date.now() - this.lastPongAtMs;
+    if (silentMs <= SIGNALING_PING_INTERVAL_MS * 3) {
+      return;
+    }
+    try {
+      socket.close(4001, "VOICE_WATCH_PING_TIMEOUT");
+    } catch {
+      // Ignore close failures.
     }
   }
 

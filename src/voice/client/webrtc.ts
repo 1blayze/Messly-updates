@@ -15,20 +15,25 @@ import {
 import { VoiceActivityDetector } from "./voiceDetection";
 
 const DEFAULT_SIGNALING_PATH = "/voice";
-const SIGNALING_PING_INTERVAL_MS = 5_000;
+const SIGNALING_PING_INTERVAL_MS = 3_000;
 const SIGNALING_RECONNECT_BASE_DELAY_MS = 800;
 const SIGNALING_RECONNECT_MAX_DELAY_MS = 8_000;
 const DIAGNOSTICS_POLL_INTERVAL_MS = 2_000;
 const JOIN_RETRY_INTERVAL_MS = 2_500;
-const VOICE_AUDIO_TARGET_MAX_BITRATE = 192_000;
+const VOICE_AUDIO_TARGET_MAX_BITRATE = 256_000;
 const VOICE_AUDIO_FLOOR_MAX_BITRATE = 48_000;
 const VOICE_AUDIO_STEP_UP_BITRATE = 16_000;
 const VOICE_AUDIO_STEP_DOWN_SOFT_FACTOR = 0.75;
 const VOICE_AUDIO_STEP_DOWN_HARD_FACTOR = 0.55;
 const VOICE_AUDIO_GOOD_SAMPLE_THRESHOLD = 3;
 const VOICE_AUDIO_DEGRADED_SAMPLE_THRESHOLD = 2;
-const SPEAKING_LEVEL_SIGNAL_INTERVAL_MS = 220;
+const SPEAKING_LEVEL_SIGNAL_INTERVAL_MS = 120;
 const LOCAL_LEVEL_UI_INTERVAL_MS = 80;
+const OPUS_SAMPLE_RATE = 48_000;
+const OPUS_CHANNELS = 1;
+const OPUS_FRAME_DURATION = 20;
+const VOICE_TARGET_LATENCY_MS = 60;
+const VOICE_MAX_JITTER_MS = 30;
 
 const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
   {
@@ -368,8 +373,9 @@ function applyOpusVoiceProfile(sdpRaw: string): string {
     .filter((line) => line.length > 0);
 
   const opusPayloadTypes = new Set<string>();
+  const opusRtpMapPattern = new RegExp(`^a=rtpmap:(\\d+)\\s+opus\\/${OPUS_SAMPLE_RATE}(?:\\/\\d+)?$`, "i");
   for (const line of lines) {
-    const match = /^a=rtpmap:(\d+)\s+opus\/48000(?:\/\d+)?$/i.exec(line);
+    const match = opusRtpMapPattern.exec(line);
     if (match?.[1]) {
       opusPayloadTypes.add(match[1]);
     }
@@ -383,7 +389,7 @@ function applyOpusVoiceProfile(sdpRaw: string): string {
   let sawPtime = false;
   for (const line of lines) {
     if (line.startsWith("a=ptime:")) {
-      outputLines.push("a=ptime:20");
+      outputLines.push(`a=ptime:${OPUS_FRAME_DURATION}`);
       sawPtime = true;
       continue;
     }
@@ -407,7 +413,7 @@ function applyOpusVoiceProfile(sdpRaw: string): string {
     existing.set("useinbandfec", "1");
     existing.set("usedtx", "1");
     existing.set("minptime", "10");
-    existing.set("maxplaybackrate", "48000");
+    existing.set("maxplaybackrate", String(OPUS_SAMPLE_RATE));
     outputLines.push(`a=fmtp:${payloadType} ${buildFmtpConfig(existing)}`);
     handledPayloadTypes.add(payloadType);
   }
@@ -417,11 +423,11 @@ function applyOpusVoiceProfile(sdpRaw: string): string {
       continue;
     }
     outputLines.push(
-      `a=fmtp:${payloadType} maxaveragebitrate=${VOICE_AUDIO_TARGET_MAX_BITRATE};stereo=0;sprop-stereo=0;useinbandfec=1;usedtx=1;minptime=10;maxplaybackrate=48000`,
+      `a=fmtp:${payloadType} maxaveragebitrate=${VOICE_AUDIO_TARGET_MAX_BITRATE};stereo=0;sprop-stereo=0;useinbandfec=1;usedtx=1;minptime=10;maxplaybackrate=${OPUS_SAMPLE_RATE}`,
     );
   }
   if (!sawPtime) {
-    outputLines.push("a=ptime:20");
+    outputLines.push(`a=ptime:${OPUS_FRAME_DURATION}`);
   }
 
   return `${outputLines.join("\r\n")}\r\n`;
@@ -438,15 +444,27 @@ function inferConnectionQuality(
   }
 
   const normalizedPing = pingMs ?? 80;
-  const normalizedJitter = jitterMs ?? 12;
+  const normalizedJitter = jitterMs ?? 14;
   const normalizedLoss = packetLossPercent ?? 0;
-  if (normalizedLoss <= 0.8 && normalizedJitter <= 10 && normalizedPing <= 70) {
+  if (
+    normalizedLoss <= 0.8
+    && normalizedJitter <= Math.max(12, Math.round(VOICE_MAX_JITTER_MS * 0.45))
+    && normalizedPing <= VOICE_TARGET_LATENCY_MS + 10
+  ) {
     return "excellent";
   }
-  if (normalizedLoss <= 2.0 && normalizedJitter <= 20 && normalizedPing <= 120) {
+  if (
+    normalizedLoss <= 2.0
+    && normalizedJitter <= Math.max(20, Math.round(VOICE_MAX_JITTER_MS * 0.75))
+    && normalizedPing <= VOICE_TARGET_LATENCY_MS + 45
+  ) {
     return "good";
   }
-  if (normalizedLoss <= 5.0 && normalizedJitter <= 40 && normalizedPing <= 220) {
+  if (
+    normalizedLoss <= 5.0
+    && normalizedJitter <= Math.max(40, Math.round(VOICE_MAX_JITTER_MS * 1.6))
+    && normalizedPing <= VOICE_TARGET_LATENCY_MS + 170
+  ) {
     return "fair";
   }
   return "poor";
@@ -463,15 +481,12 @@ function normalizeMediaPreferences(preferences: VoiceCallMediaPreferences | null
   const normalizedOutputVolume = Number.isFinite(requestedOutputVolume)
     ? Math.max(0, Math.min(200, requestedOutputVolume))
     : 100;
-  const requestedSampleRate = Number(preferences?.sampleRate ?? 48_000);
-  const requestedChannelCount = Number(preferences?.channelCount ?? 1);
+  const requestedSampleRate = Number(preferences?.sampleRate ?? OPUS_SAMPLE_RATE);
   const requestedTargetBitrate = Number(preferences?.targetBitrate ?? VOICE_AUDIO_TARGET_MAX_BITRATE);
   const normalizedSampleRate = Number.isFinite(requestedSampleRate)
-    ? Math.max(16_000, Math.min(48_000, Math.round(requestedSampleRate)))
-    : 48_000;
-  const normalizedChannelCount = Number.isFinite(requestedChannelCount)
-    ? Math.max(1, Math.min(2, Math.round(requestedChannelCount)))
-    : 1;
+    ? Math.max(16_000, Math.min(OPUS_SAMPLE_RATE, Math.round(requestedSampleRate)))
+    : OPUS_SAMPLE_RATE;
+  const normalizedChannelCount = OPUS_CHANNELS;
   const normalizedTargetBitrate = Number.isFinite(requestedTargetBitrate)
     ? Math.max(VOICE_AUDIO_FLOOR_MAX_BITRATE, Math.min(VOICE_AUDIO_TARGET_MAX_BITRATE, Math.round(requestedTargetBitrate)))
     : VOICE_AUDIO_TARGET_MAX_BITRATE;
@@ -533,6 +548,7 @@ export class VoiceCallClient {
   private readonly remoteAudioElements = new Map<string, HTMLAudioElement>();
   private pendingSpeakingState: PendingSpeakingState | null = null;
   private lastSignalingRttMs: number | null = null;
+  private lastSignalingPongAtMs = 0;
   private localMicrophoneWarning: string | null = null;
   private lastSpeakingLevelSignalAtMs = 0;
   private lastLocalLevelUiUpdateAtMs = 0;
@@ -640,8 +656,8 @@ export class VoiceCallClient {
         noiseSuppressionMode: this.mediaPreferences.noiseSuppressionMode,
         noiseSuppression: this.mediaPreferences.noiseSuppressionMode !== "off",
         autoGainControl: this.mediaPreferences.autoGainControl,
-        sampleRate: this.mediaPreferences.sampleRate ?? 48_000,
-        channelCount: this.mediaPreferences.channelCount ?? 1,
+        sampleRate: this.mediaPreferences.sampleRate ?? OPUS_SAMPLE_RATE,
+        channelCount: this.mediaPreferences.channelCount ?? OPUS_CHANNELS,
         latency: 0,
         deviceId: this.mediaPreferences.inputDeviceId,
         inputVolumePercent: this.mediaPreferences.inputVolumePercent,
@@ -668,6 +684,9 @@ export class VoiceCallClient {
         connectionState: "connecting",
       });
       this.localVoiceDetector = new VoiceActivityDetector(this.localStream, {
+        thresholdDb: -49,
+        speakingHangMs: 170,
+        smoothingTimeConstant: 0.06,
         onSpeakingChange: (speaking, level) => {
           const normalizedLevel = clamp(level, 0, 1);
           this.updateLocalParticipant({
@@ -721,6 +740,7 @@ export class VoiceCallClient {
     this.clearJoinRetryLoop();
     this.pendingSpeakingState = null;
     this.lastSignalingRttMs = null;
+    this.lastSignalingPongAtMs = 0;
     this.lastSpeakingLevelSignalAtMs = 0;
     this.lastLocalLevelUiUpdateAtMs = 0;
 
@@ -858,6 +878,7 @@ export class VoiceCallClient {
       }
       throw new Error("Conexao de voz cancelada.");
     }
+    this.lastSignalingPongAtMs = Date.now();
 
     socket.addEventListener("message", (event) => {
       this.handleSignalingMessage(String(event.data ?? ""));
@@ -869,6 +890,7 @@ export class VoiceCallClient {
       }
 
       this.joinedRoom = false;
+      this.lastSignalingPongAtMs = 0;
       this.clearJoinRetryLoop();
       if (this.leaving) {
         return;
@@ -893,6 +915,7 @@ export class VoiceCallClient {
     if (!payload) {
       return;
     }
+    this.lastSignalingPongAtMs = Date.now();
 
     switch (payload.type) {
       case "connected":
@@ -944,11 +967,16 @@ export class VoiceCallClient {
         return;
       case "pong": {
         const nowMs = Date.now();
+        this.lastSignalingPongAtMs = nowMs;
         const echoedAtMs = typeof payload.timestamp === "number" ? payload.timestamp : NaN;
         if (Number.isFinite(echoedAtMs)) {
           const rttMs = nowMs - echoedAtMs;
           if (rttMs >= 0 && rttMs <= 120_000) {
-            this.lastSignalingRttMs = Math.round(rttMs);
+            const previousRttMs = this.lastSignalingRttMs;
+            this.lastSignalingRttMs =
+              previousRttMs == null
+                ? Math.round(rttMs)
+                : Math.round((previousRttMs * 0.65) + (rttMs * 0.35));
           }
         }
         return;
@@ -1136,10 +1164,10 @@ export class VoiceCallClient {
         jitterBufferTarget?: number;
       };
       if ("playoutDelayHint" in receiver) {
-        receiver.playoutDelayHint = 0.04;
+        receiver.playoutDelayHint = VOICE_TARGET_LATENCY_MS / 1_000;
       }
       if ("jitterBufferTarget" in receiver) {
-        receiver.jitterBufferTarget = 0.035;
+        receiver.jitterBufferTarget = VOICE_MAX_JITTER_MS / 1_000;
       }
 
       const stream = event.streams[0] ?? remoteStream;
@@ -1317,6 +1345,7 @@ export class VoiceCallClient {
     peerContext: PeerConnectionContext,
     packetLossPercent: number | null,
     jitterMs: number | null,
+    latencyMs: number | null,
   ): void {
     const sender = peerContext.audioSender;
     if (!sender) {
@@ -1325,9 +1354,19 @@ export class VoiceCallClient {
 
     const normalizedLoss = packetLossPercent ?? 0;
     const normalizedJitter = jitterMs ?? 0;
-    const isHardDegradation = normalizedLoss >= 8 || normalizedJitter >= 80;
-    const isSoftDegradation = normalizedLoss >= 3 || normalizedJitter >= 35;
-    const isGood = normalizedLoss <= 1 && normalizedJitter <= 16;
+    const normalizedLatency = latencyMs ?? 0;
+    const isHardDegradation =
+      normalizedLoss >= 7
+      || normalizedJitter >= Math.max(55, Math.round(VOICE_MAX_JITTER_MS * 1.9))
+      || normalizedLatency >= VOICE_TARGET_LATENCY_MS + 90;
+    const isSoftDegradation =
+      normalizedLoss >= 2.5
+      || normalizedJitter >= Math.max(28, Math.round(VOICE_MAX_JITTER_MS * 1.15))
+      || normalizedLatency >= VOICE_TARGET_LATENCY_MS + 35;
+    const isGood =
+      normalizedLoss <= 0.9
+      && normalizedJitter <= Math.max(16, Math.round(VOICE_MAX_JITTER_MS * 0.55))
+      && (normalizedLatency === 0 || normalizedLatency <= VOICE_TARGET_LATENCY_MS + 20);
 
     if (isHardDegradation || isSoftDegradation) {
       peerContext.goodNetworkSamples = 0;
@@ -1453,12 +1492,14 @@ export class VoiceCallClient {
 
   private startIntervals(): void {
     this.clearIntervals();
+    this.lastSignalingPongAtMs = Date.now();
     this.sendSignal({
       type: "ping",
       timestamp: Date.now(),
     });
 
     this.pingIntervalId = window.setInterval(() => {
+      this.ensureSignalingSocketHealth();
       this.sendSignal({
         type: "ping",
         timestamp: Date.now(),
@@ -1478,6 +1519,29 @@ export class VoiceCallClient {
     if (this.diagnosticsIntervalId != null) {
       window.clearInterval(this.diagnosticsIntervalId);
       this.diagnosticsIntervalId = null;
+    }
+  }
+
+  private ensureSignalingSocketHealth(): void {
+    const socket = this.socket;
+    if (!socket || socket.readyState !== WebSocket.OPEN || this.leaving) {
+      return;
+    }
+    const nowMs = Date.now();
+    if (this.lastSignalingPongAtMs <= 0) {
+      this.lastSignalingPongAtMs = nowMs;
+      return;
+    }
+
+    const allowedSilenceMs = SIGNALING_PING_INTERVAL_MS * 3;
+    if (nowMs - this.lastSignalingPongAtMs <= allowedSilenceMs) {
+      return;
+    }
+
+    try {
+      socket.close(4000, "VOICE_PING_TIMEOUT");
+    } catch {
+      // Ignore close failures; reconnect loop will recover.
     }
   }
 
@@ -1585,7 +1649,7 @@ export class VoiceCallClient {
       latencyMs = jitterBufferEmittedCount > 0
         ? toMilliseconds(jitterBufferDelaySeconds / jitterBufferEmittedCount)
         : (pingMs != null ? Number((pingMs / 2).toFixed(1)) : null);
-      this.adjustPeerBitrate(peerContext, packetLossPercent, jitterMs);
+      this.adjustPeerBitrate(peerContext, packetLossPercent, jitterMs, latencyMs);
       const connectionQuality = inferConnectionQuality(pingMs, jitterMs, packetLossPercent);
 
       const nowMs = performance.now();

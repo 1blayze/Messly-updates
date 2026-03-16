@@ -55,16 +55,24 @@ const HIGH_PASS_CUTOFF_HZ = 80;
 const VOICE_LOW_CUT_HZ = 200;
 const VOICE_PRESENCE_HZ = 3_000;
 const NOISE_GATE_OPEN_GAIN = 1;
-const NOISE_GATE_CLOSED_GAIN = 0.008;
-const NOISE_GATE_TRANSIENT_SUPPRESS_GAIN = 0.00005;
-const NOISE_GATE_OPEN_CONFIDENCE = 0.44;
-const NOISE_GATE_CONFIDENCE_ATTACK = 0.18;
-const NOISE_GATE_CONFIDENCE_RELEASE = 0.09;
-const NOISE_GATE_TRANSIENT_HOLD_MS = 170;
-const SPEECH_BAND_MIN_HZ = 260;
-const SPEECH_BAND_MAX_HZ = 3_800;
-const HIGH_BAND_MIN_HZ = 4_800;
-const HIGH_BAND_MAX_HZ = 12_000;
+const NOISE_GATE_CLOSED_GAIN = 0.0012;
+const NOISE_GATE_TRANSIENT_SUPPRESS_GAIN = 0.00002;
+const NOISE_GATE_OPEN_CONFIDENCE = 0.56;
+const NOISE_GATE_CONFIDENCE_ATTACK = 0.22;
+const NOISE_GATE_CONFIDENCE_RELEASE = 0.11;
+const NOISE_GATE_TRANSIENT_HOLD_MS = 220;
+const SPEECH_BAND_MIN_HZ = 220;
+const SPEECH_BAND_MAX_HZ = 4_200;
+const LOW_BAND_MIN_HZ = 70;
+const LOW_BAND_MAX_HZ = 220;
+const HIGH_BAND_MIN_HZ = 4_200;
+const HIGH_BAND_MAX_HZ = 13_000;
+const SPEECH_DB_GATE_MARGIN = 12;
+const SPEECH_MIN_DB = -46;
+const VOICE_PEAK_IMPULSE_THRESHOLD = 0.55;
+const IMPULSE_DB_JUMP_THRESHOLD = 6.5;
+const IMPULSE_HIGH_BAND_RATIO_THRESHOLD = 0.3;
+const IMPULSE_CREST_THRESHOLD = 5.4;
 const QUALITY_EMIT_INTERVAL_MS = 120;
 const RNNOISE_MAX_CHANNELS = 1;
 
@@ -294,7 +302,7 @@ export async function createVoiceAudioPipeline(
   let context: AudioContext;
   try {
     context = new AudioContextCtor({
-      sampleRate: 48_000,
+      sampleRate: DEFAULT_MIC_OPTIONS.sampleRate,
       latencyHint: "interactive",
     });
   } catch {
@@ -382,13 +390,13 @@ export async function createVoiceAudioPipeline(
   } else {
     source.connect(destination);
   }
-  source.connect(analyser);
+  processingSource.connect(analyser);
 
   const outputTrack = destination.stream.getAudioTracks()[0];
   if (outputTrack) {
     void outputTrack.applyConstraints({
-      sampleRate: 48_000,
-      channelCount: 1,
+      sampleRate: DEFAULT_MIC_OPTIONS.sampleRate,
+      channelCount: DEFAULT_MIC_OPTIONS.channelCount,
     }).catch(() => undefined);
   }
 
@@ -441,6 +449,7 @@ export async function createVoiceAudioPipeline(
     const nyquist = context.sampleRate / 2;
     const binWidthHz = nyquist / Math.max(1, frequencyBuffer.length - 1);
     let speechBandEnergy = 0;
+    let lowBandEnergy = 0;
     let highBandEnergy = 0;
     let totalEnergy = 0;
     for (let index = 0; index < frequencyBuffer.length; index += 1) {
@@ -450,6 +459,9 @@ export async function createVoiceAudioPipeline(
       }
       const frequencyHz = index * binWidthHz;
       totalEnergy += magnitude;
+      if (frequencyHz >= LOW_BAND_MIN_HZ && frequencyHz <= LOW_BAND_MAX_HZ) {
+        lowBandEnergy += magnitude;
+      }
       if (frequencyHz >= SPEECH_BAND_MIN_HZ && frequencyHz <= SPEECH_BAND_MAX_HZ) {
         speechBandEnergy += magnitude;
       }
@@ -457,28 +469,43 @@ export async function createVoiceAudioPipeline(
         highBandEnergy += magnitude;
       }
     }
+    const lowBandRatio = lowBandEnergy / Math.max(totalEnergy, 1e-6);
     const speechBandRatio = speechBandEnergy / Math.max(totalEnergy, 1e-6);
     const highBandRatio = highBandEnergy / Math.max(totalEnergy, 1e-6);
 
+    const dynamicSpeechDbThreshold = Math.max(SPEECH_MIN_DB, noiseFloorDb + SPEECH_DB_GATE_MARGIN);
     const speakingLikely = (
-      currentDb >= Math.max(-42, noiseFloorDb + 10)
-      && speechBandRatio >= 0.42
-      && highBandRatio <= 0.58
+      currentDb >= dynamicSpeechDbThreshold
+      && speechBandRatio >= 0.46
+      && highBandRatio <= 0.44
+      && lowBandRatio <= 0.34
+      && zeroCrossRate >= 0.02
+      && zeroCrossRate <= 0.22
     );
     const likelyTransientImpulse = (
       (
-        peak >= 0.6
-        && crestFactor >= 5.8
-        && dbJump >= 8
-        && (highBandRatio >= 0.34 || speechBandRatio <= 0.46)
+        peak >= VOICE_PEAK_IMPULSE_THRESHOLD
+        && crestFactor >= IMPULSE_CREST_THRESHOLD
+        && dbJump >= IMPULSE_DB_JUMP_THRESHOLD
+        && (highBandRatio >= IMPULSE_HIGH_BAND_RATIO_THRESHOLD || speechBandRatio <= 0.5)
       )
-      || (peak >= 0.78 && crestFactor >= 7.2 && highBandRatio >= 0.28)
-      || (peak >= 0.9 && crestFactor >= 8.5)
+      || (peak >= 0.72 && crestFactor >= 6.6 && highBandRatio >= 0.24)
+      || (peak >= 0.88 && crestFactor >= 8.2)
     );
-    const speechFrameLikely = speakingLikely && zeroCrossRate <= 0.24 && !likelyTransientImpulse;
+    const keyboardLikeTransient = (
+      highBandRatio >= 0.38
+      && crestFactor >= 4.2
+      && dbJump >= 5
+      && speechBandRatio < 0.5
+    );
+    const speechFrameLikely =
+      speakingLikely
+      && crestFactor <= 7.5
+      && !likelyTransientImpulse
+      && !keyboardLikeTransient;
 
     if (!speakingLikely) {
-      noiseFloorDb = clamp((noiseFloorDb * 0.98) + (currentDb * 0.02), -85, -40);
+      noiseFloorDb = clamp((noiseFloorDb * 0.982) + (currentDb * 0.018), -85, -40);
     }
 
     if (adaptiveNoiseGate) {
@@ -496,12 +523,15 @@ export async function createVoiceAudioPipeline(
       const gateTargetGain = gateOpen
         ? NOISE_GATE_OPEN_GAIN
         : (transientSuppressionActive ? NOISE_GATE_TRANSIENT_SUPPRESS_GAIN : NOISE_GATE_CLOSED_GAIN);
-      adaptiveNoiseGate.gain.setTargetAtTime(gateTargetGain, context.currentTime, gateOpen ? 0.008 : 0.03);
+      adaptiveNoiseGate.gain.setTargetAtTime(gateTargetGain, context.currentTime, gateOpen ? 0.006 : 0.028);
     }
 
     const clipping = peak >= 0.985;
-    const lowVolume = speakingLikely && currentDb <= -42;
-    const excessiveNoise = !speakingLikely && currentDb >= Math.max(-52, noiseFloorDb + 9);
+    const lowVolume = speakingLikely && currentDb <= -43;
+    const excessiveNoise =
+      (!speakingLikely && currentDb >= Math.max(-52, noiseFloorDb + 9))
+      || keyboardLikeTransient
+      || likelyTransientImpulse;
     const distortion = clipping || (zeroCrossRate >= 0.25 && rms >= 0.09);
 
     lowVolumeScore = clamp(lowVolumeScore + (lowVolume ? 1 : -0.35), 0, 20);
