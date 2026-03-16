@@ -284,22 +284,26 @@ const SETTINGS_SIDEBAR_ITEMS: ReadonlyArray<{
 const NOISE_SUPPRESSION_MODE_OPTIONS: ReadonlyArray<{
   value: NoiseSuppressionMode;
   label: string;
+  triggerLabel: string;
   description: string;
 }> = [
   {
+    value: "rnnoise",
+    label: "RNNoise",
+    triggerLabel: "RNNoise",
+    description: "Supressão de ruído por IA em tempo real.",
+  },
+  {
     value: "off",
-    label: "Desativado",
+    label: "Nenhum",
+    triggerLabel: "Nenhum",
     description: "Sem filtros de supressão de ruído.",
   },
   {
     value: "webrtc",
-    label: "Padrão (WebRTC)",
+    label: "Padrão",
+    triggerLabel: "Padrão",
     description: "Usa os filtros nativos do navegador.",
-  },
-  {
-    value: "rnnoise",
-    label: "RNNoise (Avançado)",
-    description: "Supressão de ruído por IA em tempo real.",
   },
 ];
 
@@ -1840,6 +1844,7 @@ export default function AppSettingsView({
   const [selectedOutputId, setSelectedOutputId] = useState("");
   const [isInputDeviceSelectOpen, setIsInputDeviceSelectOpen] = useState(false);
   const [isOutputDeviceSelectOpen, setIsOutputDeviceSelectOpen] = useState(false);
+  const [isNoiseSuppressionSelectOpen, setIsNoiseSuppressionSelectOpen] = useState(false);
   const [inputGain, setInputGain] = useState(100);
   const [outputVolume, setOutputVolume] = useState(100);
   const [noiseSuppressionMode, setNoiseSuppressionMode] = useState<NoiseSuppressionMode>("webrtc");
@@ -1870,6 +1875,7 @@ export default function AppSettingsView({
   const audioSettingsLoadedRef = useRef(false);
   const inputDeviceSelectRef = useRef<HTMLDivElement | null>(null);
   const outputDeviceSelectRef = useRef<HTMLDivElement | null>(null);
+  const noiseSuppressionSelectRef = useRef<HTMLDivElement | null>(null);
   const accountProfileSyncSignatureRef = useRef<string>("");
   const normalizedInputGain = clamp(Math.round(inputGain), 0, 100);
   const normalizedOutputVolume = clamp(Math.round(outputVolume), 0, 200);
@@ -2024,6 +2030,12 @@ export default function AppSettingsView({
     () => outputDeviceOptions.find((option) => option.value === selectedOutputId) ?? outputDeviceOptions[0] ?? null,
     [outputDeviceOptions, selectedOutputId],
   );
+  const selectedNoiseSuppressionModeOption = useMemo(
+    () =>
+      NOISE_SUPPRESSION_MODE_OPTIONS.find((option) => option.value === noiseSuppressionMode) ??
+      NOISE_SUPPRESSION_MODE_OPTIONS[0]!,
+    [noiseSuppressionMode],
+  );
   const settingsSidebarVersionPrimary = `Messly ${settingsVersion}`;
   const settingsSidebarVersionSecondary = `${releaseChannelLabel} · ${runtimePlatformLabel} · ${runtimeEngineLabel}`;
   const pendingProfile = useMemo(() => {
@@ -2141,6 +2153,11 @@ export default function AppSettingsView({
   const handleSelectOutputDevice = (value: string): void => {
     setSelectedOutputId(value);
     setIsOutputDeviceSelectOpen(false);
+  };
+
+  const handleSelectNoiseSuppressionMode = (value: NoiseSuppressionMode): void => {
+    setNoiseSuppressionMode(value);
+    setIsNoiseSuppressionSelectOpen(false);
   };
 
   const handleManualMicSensitivityChange = (value: number): void => {
@@ -2468,7 +2485,7 @@ export default function AppSettingsView({
   }, [activeSection]);
 
   useEffect(() => {
-    if (!isInputDeviceSelectOpen && !isOutputDeviceSelectOpen) {
+    if (!isInputDeviceSelectOpen && !isOutputDeviceSelectOpen && !isNoiseSuppressionSelectOpen) {
       return;
     }
 
@@ -2480,12 +2497,14 @@ export default function AppSettingsView({
 
       const clickedInsideInput = inputDeviceSelectRef.current?.contains(target) ?? false;
       const clickedInsideOutput = outputDeviceSelectRef.current?.contains(target) ?? false;
-      if (clickedInsideInput || clickedInsideOutput) {
+      const clickedInsideNoiseSuppression = noiseSuppressionSelectRef.current?.contains(target) ?? false;
+      if (clickedInsideInput || clickedInsideOutput || clickedInsideNoiseSuppression) {
         return;
       }
 
       setIsInputDeviceSelectOpen(false);
       setIsOutputDeviceSelectOpen(false);
+      setIsNoiseSuppressionSelectOpen(false);
     };
 
     const handleKeyDown = (event: KeyboardEvent): void => {
@@ -2494,6 +2513,7 @@ export default function AppSettingsView({
       }
       setIsInputDeviceSelectOpen(false);
       setIsOutputDeviceSelectOpen(false);
+      setIsNoiseSuppressionSelectOpen(false);
     };
 
     window.addEventListener("pointerdown", handlePointerDown);
@@ -2502,7 +2522,7 @@ export default function AppSettingsView({
       window.removeEventListener("pointerdown", handlePointerDown);
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [isInputDeviceSelectOpen, isOutputDeviceSelectOpen]);
+  }, [isInputDeviceSelectOpen, isNoiseSuppressionSelectOpen, isOutputDeviceSelectOpen]);
 
   useEffect(() => {
     if (!listeningForBind) {
@@ -5925,6 +5945,7 @@ export default function AppSettingsView({
                               aria-label="Selecionar microfone"
                               onClick={() => {
                                 setIsOutputDeviceSelectOpen(false);
+                                setIsNoiseSuppressionSelectOpen(false);
                                 setIsInputDeviceSelectOpen((current) => !current);
                               }}
                             >
@@ -6008,6 +6029,7 @@ export default function AppSettingsView({
                               aria-label="Selecionar dispositivo de saída"
                               onClick={() => {
                                 setIsInputDeviceSelectOpen(false);
+                                setIsNoiseSuppressionSelectOpen(false);
                                 setIsOutputDeviceSelectOpen((current) => !current);
                               }}
                             >
@@ -6093,31 +6115,61 @@ export default function AppSettingsView({
                         </div>
 
                         <div className={styles.processingCoreRow}>
-                          <div className={styles.processingCoreRowMeta}>
-                            <p className={styles.processingCoreRowTitle}>Supressão de ruído</p>
-                            <p className={styles.processingCoreRowState}>
-                              Reduz ruído de fundo do microfone durante chamadas de voz.
-                            </p>
-                            <div className={styles.noiseSuppressionModeList} role="radiogroup" aria-label="Supressão de ruído">
-                              {NOISE_SUPPRESSION_MODE_OPTIONS.map((option) => {
-                                const isSelected = noiseSuppressionMode === option.value;
-                                return (
-                                  <button
-                                    key={option.value}
-                                    type="button"
-                                    role="radio"
-                                    aria-checked={isSelected}
-                                    className={`${styles.noiseSuppressionModeOption}${
-                                      isSelected ? ` ${styles.noiseSuppressionModeOptionSelected}` : ""
-                                    }`}
-                                    onClick={() => setNoiseSuppressionMode(option.value)}
-                                  >
-                                    <span className={styles.noiseSuppressionModeDot} aria-hidden="true" />
-                                    <span className={styles.noiseSuppressionModeLabel}>{option.label}</span>
-                                    <span className={styles.noiseSuppressionModeHint}>{option.description}</span>
-                                  </button>
-                                );
-                              })}
+                          <div className={styles.noiseSuppressionRow}>
+                            <div className={styles.processingCoreRowMeta}>
+                              <p className={styles.processingCoreRowTitle}>Supressão de ruído</p>
+                              <p className={styles.processingCoreRowState}>
+                                Reduz o ruído de fundo do seu microfone.
+                              </p>
+                            </div>
+                            <div className={styles.noiseSuppressionSelect} ref={noiseSuppressionSelectRef}>
+                              <button
+                                type="button"
+                                className={`${styles.noiseSuppressionSelectTrigger}${
+                                  isNoiseSuppressionSelectOpen ? ` ${styles.noiseSuppressionSelectTriggerOpen}` : ""
+                                }`}
+                                aria-haspopup="listbox"
+                                aria-expanded={isNoiseSuppressionSelectOpen}
+                                aria-label="Selecionar modo de supressão de ruído"
+                                onClick={() => {
+                                  setIsInputDeviceSelectOpen(false);
+                                  setIsOutputDeviceSelectOpen(false);
+                                  setIsNoiseSuppressionSelectOpen((current) => !current);
+                                }}
+                              >
+                                <span>{selectedNoiseSuppressionModeOption.triggerLabel}</span>
+                                <MaterialSymbolIcon
+                                  name={isNoiseSuppressionSelectOpen ? "expand_less" : "expand_more"}
+                                  size={18}
+                                />
+                              </button>
+
+                              {isNoiseSuppressionSelectOpen ? (
+                                <div className={styles.noiseSuppressionSelectMenu} role="listbox" aria-label="Modos de supressão de ruído">
+                                  {NOISE_SUPPRESSION_MODE_OPTIONS.map((option) => {
+                                    const isSelected = noiseSuppressionMode === option.value;
+                                    return (
+                                      <button
+                                        key={option.value}
+                                        type="button"
+                                        role="option"
+                                        aria-selected={isSelected}
+                                        className={`${styles.noiseSuppressionSelectOption}${
+                                          isSelected ? ` ${styles.noiseSuppressionSelectOptionSelected}` : ""
+                                        }`}
+                                        onClick={() => handleSelectNoiseSuppressionMode(option.value)}
+                                      >
+                                        <span className={styles.noiseSuppressionSelectOptionLabel}>{option.label}</span>
+                                        {isSelected ? (
+                                          <span className={styles.noiseSuppressionSelectOptionCheck} aria-hidden="true">
+                                            <MaterialSymbolIcon name="check" size={14} filled={true} />
+                                          </span>
+                                        ) : null}
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              ) : null}
                             </div>
                           </div>
                         </div>
