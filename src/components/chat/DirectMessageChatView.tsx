@@ -5717,7 +5717,7 @@ export default function DirectMessageChatView({
     Boolean(voiceCallRejoinFallback && voiceCallRejoinFallback.expiresAtMs > Date.now()) &&
     !hasIncomingVoiceInvite &&
     !shouldShowVoiceCallPanel;
-  const shouldHideVoiceCallChrome = shouldShowVoiceCallPanel || hasVoiceCallRejoinFallback;
+  const shouldHideVoiceCallChrome = shouldShowVoiceCallPanel || hasVoiceCallRejoinFallback || hasIncomingVoiceInvite;
   const voiceCallButtonActive = isVoiceCallActive || isVoiceCallConnecting;
   const incomingVoiceInviteDisplayName =
     incomingVoiceInviteFromUserId && incomingVoiceInviteFromUserId === String(targetUser.userId ?? "").trim()
@@ -5829,11 +5829,8 @@ export default function DirectMessageChatView({
       <div className={`dm-chat__body${shouldHideVoiceCallChrome ? " dm-chat__body--voice-call-focus" : ""}`}>
         <div className="dm-chat__main">
           {hasIncomingVoiceInvite ? (
-            <section
-              className="dm-chat__rejoin-stage"
-              aria-label="Convite de chamada de voz"
-            >
-              <div className="dm-chat__rejoin-stage-surface">
+            <section className="dm-chat__rejoin-stage dm-chat__rejoin-stage--compact" aria-label="Convite de chamada de voz">
+              <div className="dm-chat__rejoin-stage-surface dm-chat__rejoin-stage-surface--compact">
                 <img
                   className="dm-chat__rejoin-stage-avatar"
                   src={targetAvatarSrc}
@@ -5846,27 +5843,28 @@ export default function DirectMessageChatView({
                     }
                   }}
                 />
-                <p className="dm-chat__rejoin-stage-title">
-                  {`${incomingVoiceInviteDisplayName} iniciou uma chamada de voz`}
-                </p>
                 <div
-                  className="dm-chat__rejoin-stage-controls"
+                  className="dm-chat__rejoin-stage-controls dm-chat__rejoin-stage-controls--icon"
                   role="group"
                   aria-label="Acoes do convite de chamada"
                 >
                   <button
                     type="button"
-                    className="dm-chat__rejoin-stage-btn dm-chat__rejoin-stage-btn--accept"
+                    className="dm-chat__rejoin-stage-btn dm-chat__rejoin-stage-btn--icon dm-chat__rejoin-stage-btn--accept"
                     onClick={handleAcceptIncomingVoiceInvite}
+                    aria-label="Entrar na chamada"
+                    title="Entrar na chamada"
                   >
-                    Entrar
+                    <img className="dm-chat__rejoin-stage-btn-icon" src={headerVoiceCallIconUrl} alt="" aria-hidden="true" />
                   </button>
                   <button
                     type="button"
-                    className="dm-chat__rejoin-stage-btn dm-chat__rejoin-stage-btn--dismiss"
+                    className="dm-chat__rejoin-stage-btn dm-chat__rejoin-stage-btn--icon dm-chat__rejoin-stage-btn--icon-danger"
                     onClick={handleDismissIncomingVoiceInvite}
+                    aria-label="Ignorar chamada"
+                    title="Ignorar chamada"
                   >
-                    Agora nao
+                    <MaterialSymbolIcon className="dm-chat__rejoin-stage-btn-glyph" name="close" size={20} />
                   </button>
                 </div>
               </div>

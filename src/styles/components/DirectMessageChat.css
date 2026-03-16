@@ -197,11 +197,26 @@
   background: transparent;
 }
 
+.dm-chat__rejoin-stage-btn--icon-danger {
+  background: #e5485a;
+}
+
+.dm-chat__rejoin-stage-btn--icon-danger:hover,
+.dm-chat__rejoin-stage-btn--icon-danger:focus-visible {
+  background: #f05f70;
+}
+
 .dm-chat__rejoin-stage-btn-icon {
   width: 20px;
   height: 20px;
   display: block;
   object-fit: contain;
+}
+
+.dm-chat__rejoin-stage-btn-glyph {
+  font-size: 20px;
+  line-height: 1;
+  color: #f5f7fb;
 }
 
 .dm-chat__profile-sidebar {
