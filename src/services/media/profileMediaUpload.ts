@@ -432,9 +432,9 @@ function getProfileMediaExtension(file: File): string {
   return "webp";
 }
 
-function getProfileMediaKey(kind: ProfileMediaKind, userId: string, uploadFile: File): string {
+function getProfileMediaKey(kind: ProfileMediaKind, userId: string, uploadFile: File, sha256: string): string {
   const extension = getProfileMediaExtension(uploadFile);
-  return kind === "avatar" ? `avatars/${userId}.${extension}` : `banners/${userId}.${extension}`;
+  return kind === "avatar" ? `avatars/${userId}/${sha256}.${extension}` : `banners/${userId}/${sha256}.${extension}`;
 }
 
 function shouldSkipGatewayMediaFallback(): boolean {
@@ -886,7 +886,8 @@ async function uploadProfileMediaViaEdgeFunction(
     throw new Error("Sessao invalida ou expirada para envio de imagem.");
   }
 
-  const mediaKey = getProfileMediaKey(kind, userId, uploadFile);
+  const sha256 = await hashFile(uploadFile);
+  const mediaKey = getProfileMediaKey(kind, userId, uploadFile, sha256);
   const endpoint = `${functionBaseUrl}/r2-upload`;
   logProfileMediaUpload("upload endpoint", {
     transport: "supabase-edge-binary",
@@ -926,7 +927,6 @@ async function uploadProfileMediaViaEdgeFunction(
   }
 
   const returnedKey = String(parsed?.key ?? "").trim() || mediaKey;
-  const sha256 = await hashFile(uploadFile);
   const uploadedSize = Number(parsed?.size ?? uploadFile.size);
   logProfileMediaUpload("upload response", {
     transport: "supabase-edge-binary",
@@ -961,7 +961,8 @@ async function uploadProfileMediaViaPresign(
     return null;
   }
 
-  const mediaKey = getProfileMediaKey(kind, userId, uploadFile);
+  const sha256 = await hashFile(uploadFile);
+  const mediaKey = getProfileMediaKey(kind, userId, uploadFile, sha256);
   let presignResponse: EdgePresignUploadResponse;
   const endpoint = `${getSupabaseFunctionsBaseUrl() ?? "unknown"}/r2-presign`;
 
@@ -1044,7 +1045,6 @@ async function uploadProfileMediaViaPresign(
   }
 
   const returnedKey = String(presignResponse?.key ?? "").trim() || mediaKey;
-  const sha256 = await hashFile(uploadFile);
   logProfileMediaUpload("upload response", {
     transport: "supabase-presign",
     kind,

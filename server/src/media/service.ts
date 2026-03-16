@@ -245,11 +245,11 @@ function resolveUploadKey(userId: string, input: CreateUploadInput): string {
   switch (input.kind) {
     case "avatar": {
       const extension = getProfileMediaExtensionFromContentType(input.contentType, getFileExtension(safeName, "webp"));
-      return `avatars/${userId}.${extension}`;
+      return `avatars/${userId}/${input.sha256}.${extension}`;
     }
     case "banner": {
       const extension = getProfileMediaExtensionFromContentType(input.contentType, getFileExtension(safeName, "webp"));
-      return `banners/${userId}.${extension}`;
+      return `banners/${userId}/${input.sha256}.${extension}`;
     }
     case "message_image":
       return `messages/images/${input.sha256}.webp`;
@@ -479,7 +479,7 @@ export class MediaService {
       throw error;
     }
 
-    const key = `${kind === "avatar" ? "avatars" : "banners"}/${user.id}.${processed.ext}`;
+    const key = `${kind === "avatar" ? "avatars" : "banners"}/${user.id}/${processed.hash}.${processed.ext}`;
     const normalizedUploadInput: CreateUploadInput = {
       kind,
       sha256: processed.hash,
@@ -541,6 +541,25 @@ export class MediaService {
 
     const cdnUrl = this.buildPublicMediaUrl(key);
     const versionedUrl = appendVersionToUrl(cdnUrl, processed.hash);
+    const profileLookup = await this.options.adminSupabase
+      .from("profiles")
+      .select("id,avatar_key,banner_key")
+      .eq("id", user.id)
+      .maybeSingle();
+    if (profileLookup.error) {
+      throw new MediaServiceError(500, "PROFILE_LOOKUP_FAILED", "Falha ao carregar o perfil antes de salvar a midia.", {
+        kind,
+        fileKey: key,
+        code: profileLookup.error.code,
+        details: profileLookup.error.details,
+      });
+    }
+    if (!profileLookup.data?.id) {
+      throw new MediaServiceError(404, "PROFILE_NOT_FOUND", "Perfil nao encontrado para persistir a midia.");
+    }
+    const previousProfileMediaKey = String(
+      kind === "avatar" ? profileLookup.data.avatar_key ?? "" : profileLookup.data.banner_key ?? "",
+    ).trim();
 
     const persistedProfile =
       kind === "avatar"
@@ -586,6 +605,21 @@ export class MediaService {
       contentType: processed.contentType,
       strategy: "server-proxy",
     });
+
+    if (previousProfileMediaKey && previousProfileMediaKey !== key) {
+      try {
+        await this.r2.deleteObject(previousProfileMediaKey);
+        await this.markAuthorizationStatus(previousProfileMediaKey, user.id, "deleted");
+      } catch (error) {
+        this.options.logger?.warn("Falha ao remover midia de perfil antiga", {
+          userId: user.id,
+          kind,
+          previousKey: previousProfileMediaKey,
+          nextKey: key,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
 
     return {
       uploaded: true,
@@ -684,7 +718,10 @@ export class MediaService {
   }
 
   private isOwnedProfileMediaKey(userId: string, fileKey: string): boolean {
-    return fileKey.startsWith(`avatars/${userId}.`) || fileKey.startsWith(`banners/${userId}.`);
+    if (fileKey.startsWith(`avatars/${userId}.`) || fileKey.startsWith(`banners/${userId}.`)) {
+      return true;
+    }
+    return fileKey.startsWith(`avatars/${userId}/`) || fileKey.startsWith(`banners/${userId}/`);
   }
 
   private assertProxyUploadSize(fileKey: string, sizeBytes: number): void {

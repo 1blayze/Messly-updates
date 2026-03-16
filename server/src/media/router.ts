@@ -11,6 +11,9 @@ import {
   type UploadProfileMediaInput,
 } from "./service";
 
+const PUBLIC_MEDIA_READ_LIMIT = 100;
+const PUBLIC_MEDIA_READ_WINDOW_MS = 60_000;
+
 const createUploadSchema = z.object({
   kind: z.enum([
     "avatar",
@@ -61,6 +64,7 @@ async function readRawBody(request: IncomingMessage): Promise<Buffer> {
 
 export class MediaRouter {
   private readonly mediaService: MediaService;
+  private readonly publicMediaAllowedHosts: Set<string>;
 
   constructor(private readonly deps: Pick<AuthDependencies, "adminSupabase" | "sessionManager" | "rateLimiter" | "env" | "logger">) {
     this.mediaService = new MediaService({
@@ -70,6 +74,7 @@ export class MediaRouter {
       env: deps.env,
       logger: deps.logger,
     });
+    this.publicMediaAllowedHosts = this.buildPublicMediaAllowedHosts();
   }
 
   async handle(request: IncomingMessage, response: ServerResponse): Promise<boolean> {
@@ -95,6 +100,8 @@ export class MediaRouter {
       }
 
       if (request.method === "GET" && requestPath.startsWith("/media/public/")) {
+        await this.enforcePublicReadRateLimit(context.ipAddress);
+        this.assertPublicReadHotlinkHeaders(request);
         const fileKey = decodeURIComponent(requestPath.slice("/media/public/".length));
         const location = await this.mediaService.getPublicReadUrl(fileKey);
         response.writeHead(302, {
@@ -171,7 +178,7 @@ export class MediaRouter {
       try {
         corsHeaders = {
           ...resolveCorsHeaders(context.origin, this.deps.env),
-          "access-control-allow-methods": "POST, DELETE, OPTIONS",
+          "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
         };
       } catch {
         corsHeaders = {
@@ -227,6 +234,86 @@ export class MediaRouter {
       500,
       "MEDIA_INTERNAL_ERROR",
       error instanceof Error ? error.message : "Unexpected media server error.",
+    );
+  }
+
+  private buildPublicMediaAllowedHosts(): Set<string> {
+    const allowed = new Set<string>([
+      "messly.site",
+      "www.messly.site",
+      "cdn.messly.site",
+      "gateway.messly.site",
+      "localhost",
+      "127.0.0.1",
+      "::1",
+    ]);
+    for (const origin of this.deps.env.allowedOrigins) {
+      try {
+        const parsed = new URL(origin);
+        allowed.add(parsed.hostname.toLowerCase());
+      } catch {
+        // Ignore invalid origin entries.
+      }
+    }
+    return allowed;
+  }
+
+  private parseHeaderHost(valueRaw: string | null | undefined): string | null {
+    const value = String(valueRaw ?? "").trim();
+    if (!value || value.toLowerCase() === "null") {
+      return null;
+    }
+    try {
+      const parsed = new URL(value);
+      return parsed.hostname.toLowerCase();
+    } catch {
+      return null;
+    }
+  }
+
+  private assertPublicReadHotlinkHeaders(request: IncomingMessage): void {
+    const originRaw = String(request.headers.origin ?? "").trim();
+    const refererRaw = String(request.headers.referer ?? request.headers.referrer ?? "").trim();
+
+    const originHost = this.parseHeaderHost(originRaw);
+    if (originRaw && !originHost) {
+      throw new AuthHttpError(403, "HOTLINK_FORBIDDEN", "Origem de midia invalida.");
+    }
+    if (originHost && !this.publicMediaAllowedHosts.has(originHost)) {
+      throw new AuthHttpError(403, "HOTLINK_FORBIDDEN", "Origem nao autorizada para consumo de midia.");
+    }
+
+    const refererHost = this.parseHeaderHost(refererRaw);
+    if (refererRaw && !refererHost) {
+      throw new AuthHttpError(403, "HOTLINK_FORBIDDEN", "Referer de midia invalido.");
+    }
+    if (refererHost && !this.publicMediaAllowedHosts.has(refererHost)) {
+      throw new AuthHttpError(403, "HOTLINK_FORBIDDEN", "Referer nao autorizado para consumo de midia.");
+    }
+  }
+
+  private async enforcePublicReadRateLimit(ipAddress: string): Promise<void> {
+    const outcome = await this.deps.rateLimiter.consume(
+      `media:public-read:${String(ipAddress ?? "").trim() || "unknown"}`,
+      PUBLIC_MEDIA_READ_LIMIT,
+      PUBLIC_MEDIA_READ_WINDOW_MS,
+    );
+    if (outcome.allowed) {
+      return;
+    }
+    const retryAfterSeconds = Math.max(1, Math.ceil(outcome.retryAfterMs / 1000));
+    throw new AuthHttpError(
+      429,
+      "MEDIA_PUBLIC_RATE_LIMITED",
+      "Muitas requisicoes de midia. Tente novamente em instantes.",
+      {
+        retry_after_ms: outcome.retryAfterMs,
+        limit: PUBLIC_MEDIA_READ_LIMIT,
+        window_ms: PUBLIC_MEDIA_READ_WINDOW_MS,
+      },
+      {
+        "retry-after": String(retryAfterSeconds),
+      },
     );
   }
 }

@@ -1,4 +1,4 @@
-/// <reference path="../_shared/edge-runtime.d.ts" />
+﻿/// <reference path="../_shared/edge-runtime.d.ts" />
 import { validateSupabaseToken } from "../_shared/auth.ts";
 import { enforceRateLimit } from "../_shared/rateLimit.ts";
 import {
@@ -174,7 +174,7 @@ async function authorizeMediaKeyAccess(key: string, userId: string): Promise<voi
   if (key.startsWith("attachments/")) {
     const conversationId = parseAttachmentConversationId(key);
     if (!conversationId) {
-      throw new HttpError(400, "INVALID_ATTACHMENT_KEY", "Chave de anexo inválida.");
+      throw new HttpError(400, "INVALID_ATTACHMENT_KEY", "Chave de anexo invalida.");
     }
 
     await assertConversationMembership(conversationId, userId);
@@ -182,14 +182,27 @@ async function authorizeMediaKeyAccess(key: string, userId: string): Promise<voi
   }
 
   if (key.startsWith("avatars/") || key.startsWith("banners/")) {
-    const ownerSegment = key.split("/").filter(Boolean)[1] ?? "";
-    const ownerId = ownerSegment.replace(/\.[^./\\]+$/, "");
-    if (!ownerSegment || (ownerSegment !== userId && ownerId !== userId)) {
-      throw new HttpError(403, "FORBIDDEN", "Sem permissão para alterar essa mídia de perfil.");
+    const ownerId = extractProfileOwnerId(key);
+    if (!ownerId || ownerId !== userId) {
+      throw new HttpError(403, "FORBIDDEN", "Sem permissao para alterar essa midia de perfil.");
     }
   }
 }
 
+function extractProfileOwnerId(key: string): string | null {
+  const segments = key.split("/").filter(Boolean);
+  if (segments.length < 2) {
+    return null;
+  }
+
+  if (segments.length >= 3) {
+    return segments[1] ?? null;
+  }
+
+  const ownerSegment = segments[1] ?? "";
+  const normalized = ownerSegment.replace(/\.[^./\\]+$/, "");
+  return normalized || ownerSegment || null;
+}
 Deno.serve(async (request: Request) => {
   const context = createRequestContext(ROUTE);
 
@@ -275,3 +288,4 @@ Deno.serve(async (request: Request) => {
     return responseError(request, context, error);
   }
 });
+
