@@ -24,7 +24,7 @@
   width: 70px;
   height: 70px;
   border-radius: 999px;
-  overflow: visible;
+  overflow: hidden;
   border: 0;
   box-shadow: 0 6px 16px rgba(0, 0, 0, 0.45);
   background: #111111;
@@ -44,30 +44,6 @@
   height: 100%;
   display: block;
   object-fit: cover;
-  border-radius: 999px;
-}
-
-.voice-call-panel__avatar-status {
-  position: absolute;
-  right: -2px;
-  bottom: -2px;
-  z-index: 3;
-  width: 24px;
-  height: 24px;
-  border-radius: 999px;
-  background: #e5485a;
-  border: 2px solid #000000;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  box-shadow: 0 6px 14px rgba(0, 0, 0, 0.38);
-}
-
-.voice-call-panel__avatar-status-icon {
-  width: 12px;
-  height: 12px;
-  object-fit: contain;
-  display: block;
 }
 
 .voice-call-panel__controls {
