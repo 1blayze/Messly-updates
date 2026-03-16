@@ -82,6 +82,8 @@ const VOICE_CALL_SINGLE_PARTICIPANT_TIMEOUT_MS = 5 * 60_000;
 const VOICE_CALL_REJOIN_FALLBACK_TTL_MS = 5 * 60_000;
 const VOICE_CALL_SERVER_FALLBACK_TTL_MS = 30 * 60_000;
 const AUDIO_SETTINGS_STORAGE_KEY_PREFIX = "messly:audio-settings:";
+const VOICE_GLOBAL_REJOIN_EVENT = "messly:voice-rejoin-request";
+const VOICE_GLOBAL_REJOIN_PENDING_ROOM_ID_KEY = "messly:voice-rejoin:pending-room-id";
 
 const GROUP_BREAK_MS = 5 * 60 * 1000;
 const AUTO_SCROLL_THRESHOLD_PX = 120;
@@ -6475,6 +6477,40 @@ export default function DirectMessageChatView({
     voiceCallRingingSoundUrl,
     voiceRoomId,
   ]);
+
+  useEffect(() => {
+    const handleVoiceRejoinRequest = (event: Event): void => {
+      const customEvent = event as CustomEvent<{ roomId?: string | null }>;
+      const requestedRoomId = String(customEvent.detail?.roomId ?? "").trim();
+      if (!requestedRoomId) {
+        return;
+      }
+      const activeRoomId = String(voiceRoomId ?? "").trim();
+      if (!activeRoomId || activeRoomId !== requestedRoomId) {
+        return;
+      }
+      if (isVoiceCallActiveRef.current || isVoiceCallConnectingRef.current) {
+        return;
+      }
+      startVoiceCallWithRoomId(requestedRoomId, { suppressInvite: true, origin: "rejoin" });
+    };
+
+    window.addEventListener(VOICE_GLOBAL_REJOIN_EVENT, handleVoiceRejoinRequest as EventListener);
+
+    const pendingRoomId = sessionStorage.getItem(VOICE_GLOBAL_REJOIN_PENDING_ROOM_ID_KEY);
+    if (pendingRoomId) {
+      sessionStorage.removeItem(VOICE_GLOBAL_REJOIN_PENDING_ROOM_ID_KEY);
+      handleVoiceRejoinRequest(
+        new CustomEvent<{ roomId: string }>(VOICE_GLOBAL_REJOIN_EVENT, {
+          detail: { roomId: pendingRoomId },
+        }),
+      );
+    }
+
+    return () => {
+      window.removeEventListener(VOICE_GLOBAL_REJOIN_EVENT, handleVoiceRejoinRequest as EventListener);
+    };
+  }, [startVoiceCallWithRoomId, voiceRoomId]);
 
   const handleToggleVoiceCall = useCallback(() => {
     if (isVoiceCallActive || isVoiceCallConnecting) {

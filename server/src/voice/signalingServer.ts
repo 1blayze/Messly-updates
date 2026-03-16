@@ -64,6 +64,13 @@ const watchMessageSchema = z.object({
   accessToken: z.string().trim().min(1).max(8_000).optional(),
 });
 
+const watchUserCallStateMessageSchema = z.object({
+  type: z.literal("watch-user-call-state"),
+  userId: z.string().trim().min(1).max(128),
+  displayName: z.string().trim().max(120).optional(),
+  accessToken: z.string().trim().min(1).max(8_000).optional(),
+});
+
 const leaveMessageSchema = z.object({
   type: z.literal("leave"),
 });
@@ -91,6 +98,11 @@ const muteStateMessageSchema = z.object({
   muted: z.boolean(),
 });
 
+const deafenStateMessageSchema = z.object({
+  type: z.literal("deafen-state"),
+  deafened: z.boolean(),
+});
+
 const speakingStateMessageSchema = z.object({
   type: z.literal("speaking-state"),
   speaking: z.boolean(),
@@ -105,11 +117,13 @@ const pingMessageSchema = z.object({
 const inboundVoiceMessageSchema = z.discriminatedUnion("type", [
   joinMessageSchema,
   watchMessageSchema,
+  watchUserCallStateMessageSchema,
   leaveMessageSchema,
   offerMessageSchema,
   answerMessageSchema,
   iceCandidateMessageSchema,
   muteStateMessageSchema,
+  deafenStateMessageSchema,
   speakingStateMessageSchema,
   pingMessageSchema,
 ]);
@@ -120,6 +134,7 @@ const distributedParticipantSchema = z.object({
   userId: z.string().trim().min(1).max(128),
   displayName: z.string().trim().min(1).max(120),
   muted: z.boolean(),
+  deafened: z.boolean().optional().default(false),
   speaking: z.boolean(),
   state: z.enum(DISTRIBUTED_PARTICIPANT_STATE_VALUES),
   disconnectedAt: z.number().finite().nullable().optional(),
@@ -136,7 +151,21 @@ const callParticipantSnapshotSchema = z.object({
   leftAt: z.number().finite().nullable(),
   lastSeenAt: z.number().finite(),
   muted: z.boolean(),
+  deafened: z.boolean().optional().default(false),
   speaking: z.boolean(),
+});
+
+const userCallStateSnapshotSchema = z.object({
+  userId: z.string().trim().min(1).max(128),
+  callId: z.string().trim().min(1).max(128),
+  roomId: z.string().trim().min(1).max(128),
+  callStatus: z.enum(VOICE_CALL_STATUS_VALUES),
+  participantState: z.enum(VOICE_CALL_PARTICIPANT_STATUS_VALUES),
+  muted: z.boolean().optional().default(false),
+  deafened: z.boolean().optional().default(false),
+  speaking: z.boolean().optional().default(false),
+  connectedAt: z.number().finite().nullable().optional().default(null),
+  updatedAt: z.number().finite(),
 });
 
 const callSnapshotSchema = z.object({
@@ -166,6 +195,7 @@ const clusterParticipantJoinedEventSchema = z.object({
     userId: z.string().trim().min(1).max(128),
     displayName: z.string().trim().min(1).max(120),
     muted: z.boolean(),
+    deafened: z.boolean().optional().default(false),
     speaking: z.boolean(),
   }),
 });
@@ -184,6 +214,14 @@ const clusterMuteStateEventSchema = z.object({
   roomId: z.string().trim().min(1).max(128),
   userId: z.string().trim().min(1).max(128),
   muted: z.boolean(),
+});
+
+const clusterDeafenStateEventSchema = z.object({
+  kind: z.literal("participant-deafen-state"),
+  sourceInstanceId: z.string().trim().min(1).max(128),
+  roomId: z.string().trim().min(1).max(128),
+  userId: z.string().trim().min(1).max(128),
+  deafened: z.boolean(),
 });
 
 const clusterSpeakingStateEventSchema = z.object({
@@ -228,6 +266,7 @@ const clusterEventSchema = z.discriminatedUnion("kind", [
   clusterParticipantJoinedEventSchema,
   clusterParticipantLeftEventSchema,
   clusterMuteStateEventSchema,
+  clusterDeafenStateEventSchema,
   clusterSpeakingStateEventSchema,
   clusterRelayEventSchema,
   clusterReplaceSessionEventSchema,
@@ -236,6 +275,7 @@ const clusterEventSchema = z.discriminatedUnion("kind", [
 
 type VoiceClusterEvent = z.infer<typeof clusterEventSchema>;
 type VoiceDistributedParticipantDescriptor = z.infer<typeof distributedParticipantSchema>;
+type UserCallStateSnapshot = z.infer<typeof userCallStateSnapshotSchema>;
 
 interface VoiceConnectionContext {
   connectionId: string;
@@ -246,18 +286,20 @@ interface VoiceConnectionContext {
   userId: string | null;
   displayName: string;
   muted: boolean;
+  deafened: boolean;
   speaking: boolean;
   mode: VoiceConnectionMode;
   lastSeenAt: number;
   connectedAt: number;
 }
 
-type VoiceConnectionMode = "idle" | "watch" | "participant";
+type VoiceConnectionMode = "idle" | "watch" | "watch-user-call-state" | "participant";
 
 interface VoiceParticipantDescriptor {
   userId: string;
   displayName: string;
   muted: boolean;
+  deafened: boolean;
   speaking: boolean;
   updatedAt: number;
 }
@@ -374,6 +416,7 @@ export class VoiceSignalingServer {
   private readonly wss: WebSocketServer;
   private readonly rooms = new Map<string, Map<string, VoiceConnectionContext>>();
   private readonly roomWatchers = new Map<string, Map<string, VoiceConnectionContext>>();
+  private readonly userCallStateWatchers = new Map<string, Map<string, VoiceConnectionContext>>();
   private readonly connections = new Map<WebSocket, VoiceConnectionContext>();
   private readonly rateWindows = new Map<string, VoiceMessageRateWindow>();
   private readonly callSessions = new Map<string, VoiceCallSessionSnapshot>();
@@ -466,6 +509,7 @@ export class VoiceSignalingServer {
     this.connections.clear();
     this.rooms.clear();
     this.roomWatchers.clear();
+    this.userCallStateWatchers.clear();
     this.rateWindows.clear();
     this.callSessions.clear();
     this.wss.close();
@@ -542,6 +586,7 @@ export class VoiceSignalingServer {
       userId: null,
       displayName: "",
       muted: false,
+      deafened: false,
       speaking: false,
       mode: "idle",
       lastSeenAt: now,
@@ -606,6 +651,9 @@ export class VoiceSignalingServer {
       case "watch":
         await this.handleWatch(context, payload);
         return;
+      case "watch-user-call-state":
+        await this.handleWatchUserCallState(context, payload);
+        return;
       case "join":
         await this.handleJoin(context, payload);
         return;
@@ -619,6 +667,9 @@ export class VoiceSignalingServer {
         return;
       case "mute-state":
         await this.handleMuteState(context, payload.muted);
+        return;
+      case "deafen-state":
+        await this.handleDeafenState(context, payload.deafened);
         return;
       case "speaking-state":
         await this.handleSpeakingState(context, payload.speaking, payload.level);
@@ -657,6 +708,10 @@ export class VoiceSignalingServer {
       }
     }
 
+    if (context.mode === "watch-user-call-state") {
+      await this.removeConnectionFromVoiceScope(context, "switch_from_user_watch");
+    }
+
     if (context.roomId && context.roomId !== roomId) {
       await this.removeConnectionFromVoiceScope(context, "switch_room");
     } else if (context.mode === "participant" && context.roomId === roomId) {
@@ -689,6 +744,52 @@ export class VoiceSignalingServer {
     });
   }
 
+  private async handleWatchUserCallState(
+    context: VoiceConnectionContext,
+    payload: z.infer<typeof watchUserCallStateMessageSchema>,
+  ): Promise<void> {
+    const userId = payload.userId;
+    const displayName = payload.displayName?.trim() || userId;
+
+    if (this.validateAccessToken) {
+      const token = String(payload.accessToken ?? "").trim();
+      if (!token) {
+        this.sendError(context.socket, "UNAUTHENTICATED", "Token de autenticacao ausente.");
+        return;
+      }
+
+      const validated = await this.validateAccessToken(token).catch(() => null);
+      if (!validated || validated.id !== userId) {
+        this.sendError(context.socket, "UNAUTHENTICATED", "Token invalido para monitoramento de chamada.");
+        return;
+      }
+    }
+
+    if (context.mode !== "idle") {
+      await this.removeConnectionFromVoiceScope(context, "switch_to_user_watch");
+    }
+
+    const watchers = this.userCallStateWatchers.get(userId) ?? new Map<string, VoiceConnectionContext>();
+    watchers.set(context.connectionId, context);
+    this.userCallStateWatchers.set(userId, watchers);
+
+    context.roomId = null;
+    context.userId = userId;
+    context.displayName = displayName;
+    context.muted = false;
+    context.deafened = false;
+    context.speaking = false;
+    context.mode = "watch-user-call-state";
+
+    this.send(context.socket, {
+      type: "watching-user-call-state",
+      userId,
+      selfUserId: userId,
+    });
+
+    await this.sendUserCallStateSnapshot(context.socket, userId);
+  }
+
   private async handleJoin(context: VoiceConnectionContext, payload: z.infer<typeof joinMessageSchema>): Promise<void> {
     const roomId = payload.roomId;
     const userId = payload.userId;
@@ -706,6 +807,10 @@ export class VoiceSignalingServer {
         this.sendError(context.socket, "UNAUTHENTICATED", "Token invalido para sinalizacao de voz.");
         return;
       }
+    }
+
+    if (context.mode === "watch-user-call-state") {
+      await this.removeConnectionFromVoiceScope(context, "switch_from_user_watch");
     }
 
     if (context.roomId && context.roomId !== roomId) {
@@ -762,6 +867,7 @@ export class VoiceSignalingServer {
     context.userId = userId;
     context.displayName = displayName;
     context.muted = false;
+    context.deafened = false;
     context.speaking = false;
     context.mode = "participant";
     room.set(userId, context);
@@ -785,6 +891,7 @@ export class VoiceSignalingServer {
           userId,
           displayName,
           muted: context.muted,
+          deafened: context.deafened,
           speaking: context.speaking,
         },
       }, userId);
@@ -798,6 +905,7 @@ export class VoiceSignalingServer {
           userId,
           displayName,
           muted: context.muted,
+          deafened: context.deafened,
           speaking: context.speaking,
         },
       });
@@ -825,6 +933,7 @@ export class VoiceSignalingServer {
       return;
     }
 
+    const previousMuted = context.muted;
     context.muted = muted;
     await this.upsertDistributedParticipant(context, "CONNECTED");
 
@@ -841,6 +950,39 @@ export class VoiceSignalingServer {
       userId: context.userId,
       muted,
     });
+
+    if (previousMuted !== muted) {
+      await this.reconcileCallSession(context.roomId, "system");
+    }
+  }
+
+  private async handleDeafenState(context: VoiceConnectionContext, deafened: boolean): Promise<void> {
+    if (!context.roomId || !context.userId || context.mode !== "participant") {
+      this.sendError(context.socket, "NOT_IN_ROOM", "Conexao ainda nao entrou em uma sala de voz.");
+      return;
+    }
+
+    const previousDeafened = context.deafened;
+    context.deafened = deafened;
+    await this.upsertDistributedParticipant(context, "CONNECTED");
+
+    this.broadcastToParticipants(context.roomId, {
+      type: "participant-deafen-state",
+      userId: context.userId,
+      deafened,
+    }, context.userId);
+
+    await this.publishClusterEvent({
+      kind: "participant-deafen-state",
+      sourceInstanceId: this.instanceId,
+      roomId: context.roomId,
+      userId: context.userId,
+      deafened,
+    });
+
+    if (previousDeafened !== deafened) {
+      await this.reconcileCallSession(context.roomId, "system");
+    }
   }
 
   private async handleSpeakingState(context: VoiceConnectionContext, speaking: boolean, level: number | undefined): Promise<void> {
@@ -849,6 +991,7 @@ export class VoiceSignalingServer {
       return;
     }
 
+    const previousSpeaking = context.speaking;
     context.speaking = speaking;
     await this.upsertDistributedParticipant(context, "CONNECTED");
 
@@ -868,6 +1011,10 @@ export class VoiceSignalingServer {
       speaking,
       level: normalizedLevel,
     });
+
+    if (previousSpeaking !== speaking) {
+      await this.reconcileCallSession(context.roomId, "system");
+    }
   }
 
   private async relayPeerMessage(
@@ -948,12 +1095,26 @@ export class VoiceSignalingServer {
     const userId = context.userId;
     const displayName = context.displayName;
     const connectionId = context.connectionId;
+
+    if (mode === "watch-user-call-state" && userId) {
+      this.removeWatcherFromUserCallState(context);
+      context.mode = "idle";
+      context.roomId = null;
+      context.userId = null;
+      context.displayName = "";
+      context.muted = false;
+      context.deafened = false;
+      context.speaking = false;
+      return;
+    }
+
     if (!roomId || !userId || mode === "idle") {
       context.mode = "idle";
       context.roomId = null;
       context.userId = null;
       context.displayName = "";
       context.muted = false;
+      context.deafened = false;
       context.speaking = false;
       return;
     }
@@ -965,6 +1126,7 @@ export class VoiceSignalingServer {
       context.userId = null;
       context.displayName = "";
       context.muted = false;
+      context.deafened = false;
       context.speaking = false;
       return;
     }
@@ -983,6 +1145,7 @@ export class VoiceSignalingServer {
     context.userId = null;
     context.displayName = "";
     context.muted = false;
+    context.deafened = false;
     context.speaking = false;
 
     if (!removed) {
@@ -1026,6 +1189,21 @@ export class VoiceSignalingServer {
     watchers.delete(context.connectionId);
     if (watchers.size === 0) {
       this.roomWatchers.delete(context.roomId);
+    }
+  }
+
+  private removeWatcherFromUserCallState(context: VoiceConnectionContext): void {
+    const userId = String(context.userId ?? "").trim();
+    if (!userId) {
+      return;
+    }
+    const watchers = this.userCallStateWatchers.get(userId);
+    if (!watchers) {
+      return;
+    }
+    watchers.delete(context.connectionId);
+    if (watchers.size === 0) {
+      this.userCallStateWatchers.delete(userId);
     }
   }
 
@@ -1090,8 +1268,10 @@ export class VoiceSignalingServer {
     }
 
     if (payload.kind === "call-state") {
+      const previousSnapshot = this.callSessions.get(payload.roomId) ?? null;
       this.callSessions.set(payload.roomId, payload.call);
       this.broadcastCallStateLocal(payload.roomId, payload.event, payload.call);
+      this.emitUserCallStateUpdates(payload.call, previousSnapshot);
       return;
     }
 
@@ -1117,6 +1297,15 @@ export class VoiceSignalingServer {
         type: "participant-mute-state",
         userId: payload.userId,
         muted: payload.muted,
+      }, payload.userId);
+      return;
+    }
+
+    if (payload.kind === "participant-deafen-state") {
+      this.broadcastToParticipants(payload.roomId, {
+        type: "participant-deafen-state",
+        userId: payload.userId,
+        deafened: payload.deafened,
       }, payload.userId);
       return;
     }
@@ -1196,6 +1385,7 @@ export class VoiceSignalingServer {
           userId: localParticipant.userId,
           displayName: localParticipant.displayName || localParticipant.userId,
           muted: localParticipant.muted,
+          deafened: localParticipant.deafened,
           speaking: localParticipant.speaking,
           updatedAt: now,
         });
@@ -1214,6 +1404,7 @@ export class VoiceSignalingServer {
         userId: remoteParticipant.userId,
         displayName: remoteParticipant.displayName,
         muted: remoteParticipant.muted,
+        deafened: remoteParticipant.deafened,
         speaking: remoteParticipant.speaking,
         updatedAt: remoteParticipant.updatedAt,
       });
@@ -1231,6 +1422,7 @@ export class VoiceSignalingServer {
         userId: participant.userId,
         displayName: participant.displayName,
         muted: participant.muted,
+        deafened: participant.deafened,
         speaking: participant.speaking,
         state: participant.state,
         disconnectedAt: participant.disconnectedAt ?? null,
@@ -1248,6 +1440,7 @@ export class VoiceSignalingServer {
           userId: participant.userId,
           displayName: participant.displayName || participant.userId,
           muted: participant.muted,
+          deafened: participant.deafened,
           speaking: participant.speaking,
           state: "CONNECTED",
           disconnectedAt: null,
@@ -1272,6 +1465,7 @@ export class VoiceSignalingServer {
       userId: context.userId,
       displayName: context.displayName || context.userId,
       muted: context.muted,
+      deafened: context.deafened,
       speaking: context.speaking,
       state,
       disconnectedAt: state === "DISCONNECTED" ? Date.now() : null,
@@ -1422,6 +1616,124 @@ export class VoiceSignalingServer {
     }
   }
 
+  private async readUserCallState(userId: string): Promise<UserCallStateSnapshot | null> {
+    if (!this.redis) {
+      for (const snapshot of this.callSessions.values()) {
+        const state = this.buildUserCallStateSnapshot(userId, snapshot);
+        if (state) {
+          return state;
+        }
+      }
+      return null;
+    }
+
+    const raw = await this.redis.command.get(toUserCallStateRedisKey(userId)).catch(() => null);
+    if (!raw) {
+      return null;
+    }
+
+    try {
+      return userCallStateSnapshotSchema.parse(JSON.parse(raw) as unknown);
+    } catch {
+      await this.redis.command.del(toUserCallStateRedisKey(userId)).catch(() => undefined);
+      return null;
+    }
+  }
+
+  private buildUserCallStateSnapshot(
+    userId: string,
+    callSnapshot: VoiceCallSessionSnapshot,
+  ): UserCallStateSnapshot | null {
+    if (callSnapshot.status === "ENDED" || callSnapshot.status === "IDLE") {
+      return null;
+    }
+
+    const participant = callSnapshot.participants.find((entry) => entry.userId === userId) ?? null;
+    if (!participant) {
+      return null;
+    }
+
+    return {
+      userId,
+      callId: callSnapshot.callId,
+      roomId: callSnapshot.roomId,
+      callStatus: callSnapshot.status,
+      participantState: participant.state,
+      muted: participant.muted,
+      deafened: participant.deafened,
+      speaking: participant.speaking,
+      connectedAt: callSnapshot.connectedAt ?? null,
+      updatedAt: callSnapshot.updatedAt,
+    };
+  }
+
+  private broadcastUserCallStateLocal(
+    userId: string,
+    state: UserCallStateSnapshot | null,
+    call: VoiceCallSessionSnapshot | null,
+  ): void {
+    const watchers = this.userCallStateWatchers.get(userId);
+    if (!watchers) {
+      return;
+    }
+    const payload = {
+      type: "user-call-state",
+      userId,
+      state,
+      call,
+      serverTime: new Date().toISOString(),
+    };
+    for (const context of watchers.values()) {
+      this.send(context.socket, payload);
+    }
+  }
+
+  private emitUserCallStateUpdates(
+    nextSnapshot: VoiceCallSessionSnapshot,
+    previousSnapshot: VoiceCallSessionSnapshot | null,
+  ): void {
+    const userIds = new Set<string>();
+    for (const participant of previousSnapshot?.participants ?? []) {
+      userIds.add(participant.userId);
+    }
+    for (const participant of nextSnapshot.participants) {
+      userIds.add(participant.userId);
+    }
+
+    for (const userId of userIds) {
+      const nextState = this.buildUserCallStateSnapshot(userId, nextSnapshot);
+      this.broadcastUserCallStateLocal(
+        userId,
+        nextState,
+        nextState ? nextSnapshot : null,
+      );
+    }
+  }
+
+  private async sendUserCallStateSnapshot(socket: WebSocket, userId: string): Promise<void> {
+    const currentState = await this.readUserCallState(userId);
+    if (!currentState) {
+      this.send(socket, {
+        type: "user-call-state",
+        userId,
+        state: null,
+        call: null,
+        serverTime: new Date().toISOString(),
+      });
+      return;
+    }
+
+    const callSnapshot = await this.readCallSession(currentState.roomId);
+    const normalizedState = callSnapshot ? this.buildUserCallStateSnapshot(userId, callSnapshot) : null;
+    this.send(socket, {
+      type: "user-call-state",
+      userId,
+      state: normalizedState,
+      call: normalizedState ? callSnapshot : null,
+      serverTime: new Date().toISOString(),
+    });
+  }
+
   private async persistUserCallStates(
     snapshot: VoiceCallSessionSnapshot,
     previousSnapshot: VoiceCallSessionSnapshot | null,
@@ -1444,10 +1756,15 @@ export class VoiceSignalingServer {
         operations.push(this.redis.command.set(
           toUserCallStateRedisKey(participant.userId),
           JSON.stringify({
+            userId: participant.userId,
             callId: snapshot.callId,
             roomId: snapshot.roomId,
             callStatus: snapshot.status,
             participantState: participant.state,
+            muted: participant.muted,
+            deafened: participant.deafened,
+            speaking: participant.speaking,
+            connectedAt: snapshot.connectedAt,
             updatedAt: snapshot.updatedAt,
           }),
           "EX",
@@ -1474,6 +1791,7 @@ export class VoiceSignalingServer {
       ).catch(() => undefined);
     }
     await this.persistUserCallStates(snapshot, previousSnapshot);
+    this.emitUserCallStateUpdates(snapshot, previousSnapshot);
   }
 
   private didCallSnapshotChange(previous: VoiceCallSessionSnapshot | null, next: VoiceCallSessionSnapshot): boolean {
@@ -1505,6 +1823,7 @@ export class VoiceSignalingServer {
         current.displayName !== upcoming.displayName ||
         current.state !== upcoming.state ||
         current.muted !== upcoming.muted ||
+        current.deafened !== upcoming.deafened ||
         current.speaking !== upcoming.speaking ||
         current.joinedAt !== upcoming.joinedAt ||
         current.leftAt !== upcoming.leftAt
@@ -1592,6 +1911,7 @@ export class VoiceSignalingServer {
         leftAt: null,
         lastSeenAt: participant.updatedAt,
         muted: participant.muted,
+        deafened: participant.deafened,
         speaking: participant.speaking,
       });
     }
@@ -1613,6 +1933,7 @@ export class VoiceSignalingServer {
         leftAt: disconnectedAt,
         lastSeenAt: participant.updatedAt,
         muted: participant.muted,
+        deafened: participant.deafened,
         speaking: participant.speaking,
       });
     }

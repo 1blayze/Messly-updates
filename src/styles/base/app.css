@@ -754,6 +754,14 @@ body {
   grid-template-rows: auto 1fr;
 }
 
+.main-panel--network-status-multi {
+  grid-template-rows: var(--app-navbar-height) auto auto 1fr;
+}
+
+.main-panel--chat.main-panel--network-status-multi {
+  grid-template-rows: auto auto 1fr;
+}
+
 .main-panel__navbar {
   display: flex;
   align-items: center;
@@ -835,6 +843,79 @@ body {
 
 .main-panel__network-banner--restored {
   color: #7dd8a3;
+}
+
+.main-panel__voice-banner {
+  display: grid;
+  grid-template-columns: 10px 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 52px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: linear-gradient(180deg, rgba(67, 173, 120, 0.17), rgba(67, 173, 120, 0.08));
+  color: #7dd8a3;
+}
+
+.main-panel__voice-banner-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: 0 0 0 0 currentColor;
+  animation: app-network-pulse 1.65s ease-out infinite;
+}
+
+.main-panel__voice-banner-icon {
+  color: currentColor;
+  opacity: 0.95;
+}
+
+.main-panel__voice-banner-copy {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.main-panel__voice-banner-title {
+  color: #f6f8fb;
+  font-size: 13px;
+  line-height: 1.15;
+  font-weight: 600;
+}
+
+.main-panel__voice-banner-subtitle {
+  color: rgba(246, 248, 251, 0.78);
+  font-size: 12px;
+  line-height: 1.15;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.main-panel__voice-banner-action {
+  height: 30px;
+  border: 1px solid rgba(125, 216, 163, 0.42);
+  border-radius: 8px;
+  padding: 0 12px;
+  background: rgba(125, 216, 163, 0.16);
+  color: #e6fff0;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease, transform 120ms ease;
+}
+
+.main-panel__voice-banner-action:hover {
+  background: rgba(125, 216, 163, 0.24);
+  border-color: rgba(125, 216, 163, 0.58);
+  transform: translateY(-1px);
+}
+
+.main-panel__voice-banner-action:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.45);
+  outline-offset: 2px;
 }
 
 .main-panel__navbar-left {

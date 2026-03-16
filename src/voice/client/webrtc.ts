@@ -106,6 +106,7 @@ interface JoinedParticipant {
   userId: string;
   displayName: string;
   muted: boolean;
+  deafened: boolean;
   speaking: boolean;
 }
 
@@ -146,6 +147,7 @@ const joinedSignalSchema = z.object({
       userId: z.string().trim().min(1),
       displayName: z.string().trim().min(1),
       muted: z.boolean(),
+      deafened: z.boolean().optional().default(false),
       speaking: z.boolean(),
     }),
   ),
@@ -157,6 +159,7 @@ const participantJoinedSignalSchema = z.object({
     userId: z.string().trim().min(1),
     displayName: z.string().trim().min(1),
     muted: z.boolean(),
+    deafened: z.boolean().optional().default(false),
     speaking: z.boolean(),
   }),
 });
@@ -196,6 +199,12 @@ const muteStateSignalSchema = z.object({
   muted: z.boolean(),
 });
 
+const deafenStateSignalSchema = z.object({
+  type: z.literal("participant-deafen-state"),
+  userId: z.string().trim().min(1),
+  deafened: z.boolean(),
+});
+
 const speakingStateSignalSchema = z.object({
   type: z.literal("participant-speaking-state"),
   userId: z.string().trim().min(1),
@@ -227,6 +236,7 @@ const inboundSignalingSchema = z.discriminatedUnion("type", [
   answerSignalSchema,
   iceSignalSchema,
   muteStateSignalSchema,
+  deafenStateSignalSchema,
   speakingStateSignalSchema,
   errorSignalSchema,
   replacedSignalSchema,
@@ -847,6 +857,12 @@ export class VoiceCallClient {
         muted: this.localMuted,
         deafened: true,
       });
+      if (this.joinedRoom) {
+        this.sendSignal({
+          type: "deafen-state",
+          deafened: true,
+        });
+      }
       return;
     }
 
@@ -861,6 +877,12 @@ export class VoiceCallClient {
       muted: this.localMuted,
       deafened: false,
     });
+    if (this.joinedRoom) {
+      this.sendSignal({
+        type: "deafen-state",
+        deafened: false,
+      });
+    }
   }
 
   toggleDeafened(): void {
@@ -992,6 +1014,11 @@ export class VoiceCallClient {
           muted: payload.muted,
         });
         return;
+      case "participant-deafen-state":
+        this.updateRemoteParticipant(payload.userId, {
+          deafened: payload.deafened,
+        });
+        return;
       case "participant-speaking-state":
         this.updateRemoteParticipant(payload.userId, {
           speaking: payload.speaking,
@@ -1041,6 +1068,10 @@ export class VoiceCallClient {
       type: "mute-state",
       muted: this.localMuted,
     });
+    this.sendSignal({
+      type: "deafen-state",
+      deafened: this.localDeafened,
+    });
     if (this.pendingSpeakingState) {
       this.sendSignal({
         type: "speaking-state",
@@ -1057,6 +1088,7 @@ export class VoiceCallClient {
       presentRemoteUsers.add(participant.userId);
       this.ensureRemoteParticipant(participant.userId, participant.displayName, {
         muted: participant.muted,
+        deafened: participant.deafened,
         speaking: participant.speaking,
         speakingLevel: participant.speaking ? 1 : 0,
       });
@@ -1083,6 +1115,7 @@ export class VoiceCallClient {
 
     this.ensureRemoteParticipant(participant.userId, participant.displayName, {
       muted: participant.muted,
+      deafened: participant.deafened,
       speaking: participant.speaking,
       speakingLevel: participant.speaking ? 1 : 0,
       connectionState: "connecting",

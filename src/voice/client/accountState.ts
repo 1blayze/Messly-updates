@@ -1,65 +1,41 @@
 import { z } from "zod";
 import { getGatewayUrl, getSupabaseAccessToken } from "../../api/client";
+import type { VoiceCallSessionSnapshot } from "./presence";
 
 const DEFAULT_SIGNALING_PATH = "/voice";
 const SIGNALING_PING_INTERVAL_MS = 3_000;
 const SIGNALING_RECONNECT_BASE_DELAY_MS = 800;
 const SIGNALING_RECONNECT_MAX_DELAY_MS = 8_000;
 
-export type VoicePresenceConnectionState = "idle" | "connecting" | "connected" | "reconnecting" | "closed";
-export type VoiceCallSessionStatus = "IDLE" | "RINGING" | "CONNECTED" | "RECONNECTING" | "ENDED";
-export type VoiceCallParticipantStatus = "RINGING" | "CONNECTED" | "DISCONNECTED";
-export type VoiceCallLifecycleEvent =
-  | "CALL_STARTED"
-  | "CALL_RINGING"
-  | "CALL_JOINED"
-  | "CALL_LEFT"
-  | "CALL_RECONNECTED"
-  | "CALL_ENDED"
-  | "CALL_STATE_UPDATED";
+export type VoiceAccountStateConnectionState = "idle" | "connecting" | "connected" | "reconnecting" | "closed";
 
-export interface VoiceCallSessionParticipantSnapshot {
+export interface VoiceAccountCallStateSnapshot {
   userId: string;
-  displayName: string;
-  state: VoiceCallParticipantStatus;
-  joinedAt: number;
-  leftAt: number | null;
-  lastSeenAt: number;
+  callId: string;
+  roomId: string;
+  callStatus: "IDLE" | "RINGING" | "CONNECTED" | "RECONNECTING" | "ENDED";
+  participantState: "RINGING" | "CONNECTED" | "DISCONNECTED";
   muted: boolean;
   deafened: boolean;
   speaking: boolean;
-}
-
-export interface VoiceCallSessionSnapshot {
-  callId: string;
-  roomId: string;
-  createdBy: string;
-  createdAt: number;
-  updatedAt: number;
-  status: VoiceCallSessionStatus;
-  ringExpiresAt: number | null;
   connectedAt: number | null;
-  endedAt: number | null;
-  endedReason: string | null;
-  singleParticipantSince: number | null;
-  participants: VoiceCallSessionParticipantSnapshot[];
+  updatedAt: number;
 }
 
-export interface VoiceCallStateUpdate {
-  event: VoiceCallLifecycleEvent;
-  roomId: string;
-  call: VoiceCallSessionSnapshot;
+export interface VoiceAccountCallStateUpdate {
+  userId: string;
+  state: VoiceAccountCallStateSnapshot | null;
+  call: VoiceCallSessionSnapshot | null;
 }
 
-export interface VoiceCallPresenceClientOptions {
-  roomId: string;
+export interface VoiceCallAccountStateClientOptions {
   self: {
     userId: string;
     displayName: string;
   };
   signalingUrl?: string;
-  onStateUpdate?: (update: VoiceCallStateUpdate) => void;
-  onConnectionStateChanged?: (state: VoicePresenceConnectionState) => void;
+  onStateUpdate?: (update: VoiceAccountCallStateUpdate) => void;
+  onConnectionStateChanged?: (state: VoiceAccountStateConnectionState) => void;
   onError?: (error: Error) => void;
 }
 
@@ -68,36 +44,25 @@ const connectedSignalSchema = z.object({
   connectionId: z.string().trim().min(1),
 });
 
-const watchingSignalSchema = z.object({
-  type: z.literal("watching"),
-  roomId: z.string().trim().min(1),
+const watchingUserCallStateSignalSchema = z.object({
+  type: z.literal("watching-user-call-state"),
+  userId: z.string().trim().min(1),
 });
 
-const callStateSignalSchema = z.object({
-  type: z.literal("call-state"),
-  event: z.enum([
-    "CALL_STARTED",
-    "CALL_RINGING",
-    "CALL_JOINED",
-    "CALL_LEFT",
-    "CALL_RECONNECTED",
-    "CALL_ENDED",
-    "CALL_STATE_UPDATED",
-  ]),
+const callSnapshotSchema = z.object({
+  callId: z.string().trim().min(1),
   roomId: z.string().trim().min(1),
-  call: z.object({
-    callId: z.string().trim().min(1),
-    roomId: z.string().trim().min(1),
-    createdBy: z.string().trim().min(1),
-    createdAt: z.number().finite(),
-    updatedAt: z.number().finite(),
-    status: z.enum(["IDLE", "RINGING", "CONNECTED", "RECONNECTING", "ENDED"]),
-    ringExpiresAt: z.number().finite().nullable(),
-    connectedAt: z.number().finite().nullable(),
-    endedAt: z.number().finite().nullable(),
-    endedReason: z.string().trim().min(1).nullable(),
-    singleParticipantSince: z.number().finite().nullable(),
-    participants: z.array(z.object({
+  createdBy: z.string().trim().min(1),
+  createdAt: z.number().finite(),
+  updatedAt: z.number().finite(),
+  status: z.enum(["IDLE", "RINGING", "CONNECTED", "RECONNECTING", "ENDED"]),
+  ringExpiresAt: z.number().finite().nullable(),
+  connectedAt: z.number().finite().nullable(),
+  endedAt: z.number().finite().nullable(),
+  endedReason: z.string().trim().min(1).nullable(),
+  singleParticipantSince: z.number().finite().nullable(),
+  participants: z.array(
+    z.object({
       userId: z.string().trim().min(1),
       displayName: z.string().trim().min(1),
       state: z.enum(["RINGING", "CONNECTED", "DISCONNECTED"]),
@@ -107,8 +72,26 @@ const callStateSignalSchema = z.object({
       muted: z.boolean(),
       deafened: z.boolean().optional().default(false),
       speaking: z.boolean(),
-    })),
-  }),
+    }),
+  ),
+});
+
+const userCallStateSignalSchema = z.object({
+  type: z.literal("user-call-state"),
+  userId: z.string().trim().min(1),
+  state: z.object({
+    userId: z.string().trim().min(1),
+    callId: z.string().trim().min(1),
+    roomId: z.string().trim().min(1),
+    callStatus: z.enum(["IDLE", "RINGING", "CONNECTED", "RECONNECTING", "ENDED"]),
+    participantState: z.enum(["RINGING", "CONNECTED", "DISCONNECTED"]),
+    muted: z.boolean().optional().default(false),
+    deafened: z.boolean().optional().default(false),
+    speaking: z.boolean().optional().default(false),
+    connectedAt: z.number().finite().nullable().optional().default(null),
+    updatedAt: z.number().finite(),
+  }).nullable(),
+  call: callSnapshotSchema.nullable(),
 });
 
 const errorSignalSchema = z.object({
@@ -129,8 +112,8 @@ const replacedSignalSchema = z.object({
 
 const inboundSignalingSchema = z.discriminatedUnion("type", [
   connectedSignalSchema,
-  watchingSignalSchema,
-  callStateSignalSchema,
+  watchingUserCallStateSignalSchema,
+  userCallStateSignalSchema,
   errorSignalSchema,
   pongSignalSchema,
   replacedSignalSchema,
@@ -180,26 +163,24 @@ function parseInboundMessage(raw: string): InboundSignalingMessage | null {
   }
 }
 
-export class VoiceCallPresenceClient {
-  private readonly roomId: string;
+export class VoiceCallAccountStateClient {
   private readonly selfUserId: string;
   private readonly selfDisplayName: string;
   private readonly signalingUrl: string | null;
-  private readonly onStateUpdate: ((update: VoiceCallStateUpdate) => void) | null;
-  private readonly onConnectionStateChanged: ((state: VoicePresenceConnectionState) => void) | null;
+  private readonly onStateUpdate: ((update: VoiceAccountCallStateUpdate) => void) | null;
+  private readonly onConnectionStateChanged: ((state: VoiceAccountStateConnectionState) => void) | null;
   private readonly onError: ((error: Error) => void) | null;
 
-  private state: VoicePresenceConnectionState = "idle";
+  private state: VoiceAccountStateConnectionState = "idle";
   private socket: WebSocket | null = null;
   private reconnectAttempt = 0;
   private reconnectTimerId: number | null = null;
   private pingIntervalId: number | null = null;
   private lastPongAtMs = 0;
   private stopRequested = false;
-  private latestCallSnapshot: VoiceCallSessionSnapshot | null = null;
+  private latestState: VoiceAccountCallStateUpdate | null = null;
 
-  constructor(options: VoiceCallPresenceClientOptions) {
-    this.roomId = String(options.roomId ?? "").trim();
+  constructor(options: VoiceCallAccountStateClientOptions) {
     this.selfUserId = String(options.self.userId ?? "").trim();
     this.selfDisplayName = String(options.self.displayName ?? "").trim() || this.selfUserId;
     this.signalingUrl = resolveVoiceSignalingUrl(options.signalingUrl);
@@ -208,23 +189,20 @@ export class VoiceCallPresenceClient {
     this.onError = options.onError ?? null;
   }
 
-  getConnectionState(): VoicePresenceConnectionState {
+  getConnectionState(): VoiceAccountStateConnectionState {
     return this.state;
   }
 
-  getLatestCallSnapshot(): VoiceCallSessionSnapshot | null {
-    return this.latestCallSnapshot;
+  getLatestState(): VoiceAccountCallStateUpdate | null {
+    return this.latestState;
   }
 
   async start(): Promise<void> {
     if (this.state === "connected" || this.state === "connecting" || this.state === "reconnecting") {
       return;
     }
-    if (!this.roomId) {
-      throw new Error("Sala de voz invalida para monitoramento.");
-    }
     if (!this.selfUserId) {
-      throw new Error("Usuario invalido para monitoramento de voz.");
+      throw new Error("Usuario invalido para monitoramento global de voz.");
     }
     if (!this.signalingUrl) {
       throw new Error("URL de signaling de voz indisponivel.");
@@ -248,7 +226,7 @@ export class VoiceCallPresenceClient {
     if (socket) {
       if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CLOSING) {
         try {
-          socket.close(1000, "VOICE_WATCH_STOP");
+          socket.close(1000, "VOICE_ACCOUNT_WATCH_STOP");
         } catch {
           // Ignore close failures.
         }
@@ -274,11 +252,11 @@ export class VoiceCallPresenceClient {
         if (this.stopRequested || this.socket !== socket) {
           settled = true;
           try {
-            socket.close(1000, "VOICE_WATCH_STOP");
+            socket.close(1000, "VOICE_ACCOUNT_WATCH_STOP");
           } catch {
             // Ignore close failures.
           }
-          reject(new Error("Monitor de voz cancelado."));
+          reject(new Error("Monitor global de voz cancelado."));
           return;
         }
         settled = true;
@@ -290,7 +268,7 @@ export class VoiceCallPresenceClient {
           return;
         }
         settled = true;
-        reject(new Error("Falha ao conectar no monitor de voz."));
+        reject(new Error("Falha ao conectar no monitor global de voz."));
       }, { once: true });
 
       socket.addEventListener("close", () => {
@@ -298,17 +276,17 @@ export class VoiceCallPresenceClient {
           return;
         }
         settled = true;
-        reject(new Error("Conexao de monitoramento encerrada durante a inicializacao."));
+        reject(new Error("Conexao global de voz encerrada durante a inicializacao."));
       }, { once: true });
     });
 
     if (this.stopRequested || this.socket !== socket) {
       try {
-        socket.close(1000, "VOICE_WATCH_STOP");
+        socket.close(1000, "VOICE_ACCOUNT_WATCH_STOP");
       } catch {
         // Ignore close failures.
       }
-      throw new Error("Monitor de voz cancelado.");
+      throw new Error("Monitor global de voz cancelado.");
     }
     this.lastPongAtMs = Date.now();
 
@@ -345,22 +323,22 @@ export class VoiceCallPresenceClient {
 
     switch (payload.type) {
       case "connected":
-      case "watching":
+      case "watching-user-call-state":
       case "pong":
         return;
-      case "call-state":
-        this.latestCallSnapshot = payload.call;
-        this.onStateUpdate?.({
-          event: payload.event,
-          roomId: payload.roomId,
+      case "user-call-state":
+        this.latestState = {
+          userId: payload.userId,
+          state: payload.state,
           call: payload.call,
-        });
+        };
+        this.onStateUpdate?.(this.latestState);
         return;
       case "error":
         this.onError?.(new Error(`${payload.message} (${payload.code})`));
         return;
       case "replaced":
-        this.onError?.(new Error("Monitor de voz substituido por outra sessao."));
+        this.onError?.(new Error("Monitor global de voz substituido por outra sessao."));
         return;
       default:
         return;
@@ -370,8 +348,7 @@ export class VoiceCallPresenceClient {
   private async sendWatchSignal(): Promise<void> {
     const accessToken = await getSupabaseAccessToken().catch(() => null);
     this.sendSignal({
-      type: "watch",
-      roomId: this.roomId,
+      type: "watch-user-call-state",
       userId: this.selfUserId,
       displayName: this.selfDisplayName,
       accessToken: accessToken ?? undefined,
@@ -422,7 +399,7 @@ export class VoiceCallPresenceClient {
       return;
     }
     try {
-      socket.close(4001, "VOICE_WATCH_PING_TIMEOUT");
+      socket.close(4001, "VOICE_ACCOUNT_WATCH_PING_TIMEOUT");
     } catch {
       // Ignore close failures.
     }
@@ -453,7 +430,7 @@ export class VoiceCallPresenceClient {
     }
   }
 
-  private setState(nextState: VoicePresenceConnectionState): void {
+  private setState(nextState: VoiceAccountStateConnectionState): void {
     if (this.state === nextState) {
       return;
     }

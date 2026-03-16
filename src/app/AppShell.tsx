@@ -22,7 +22,11 @@ import {
   subscribeSpotifyListenAlongSession,
   type SpotifyListenAlongSession,
 } from "../services/connections/spotifyListenAlong";
-import { getVoiceCallUiSnapshot, subscribeVoiceCallUiSnapshot } from "../voice/client/uiState";
+import { getVoiceCallUiSnapshot, publishVoiceCallUiSnapshot, subscribeVoiceCallUiSnapshot } from "../voice/client/uiState";
+import {
+  VoiceCallAccountStateClient,
+  type VoiceAccountCallStateUpdate,
+} from "../voice/client/accountState";
 import { getAvatarUrl, getBannerUrl, getNameAvatarUrl, isDefaultAvatarUrl, isDefaultBannerUrl } from "../services/cdn/mediaUrls";
 import { normalizeBannerColor } from "../services/profile/bannerColor";
 import { supabase } from "../lib/supabaseClient";
@@ -88,6 +92,9 @@ const PRESENCE_DEVICE_STALE_MS = 90_000;
 const SPOTIFY_ACTIVITY_END_GRACE_MS = 8_000;
 const SPOTIFY_ACTIVITY_NO_DURATION_STALE_MS = 60_000;
 const SETTINGS_AUTO_OPEN_SECTION_KEY = "messly:settings:auto-open-section";
+const VOICE_GLOBAL_REJOIN_EVENT = "messly:voice-rejoin-request";
+
+const ACTIVE_VOICE_CALL_STATUSES = new Set(["RINGING", "CONNECTED", "RECONNECTING"]);
 
 interface FriendRequestRow {
   id: string;
@@ -1115,6 +1122,48 @@ async function ensureDirectConversation(userA: string, userB: string): Promise<s
   return createdConversation.id as string;
 }
 
+function resolvePeerUserIdFromVoiceRoom(
+  roomIdRaw: string | null | undefined,
+  localUserIdRaw: string | null | undefined,
+): string | null {
+  const roomId = String(roomIdRaw ?? "").trim().toLowerCase();
+  const localUserId = String(localUserIdRaw ?? "").trim().toLowerCase();
+  if (!roomId || !localUserId || !roomId.startsWith("dm:")) {
+    return null;
+  }
+
+  const parts = roomId.split(":");
+  if (parts.length < 3) {
+    return null;
+  }
+
+  const left = String(parts[1] ?? "").trim();
+  const right = String(parts[2] ?? "").trim();
+  if (!left || !right) {
+    return null;
+  }
+  if (left === localUserId) {
+    return right;
+  }
+  if (right === localUserId) {
+    return left;
+  }
+  return null;
+}
+
+function formatVoiceElapsedLabel(connectedAt: number | null | undefined): string {
+  const connectedAtMs = Number(connectedAt ?? 0);
+  if (!Number.isFinite(connectedAtMs) || connectedAtMs <= 0) {
+    return "00:00";
+  }
+  const elapsedSeconds = Math.max(0, Math.floor((Date.now() - connectedAtMs) / 1_000));
+  const minutes = Math.floor(elapsedSeconds / 60)
+    .toString()
+    .padStart(2, "0");
+  const seconds = (elapsedSeconds % 60).toString().padStart(2, "0");
+  return `${minutes}:${seconds}`;
+}
+
 export default function AppShell() {
   const queryClient = useQueryClient();
   const { user } = useAuthSession();
@@ -1150,6 +1199,8 @@ export default function AppShell() {
   const [activeDirectMessage, setActiveDirectMessage] = useState<SidebarDirectMessageSelection | null>(null);
   const [pinnedDirectMessageDuringCall, setPinnedDirectMessageDuringCall] = useState<SidebarDirectMessageSelection | null>(null);
   const [voiceCallUiSnapshot, setVoiceCallUiSnapshot] = useState(() => getVoiceCallUiSnapshot());
+  const [voiceAccountCallState, setVoiceAccountCallState] = useState<VoiceAccountCallStateUpdate | null>(null);
+  const [voiceAccountElapsedTick, setVoiceAccountElapsedTick] = useState(0);
   const [activeDirectMessageMutualFriendIds, setActiveDirectMessageMutualFriendIds] = useState<string[]>([]);
   const [sidebarDirectMessages, setSidebarDirectMessages] = useState<SidebarDirectMessageSelection[]>([]);
   const [isSidebarHydrated, setIsSidebarHydrated] = useState(false);
@@ -1182,6 +1233,7 @@ export default function AppShell() {
   const networkReconnectTimerRef = useRef<number | null>(null);
   const networkBannerHideTimerRef = useRef<number | null>(null);
   const networkOnlineRef = useRef<boolean>(typeof navigator === "undefined" ? true : navigator.onLine);
+  const voiceAccountStateClientRef = useRef<VoiceCallAccountStateClient | null>(null);
   const sidebarDirectMessagesByConversationId = useMemo(() => {
     const map = new Map<string, SidebarDirectMessageSelection>();
     sidebarDirectMessages.forEach((item) => {
@@ -1189,6 +1241,23 @@ export default function AppShell() {
     });
     return map;
   }, [sidebarDirectMessages]);
+  const sidebarDirectMessagesByUserId = useMemo(() => {
+    const map = new Map<string, SidebarDirectMessageSelection>();
+    sidebarDirectMessages.forEach((item) => {
+      const userId = String(item.userId ?? "").trim().toLowerCase();
+      if (!userId || map.has(userId)) {
+        return;
+      }
+      map.set(userId, item);
+    });
+    return map;
+  }, [sidebarDirectMessages]);
+  const accountVoiceStateSnapshot = voiceAccountCallState?.state ?? null;
+  const accountVoiceCallSnapshot = voiceAccountCallState?.call ?? null;
+  const isServerVoiceCallActive = Boolean(
+    accountVoiceStateSnapshot
+      && ACTIVE_VOICE_CALL_STATUSES.has(String(accountVoiceStateSnapshot.callStatus ?? "").trim().toUpperCase()),
+  );
   const isFriendsAndPendingReady =
     !isFriendRequestsAvailable || (hasInitializedFriends && !isFriendsLoading && !isPendingLoading);
   const canRevealShell = (isSidebarHydrated && isFriendsAndPendingReady) || shellStartupTimedOut;
@@ -1216,10 +1285,61 @@ export default function AppShell() {
   }, []);
 
   useEffect(() => {
+    const localUserId = String(currentUserId ?? "").trim();
+    if (!localUserId) {
+      setVoiceAccountCallState(null);
+      return;
+    }
+
+    const accountStateClient = new VoiceCallAccountStateClient({
+      self: {
+        userId: localUserId,
+        displayName: String(user?.displayName ?? user?.email ?? "").trim() || "Voce",
+      },
+      onStateUpdate: (update) => {
+        setVoiceAccountCallState(update);
+        if (update.state) {
+          publishVoiceCallUiSnapshot({
+            muted: Boolean(update.state.muted),
+            deafened: Boolean(update.state.deafened),
+          });
+        }
+      },
+      onError: (error) => {
+        if (import.meta.env.DEV) {
+          console.warn("[voice:account-state]", error);
+        }
+      },
+    });
+
+    voiceAccountStateClientRef.current = accountStateClient;
+    void accountStateClient.start().catch(() => undefined);
+
+    return () => {
+      if (voiceAccountStateClientRef.current === accountStateClient) {
+        voiceAccountStateClientRef.current = null;
+      }
+      void accountStateClient.stop();
+    };
+  }, [currentUserId, user?.displayName, user?.email]);
+
+  useEffect(() => {
     if (activeDirectMessage) {
       setPinnedDirectMessageDuringCall(activeDirectMessage);
     }
   }, [activeDirectMessage]);
+
+  useEffect(() => {
+    if (!isServerVoiceCallActive || !accountVoiceStateSnapshot?.connectedAt) {
+      return;
+    }
+    const timerId = window.setInterval(() => {
+      setVoiceAccountElapsedTick((current) => (current + 1) % 10_000);
+    }, 1_000);
+    return () => {
+      window.clearInterval(timerId);
+    };
+  }, [accountVoiceStateSnapshot?.connectedAt, isServerVoiceCallActive]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -3242,6 +3362,89 @@ export default function AppShell() {
       themeAccentColor: currentUserChatProfile?.themeAccentColor ?? null,
     };
   }, [currentUserId, currentUserChatProfile, presenceState, user?.displayName, user?.uid]);
+  void voiceAccountElapsedTick;
+  const voiceAccountRoomId = String(accountVoiceStateSnapshot?.roomId ?? "").trim();
+  const voiceAccountPeerUserId = useMemo(
+    () => resolvePeerUserIdFromVoiceRoom(voiceAccountRoomId, currentUserId),
+    [currentUserId, voiceAccountRoomId],
+  );
+  const voiceAccountPeerSelection = useMemo(() => {
+    if (!voiceAccountPeerUserId) {
+      return null;
+    }
+    return sidebarDirectMessagesByUserId.get(voiceAccountPeerUserId) ?? null;
+  }, [sidebarDirectMessagesByUserId, voiceAccountPeerUserId]);
+  const voiceAccountPeerParticipant = useMemo(() => {
+    if (!voiceAccountPeerUserId || !accountVoiceCallSnapshot) {
+      return null;
+    }
+    return (
+      accountVoiceCallSnapshot.participants.find(
+        (participant) => String(participant.userId ?? "").trim().toLowerCase() === voiceAccountPeerUserId,
+      ) ?? null
+    );
+  }, [accountVoiceCallSnapshot, voiceAccountPeerUserId]);
+  const voiceAccountElapsedLabel = useMemo(
+    () => formatVoiceElapsedLabel(accountVoiceStateSnapshot?.connectedAt),
+    [accountVoiceStateSnapshot?.connectedAt, voiceAccountElapsedTick],
+  );
+  const showVoiceCallGlobalBanner = Boolean(
+    isServerVoiceCallActive
+      && voiceAccountRoomId
+      && !voiceCallUiSnapshot.callActive
+      && !voiceCallUiSnapshot.callConnecting,
+  );
+  const handleRejoinVoiceCallFromGlobalBanner = useCallback(async (): Promise<void> => {
+    if (!currentUserId || !voiceAccountRoomId) {
+      return;
+    }
+
+    const normalizedPeerUserId = String(voiceAccountPeerUserId ?? "").trim().toLowerCase();
+    let targetSelection = voiceAccountPeerSelection;
+
+    if (!targetSelection && normalizedPeerUserId) {
+      try {
+        const conversationId = await ensureDirectConversation(currentUserId, normalizedPeerUserId);
+        const fallbackDisplayName = String(voiceAccountPeerParticipant?.displayName ?? "").trim() || "Contato";
+        const fallbackAvatar = getNameAvatarUrl(fallbackDisplayName || "C");
+        targetSelection = {
+          conversationId,
+          userId: normalizedPeerUserId,
+          username: normalizedPeerUserId,
+          displayName: fallbackDisplayName,
+          avatarSrc: fallbackAvatar,
+          presenceState: "online",
+        };
+      } catch (error) {
+        setFriendsError(resolveOpenConversationErrorMessage(error));
+        return;
+      }
+    }
+
+    if (!targetSelection) {
+      return;
+    }
+
+    setActiveDirectMessage(targetSelection);
+    setPinnedDirectMessageDuringCall(targetSelection);
+
+    if (typeof window !== "undefined") {
+      window.sessionStorage.setItem("messly:voice-rejoin:pending-room-id", voiceAccountRoomId);
+      window.setTimeout(() => {
+        window.dispatchEvent(new CustomEvent(VOICE_GLOBAL_REJOIN_EVENT, {
+          detail: {
+            roomId: voiceAccountRoomId,
+          },
+        }));
+      }, 120);
+    }
+  }, [
+    currentUserId,
+    voiceAccountPeerParticipant?.displayName,
+    voiceAccountPeerSelection,
+    voiceAccountPeerUserId,
+    voiceAccountRoomId,
+  ]);
   const showNetworkBanner = networkBannerState !== "online";
   const networkBannerMeta = useMemo(() => {
     switch (networkBannerState) {
@@ -3270,6 +3473,7 @@ export default function AppShell() {
         return null;
     }
   }, [networkBannerState]);
+  const statusBannerCount = (showNetworkBanner && networkBannerMeta ? 1 : 0) + (showVoiceCallGlobalBanner ? 1 : 0);
   const isOpenPendingProfileCurrentUser = Boolean(
     openPendingProfile &&
       currentUserId &&
@@ -3331,7 +3535,9 @@ export default function AppShell() {
       </Suspense>
       <main
         className={`main-panel${activeDirectMessage ? " main-panel--chat" : ""}${
-          showNetworkBanner ? " main-panel--network-status" : ""
+          statusBannerCount > 0 ? " main-panel--network-status" : ""
+        }${
+          statusBannerCount > 1 ? " main-panel--network-status-multi" : ""
         }`}
       >
         {!activeDirectMessage ? (
@@ -3413,6 +3619,38 @@ export default function AppShell() {
               <strong className="main-panel__network-banner-title">{networkBannerMeta.title}</strong>
               <span className="main-panel__network-banner-subtitle">{networkBannerMeta.subtitle}</span>
             </div>
+          </section>
+        ) : null}
+
+        {showVoiceCallGlobalBanner ? (
+          <section
+            className="main-panel__voice-banner"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >
+            <div className="main-panel__voice-banner-dot" aria-hidden="true" />
+            <MaterialSymbolIcon className="main-panel__voice-banner-icon" name="call" size={18} />
+            <div className="main-panel__voice-banner-copy">
+              <strong className="main-panel__voice-banner-title">Você está em uma chamada em andamento</strong>
+              <span className="main-panel__voice-banner-subtitle">
+                🔊 Em chamada
+                {voiceAccountPeerParticipant?.displayName
+                  ? ` com ${voiceAccountPeerParticipant.displayName}`
+                  : ""}
+                {" · "}
+                Tempo conectado: {voiceAccountElapsedLabel}
+              </span>
+            </div>
+            <button
+              className="main-panel__voice-banner-action"
+              type="button"
+              onClick={() => {
+                void handleRejoinVoiceCallFromGlobalBanner();
+              }}
+            >
+              Voltar para chamada
+            </button>
           </section>
         ) : null}
 
