@@ -2394,6 +2394,80 @@
   border-top: 0;
 }
 
+.noiseSuppressionModeList {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.noiseSuppressionModeOption {
+  width: 100%;
+  border: 1px solid rgba(178, 184, 194, 0.22);
+  border-radius: 10px;
+  background: rgba(20, 24, 31, 0.62);
+  color: rgba(225, 231, 240, 0.9);
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  column-gap: 10px;
+  row-gap: 2px;
+  align-items: center;
+  text-align: left;
+  padding: 9px 10px;
+  cursor: pointer;
+  transition: border-color 120ms ease, background-color 120ms ease, transform 120ms ease;
+}
+
+.noiseSuppressionModeOption:hover {
+  border-color: rgba(196, 203, 214, 0.38);
+  background: rgba(28, 33, 43, 0.72);
+  transform: translateY(-1px);
+}
+
+.noiseSuppressionModeOption:focus-visible {
+  outline: none;
+  border-color: rgba(90, 202, 141, 0.64);
+  box-shadow: 0 0 0 2px rgba(90, 202, 141, 0.24);
+}
+
+.noiseSuppressionModeOptionSelected {
+  border-color: rgba(90, 202, 141, 0.64);
+  background: rgba(28, 50, 38, 0.62);
+}
+
+.noiseSuppressionModeDot {
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  border: 2px solid rgba(191, 198, 208, 0.88);
+  box-sizing: border-box;
+  background: transparent;
+}
+
+.noiseSuppressionModeOptionSelected .noiseSuppressionModeDot {
+  border-color: #5aca8d;
+  background: #5aca8d;
+}
+
+.noiseSuppressionModeLabel {
+  grid-column: 2;
+  grid-row: 1;
+  color: #f2f6fb;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.noiseSuppressionModeHint {
+  grid-column: 2;
+  grid-row: 2;
+  color: rgba(194, 201, 212, 0.82);
+  font-size: 11px;
+  line-height: 1.3;
+}
+
 .processingCoreSliderRow {
   display: grid;
   gap: 8px;

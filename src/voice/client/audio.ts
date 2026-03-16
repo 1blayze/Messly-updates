@@ -1,6 +1,14 @@
+import { RnnoiseWorkletNode, loadRnnoise } from "@sapphi-red/web-noise-suppressor";
+import rnnoiseWorkletUrl from "@sapphi-red/web-noise-suppressor/rnnoiseWorklet.js?url";
+import rnnoiseWasmUrl from "@sapphi-red/web-noise-suppressor/rnnoise.wasm?url";
+import rnnoiseWasmSimdUrl from "@sapphi-red/web-noise-suppressor/rnnoise_simd.wasm?url";
+
+type VoiceNoiseSuppressionMode = "off" | "webrtc" | "rnnoise";
+
 export interface MicrophoneCaptureOptions {
   echoCancellation?: boolean;
   noiseSuppression?: boolean;
+  noiseSuppressionMode?: VoiceNoiseSuppressionMode;
   autoGainControl?: boolean;
   channelCount?: number;
   sampleRate?: number;
@@ -21,6 +29,7 @@ export interface VoiceInputQualityReport {
 }
 
 export interface VoiceAudioPipelineOptions {
+  noiseSuppressionMode?: VoiceNoiseSuppressionMode;
   onQuality?: (report: VoiceInputQualityReport) => void;
 }
 
@@ -32,7 +41,8 @@ export interface VoiceAudioPipelineSession {
 const DEFAULT_MIC_OPTIONS: Required<MicrophoneCaptureOptions> = {
   echoCancellation: true,
   noiseSuppression: true,
-  autoGainControl: false,
+  noiseSuppressionMode: "webrtc",
+  autoGainControl: true,
   channelCount: 1,
   sampleRate: 48_000,
   sampleSize: 16,
@@ -47,6 +57,10 @@ const VOICE_PRESENCE_HZ = 3_000;
 const NOISE_GATE_OPEN_GAIN = 1;
 const NOISE_GATE_CLOSED_GAIN = 0.42;
 const QUALITY_EMIT_INTERVAL_MS = 120;
+const RNNOISE_MAX_CHANNELS = 1;
+
+let rnnoiseWasmBinaryPromise: Promise<ArrayBuffer> | null = null;
+const rnnoiseWorkletContextIds = new WeakSet<AudioContext>();
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
@@ -66,26 +80,113 @@ function toNormalizedLevel(db: number): number {
   return clamp((db + 72) / 60, 0, 1);
 }
 
+function resolveNoiseSuppressionMode(modeRaw: unknown, fallback: VoiceNoiseSuppressionMode = "webrtc"): VoiceNoiseSuppressionMode {
+  const normalized = String(modeRaw ?? "").trim().toLowerCase();
+  if (normalized === "off" || normalized === "webrtc" || normalized === "rnnoise") {
+    return normalized;
+  }
+  return fallback;
+}
+
+function logVoiceCaptureStart(
+  mode: VoiceNoiseSuppressionMode,
+  options: Pick<Required<MicrophoneCaptureOptions>, "echoCancellation" | "autoGainControl" | "sampleRate" | "channelCount">,
+): void {
+  console.info("[voice:audio] VOICE_CAPTURE_STARTED", {
+    noiseSuppressionMode: mode,
+    echoCancellation: options.echoCancellation,
+    autoGainControl: options.autoGainControl,
+    sampleRate: options.sampleRate,
+    channelCount: options.channelCount,
+  });
+  if (mode === "off") {
+    console.info("[voice:audio] VOICE_NOISE_SUPPRESSION_OFF");
+  } else if (mode === "webrtc") {
+    console.info("[voice:audio] VOICE_NOISE_SUPPRESSION_WEBRTC");
+  } else {
+    console.info("[voice:audio] VOICE_NOISE_SUPPRESSION_RNNOISE");
+  }
+
+  if (options.echoCancellation) {
+    console.info("[voice:audio] VOICE_ECHO_CANCELLATION_ENABLED");
+  } else {
+    console.info("[voice:audio] VOICE_ECHO_CANCELLATION_DISABLED");
+  }
+}
+
+async function ensureRnnoiseWasmBinary(): Promise<ArrayBuffer> {
+  if (!rnnoiseWasmBinaryPromise) {
+    rnnoiseWasmBinaryPromise = loadRnnoise({
+      url: rnnoiseWasmUrl,
+      simdUrl: rnnoiseWasmSimdUrl,
+    });
+  }
+  return rnnoiseWasmBinaryPromise;
+}
+
+async function ensureRnnoiseWorkletModule(context: AudioContext): Promise<void> {
+  if (rnnoiseWorkletContextIds.has(context)) {
+    return;
+  }
+  await context.audioWorklet.addModule(rnnoiseWorkletUrl);
+  rnnoiseWorkletContextIds.add(context);
+}
+
+async function tryEnableNativeNoiseSuppression(stream: MediaStream): Promise<void> {
+  const audioTracks = stream.getAudioTracks();
+  if (audioTracks.length === 0) {
+    return;
+  }
+  await Promise.all(
+    audioTracks.map(async (track) => {
+      try {
+        await track.applyConstraints({
+          noiseSuppression: true,
+        });
+      } catch {
+        // Ignore unsupported runtime constraints.
+      }
+    }),
+  );
+}
+
 export async function captureMicrophoneStream(
   options: MicrophoneCaptureOptions = DEFAULT_MIC_OPTIONS,
 ): Promise<MediaStream> {
+  const noiseSuppressionMode = resolveNoiseSuppressionMode(
+    options.noiseSuppressionMode,
+    typeof options.noiseSuppression === "boolean"
+      ? (options.noiseSuppression ? "webrtc" : "off")
+      : "webrtc",
+  );
   const normalizedDeviceId = String(options.deviceId ?? "").trim();
   const requestedInputVolumePercent = Number(options.inputVolumePercent ?? 100);
   const normalizedInputVolume = Number.isFinite(requestedInputVolumePercent)
     ? Math.max(0, Math.min(100, requestedInputVolumePercent)) / 100
     : 1;
+  const normalizedEchoCancellation = options.echoCancellation ?? DEFAULT_MIC_OPTIONS.echoCancellation;
+  const normalizedAutoGain = options.autoGainControl ?? DEFAULT_MIC_OPTIONS.autoGainControl;
+  const normalizedSampleRate = options.sampleRate ?? DEFAULT_MIC_OPTIONS.sampleRate;
+  const normalizedChannelCount = options.channelCount ?? DEFAULT_MIC_OPTIONS.channelCount;
+
+  logVoiceCaptureStart(noiseSuppressionMode, {
+    echoCancellation: normalizedEchoCancellation,
+    autoGainControl: normalizedAutoGain,
+    sampleRate: normalizedSampleRate,
+    channelCount: normalizedChannelCount,
+  });
 
   const baseConstraints: MediaTrackConstraints = {
-    echoCancellation: options.echoCancellation ?? DEFAULT_MIC_OPTIONS.echoCancellation,
-    noiseSuppression: options.noiseSuppression ?? DEFAULT_MIC_OPTIONS.noiseSuppression,
-    autoGainControl: options.autoGainControl ?? DEFAULT_MIC_OPTIONS.autoGainControl,
-    channelCount: options.channelCount ?? DEFAULT_MIC_OPTIONS.channelCount,
+    echoCancellation: normalizedEchoCancellation,
+    noiseSuppression: noiseSuppressionMode === "webrtc",
+    autoGainControl: normalizedAutoGain,
+    channelCount: normalizedChannelCount,
   };
   (baseConstraints as MediaTrackConstraints & { volume?: number }).volume = normalizedInputVolume;
 
   const highFidelityConstraints: MediaTrackConstraints = {
     ...baseConstraints,
-    sampleRate: options.sampleRate ?? DEFAULT_MIC_OPTIONS.sampleRate,
+    sampleRate: normalizedSampleRate,
     sampleSize: options.sampleSize ?? DEFAULT_MIC_OPTIONS.sampleSize,
   };
   (highFidelityConstraints as MediaTrackConstraints & { latency?: number }).latency =
@@ -130,8 +231,16 @@ export async function createVoiceAudioPipeline(
   inputStream: MediaStream,
   options: VoiceAudioPipelineOptions = {},
 ): Promise<VoiceAudioPipelineSession> {
+  const requestedNoiseSuppressionMode = resolveNoiseSuppressionMode(options.noiseSuppressionMode, "webrtc");
+  let effectiveNoiseSuppressionMode = requestedNoiseSuppressionMode;
   const AudioContextCtor = resolveAudioContextCtor();
   if (!AudioContextCtor) {
+    if (requestedNoiseSuppressionMode === "rnnoise") {
+      console.warn("[voice:audio] RNNoise indisponivel neste navegador. Usando fallback WebRTC.");
+      await tryEnableNativeNoiseSuppression(inputStream);
+      effectiveNoiseSuppressionMode = "webrtc";
+      console.info("[voice:audio] VOICE_NOISE_SUPPRESSION_WEBRTC");
+    }
     return {
       stream: inputStream,
       stop: () => undefined,
@@ -149,53 +258,87 @@ export async function createVoiceAudioPipeline(
   }
 
   const source = context.createMediaStreamSource(inputStream);
-  const highPass = context.createBiquadFilter();
-  highPass.type = "highpass";
-  highPass.frequency.value = HIGH_PASS_CUTOFF_HZ;
-  highPass.Q.value = 0.707;
+  let processingSource: AudioNode = source;
+  let rnnoiseNode: RnnoiseWorkletNode | null = null;
+  if (requestedNoiseSuppressionMode === "rnnoise") {
+    try {
+      const wasmBinary = await ensureRnnoiseWasmBinary();
+      await ensureRnnoiseWorkletModule(context);
+      rnnoiseNode = new RnnoiseWorkletNode(context, {
+        maxChannels: RNNOISE_MAX_CHANNELS,
+        wasmBinary,
+      });
+      source.connect(rnnoiseNode);
+      processingSource = rnnoiseNode;
+    } catch (error) {
+      effectiveNoiseSuppressionMode = "webrtc";
+      console.warn("[voice:audio] RNNoise nao carregou. Usando fallback WebRTC.", error);
+      await tryEnableNativeNoiseSuppression(inputStream);
+      console.info("[voice:audio] VOICE_NOISE_SUPPRESSION_WEBRTC");
+    }
+  }
 
-  const adaptiveNoiseGate = context.createGain();
-  adaptiveNoiseGate.gain.value = NOISE_GATE_OPEN_GAIN;
+  let highPass: BiquadFilterNode | null = null;
+  let adaptiveNoiseGate: GainNode | null = null;
+  let lowCut: BiquadFilterNode | null = null;
+  let presenceBoost: BiquadFilterNode | null = null;
+  let compressor: DynamicsCompressorNode | null = null;
+  let limiter: DynamicsCompressorNode | null = null;
+  if (effectiveNoiseSuppressionMode !== "off") {
+    highPass = context.createBiquadFilter();
+    highPass.type = "highpass";
+    highPass.frequency.value = HIGH_PASS_CUTOFF_HZ;
+    highPass.Q.value = 0.707;
 
-  const lowCut = context.createBiquadFilter();
-  lowCut.type = "peaking";
-  lowCut.frequency.value = VOICE_LOW_CUT_HZ;
-  lowCut.Q.value = 1.1;
-  lowCut.gain.value = -3;
+    adaptiveNoiseGate = context.createGain();
+    adaptiveNoiseGate.gain.value = NOISE_GATE_OPEN_GAIN;
 
-  const presenceBoost = context.createBiquadFilter();
-  presenceBoost.type = "peaking";
-  presenceBoost.frequency.value = VOICE_PRESENCE_HZ;
-  presenceBoost.Q.value = 1.2;
-  presenceBoost.gain.value = 3;
+    lowCut = context.createBiquadFilter();
+    lowCut.type = "peaking";
+    lowCut.frequency.value = VOICE_LOW_CUT_HZ;
+    lowCut.Q.value = 1.1;
+    lowCut.gain.value = -3;
 
-  const compressor = context.createDynamicsCompressor();
-  compressor.threshold.value = -24;
-  compressor.knee.value = 18;
-  compressor.ratio.value = 4;
-  compressor.attack.value = 0.003;
-  compressor.release.value = 0.25;
+    presenceBoost = context.createBiquadFilter();
+    presenceBoost.type = "peaking";
+    presenceBoost.frequency.value = VOICE_PRESENCE_HZ;
+    presenceBoost.Q.value = 1.2;
+    presenceBoost.gain.value = 3;
 
-  const limiter = context.createDynamicsCompressor();
-  limiter.threshold.value = -3;
-  limiter.knee.value = 0;
-  limiter.ratio.value = 20;
-  limiter.attack.value = 0.001;
-  limiter.release.value = 0.08;
+    compressor = context.createDynamicsCompressor();
+    compressor.threshold.value = -24;
+    compressor.knee.value = 18;
+    compressor.ratio.value = 4;
+    compressor.attack.value = 0.003;
+    compressor.release.value = 0.25;
+
+    limiter = context.createDynamicsCompressor();
+    limiter.threshold.value = -3;
+    limiter.knee.value = 0;
+    limiter.ratio.value = 20;
+    limiter.attack.value = 0.001;
+    limiter.release.value = 0.08;
+  }
 
   const destination = context.createMediaStreamDestination();
   const analyser = context.createAnalyser();
   analyser.fftSize = 2_048;
   analyser.smoothingTimeConstant = 0.12;
 
-  source.connect(highPass);
-  highPass.connect(adaptiveNoiseGate);
-  adaptiveNoiseGate.connect(lowCut);
-  lowCut.connect(presenceBoost);
-  presenceBoost.connect(compressor);
-  compressor.connect(limiter);
-  limiter.connect(destination);
-  highPass.connect(analyser);
+  if (effectiveNoiseSuppressionMode === "off") {
+    source.connect(destination);
+  } else if (highPass && adaptiveNoiseGate && lowCut && presenceBoost && compressor && limiter) {
+    processingSource.connect(highPass);
+    highPass.connect(adaptiveNoiseGate);
+    adaptiveNoiseGate.connect(lowCut);
+    lowCut.connect(presenceBoost);
+    presenceBoost.connect(compressor);
+    compressor.connect(limiter);
+    limiter.connect(destination);
+  } else {
+    source.connect(destination);
+  }
+  source.connect(analyser);
 
   const outputTrack = destination.stream.getAudioTracks()[0];
   if (outputTrack) {
@@ -248,10 +391,12 @@ export async function createVoiceAudioPipeline(
       noiseFloorDb = clamp((noiseFloorDb * 0.98) + (currentDb * 0.02), -85, -40);
     }
 
-    const noiseGateThresholdDb = noiseFloorDb + 8;
-    const gateOpen = currentDb >= noiseGateThresholdDb;
-    const gateTargetGain = gateOpen ? NOISE_GATE_OPEN_GAIN : NOISE_GATE_CLOSED_GAIN;
-    adaptiveNoiseGate.gain.setTargetAtTime(gateTargetGain, context.currentTime, gateOpen ? 0.015 : 0.06);
+    if (adaptiveNoiseGate) {
+      const noiseGateThresholdDb = noiseFloorDb + 8;
+      const gateOpen = currentDb >= noiseGateThresholdDb;
+      const gateTargetGain = gateOpen ? NOISE_GATE_OPEN_GAIN : NOISE_GATE_CLOSED_GAIN;
+      adaptiveNoiseGate.gain.setTargetAtTime(gateTargetGain, context.currentTime, gateOpen ? 0.015 : 0.06);
+    }
 
     const clipping = peak >= 0.985;
     const lowVolume = speakingLikely && currentDb <= -42;
@@ -301,12 +446,14 @@ export async function createVoiceAudioPipeline(
         rafId = null;
       }
       source.disconnect();
-      highPass.disconnect();
-      adaptiveNoiseGate.disconnect();
-      lowCut.disconnect();
-      presenceBoost.disconnect();
-      compressor.disconnect();
-      limiter.disconnect();
+      rnnoiseNode?.disconnect();
+      rnnoiseNode?.destroy();
+      highPass?.disconnect();
+      adaptiveNoiseGate?.disconnect();
+      lowCut?.disconnect();
+      presenceBoost?.disconnect();
+      compressor?.disconnect();
+      limiter?.disconnect();
       analyser.disconnect();
       destination.disconnect();
       destination.stream.getTracks().forEach((track) => track.stop());

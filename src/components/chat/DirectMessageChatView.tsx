@@ -379,6 +379,7 @@ interface PersistedAudioSettingsSnapshot {
   outputDeviceId: string;
   inputVolume: number;
   outputVolume: number;
+  noiseSuppressionMode?: "off" | "webrtc" | "rnnoise";
   noiseSuppression: boolean;
   echoCancellation: boolean;
   autoGain: boolean;
@@ -402,9 +403,10 @@ function readVoiceCallMediaPreferences(userIdRaw: string | null | undefined): Vo
     outputDeviceId: "",
     inputVolumePercent: 100,
     outputVolumePercent: 100,
+    noiseSuppressionMode: "webrtc",
     echoCancellation: true,
     noiseSuppression: true,
-    autoGainControl: false,
+    autoGainControl: true,
   };
 
   if (typeof window === "undefined") {
@@ -426,14 +428,26 @@ function readVoiceCallMediaPreferences(userIdRaw: string | null | undefined): Vo
     const inputVolumePercent = clampNumeric(Math.round(Number(parsed.inputVolume ?? 100)), 0, 100);
     const outputVolumePercent = clampNumeric(Math.round(Number(parsed.outputVolume ?? 100)), 0, 200);
 
+    const normalizedNoiseSuppressionMode = (() => {
+      const modeRaw = String(parsed.noiseSuppressionMode ?? "").trim().toLowerCase();
+      if (modeRaw === "off" || modeRaw === "webrtc" || modeRaw === "rnnoise") {
+        return modeRaw;
+      }
+      if (typeof parsed.noiseSuppression === "boolean") {
+        return parsed.noiseSuppression ? "webrtc" : "off";
+      }
+      return "webrtc";
+    })();
+
     return {
       inputDeviceId: String(parsed.inputDeviceId ?? "").trim(),
       outputDeviceId: String(parsed.outputDeviceId ?? "").trim(),
       inputVolumePercent,
       outputVolumePercent,
+      noiseSuppressionMode: normalizedNoiseSuppressionMode,
       echoCancellation: typeof parsed.echoCancellation === "boolean" ? parsed.echoCancellation : true,
-      noiseSuppression: typeof parsed.noiseSuppression === "boolean" ? parsed.noiseSuppression : true,
-      autoGainControl: typeof parsed.autoGain === "boolean" ? parsed.autoGain : false,
+      noiseSuppression: normalizedNoiseSuppressionMode !== "off",
+      autoGainControl: typeof parsed.autoGain === "boolean" ? parsed.autoGain : true,
     };
   } catch {
     return fallback;

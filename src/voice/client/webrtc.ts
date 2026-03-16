@@ -78,6 +78,7 @@ export interface VoiceCallMediaPreferences {
   sampleRate?: number | null;
   channelCount?: number | null;
   targetBitrate?: number | null;
+  noiseSuppressionMode?: "off" | "webrtc" | "rnnoise";
   echoCancellation?: boolean;
   noiseSuppression?: boolean;
   autoGainControl?: boolean;
@@ -475,6 +476,17 @@ function normalizeMediaPreferences(preferences: VoiceCallMediaPreferences | null
     ? Math.max(VOICE_AUDIO_FLOOR_MAX_BITRATE, Math.min(VOICE_AUDIO_TARGET_MAX_BITRATE, Math.round(requestedTargetBitrate)))
     : VOICE_AUDIO_TARGET_MAX_BITRATE;
 
+  const normalizedNoiseSuppressionMode = (() => {
+    const modeRaw = String(preferences?.noiseSuppressionMode ?? "").trim().toLowerCase();
+    if (modeRaw === "off" || modeRaw === "webrtc" || modeRaw === "rnnoise") {
+      return modeRaw as "off" | "webrtc" | "rnnoise";
+    }
+    if (typeof preferences?.noiseSuppression === "boolean") {
+      return preferences.noiseSuppression ? "webrtc" : "off";
+    }
+    return "webrtc";
+  })();
+
   return {
     inputDeviceId: normalizedInputDeviceId,
     outputDeviceId: normalizedOutputDeviceId,
@@ -483,9 +495,10 @@ function normalizeMediaPreferences(preferences: VoiceCallMediaPreferences | null
     sampleRate: normalizedSampleRate,
     channelCount: normalizedChannelCount,
     targetBitrate: normalizedTargetBitrate,
+    noiseSuppressionMode: normalizedNoiseSuppressionMode,
     echoCancellation: preferences?.echoCancellation ?? true,
-    noiseSuppression: preferences?.noiseSuppression ?? true,
-    autoGainControl: preferences?.autoGainControl ?? false,
+    noiseSuppression: normalizedNoiseSuppressionMode !== "off",
+    autoGainControl: preferences?.autoGainControl ?? true,
   };
 }
 
@@ -624,8 +637,9 @@ export class VoiceCallClient {
     try {
       const capturedMicrophoneStream = await captureMicrophoneStream({
         echoCancellation: this.mediaPreferences.echoCancellation,
-        noiseSuppression: this.mediaPreferences.noiseSuppression,
-        autoGainControl: false,
+        noiseSuppressionMode: this.mediaPreferences.noiseSuppressionMode,
+        noiseSuppression: this.mediaPreferences.noiseSuppressionMode === "webrtc",
+        autoGainControl: this.mediaPreferences.autoGainControl,
         sampleRate: this.mediaPreferences.sampleRate ?? 48_000,
         channelCount: this.mediaPreferences.channelCount ?? 1,
         latency: 0,
@@ -634,6 +648,7 @@ export class VoiceCallClient {
       });
       this.capturedMicrophoneStream = capturedMicrophoneStream;
       this.localAudioPipeline = await createVoiceAudioPipeline(capturedMicrophoneStream, {
+        noiseSuppressionMode: this.mediaPreferences.noiseSuppressionMode,
         onQuality: (report) => {
           this.handleLocalMicrophoneQualityReport(report);
         },

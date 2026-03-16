@@ -281,6 +281,28 @@ const SETTINGS_SIDEBAR_ITEMS: ReadonlyArray<{
   { key: "windows", label: "Config. Windows", icon: "desktop_windows" },
 ];
 
+const NOISE_SUPPRESSION_MODE_OPTIONS: ReadonlyArray<{
+  value: NoiseSuppressionMode;
+  label: string;
+  description: string;
+}> = [
+  {
+    value: "off",
+    label: "Desativado",
+    description: "Sem filtros de supressão de ruído.",
+  },
+  {
+    value: "webrtc",
+    label: "Padrão (WebRTC)",
+    description: "Usa os filtros nativos do navegador.",
+  },
+  {
+    value: "rnnoise",
+    label: "RNNoise (Avançado)",
+    description: "Supressão de ruído por IA em tempo real.",
+  },
+];
+
 function resolveVisibleSettingsSection(section: SettingsSection, isElectron: boolean): SettingsSection {
   if (section === "windows" && !isElectron) {
     return "account";
@@ -319,6 +341,7 @@ interface PersistedAudioSettings {
   outputDeviceId: string;
   inputVolume: number;
   outputVolume: number;
+  noiseSuppressionMode: "off" | "webrtc" | "rnnoise";
   noiseSuppression: boolean;
   echoCancellation: boolean;
   autoGain: boolean;
@@ -335,6 +358,8 @@ interface PersistedProfilePlusThemeSettings {
   primary: string;
   accent: string;
 }
+
+type NoiseSuppressionMode = "off" | "webrtc" | "rnnoise";
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -1817,7 +1842,7 @@ export default function AppSettingsView({
   const [isOutputDeviceSelectOpen, setIsOutputDeviceSelectOpen] = useState(false);
   const [inputGain, setInputGain] = useState(100);
   const [outputVolume, setOutputVolume] = useState(100);
-  const [noiseSuppression, setNoiseSuppression] = useState(true);
+  const [noiseSuppressionMode, setNoiseSuppressionMode] = useState<NoiseSuppressionMode>("webrtc");
   const [echoCancellation, setEchoCancellation] = useState(true);
   const [autoGainControl, setAutoGainControl] = useState(true);
   const [vadEnabled, setVadEnabled] = useState(true);
@@ -2341,7 +2366,17 @@ export default function AppSettingsView({
       setSelectedOutputId(typeof parsed.outputDeviceId === "string" ? parsed.outputDeviceId : "");
       setInputGain(clampPercent(parsed.inputVolume, 100, 100));
       setOutputVolume(clampPercent(parsed.outputVolume, 100, 200));
-      setNoiseSuppression(typeof parsed.noiseSuppression === "boolean" ? parsed.noiseSuppression : true);
+      const normalizedNoiseSuppressionMode = (() => {
+        const modeRaw = String(parsed.noiseSuppressionMode ?? "").trim().toLowerCase();
+        if (modeRaw === "off" || modeRaw === "webrtc" || modeRaw === "rnnoise") {
+          return modeRaw as NoiseSuppressionMode;
+        }
+        if (typeof parsed.noiseSuppression === "boolean") {
+          return parsed.noiseSuppression ? "webrtc" : "off";
+        }
+        return "webrtc";
+      })();
+      setNoiseSuppressionMode(normalizedNoiseSuppressionMode);
       setEchoCancellation(typeof parsed.echoCancellation === "boolean" ? parsed.echoCancellation : true);
       setAutoGainControl(typeof parsed.autoGain === "boolean" ? parsed.autoGain : true);
       setVadEnabled(typeof parsed.vadEnabled === "boolean" ? parsed.vadEnabled : true);
@@ -2370,7 +2405,8 @@ export default function AppSettingsView({
       outputDeviceId: selectedOutputId,
       inputVolume: clamp(Math.round(inputGain), 0, 100),
       outputVolume: clamp(Math.round(outputVolume), 0, 200),
-      noiseSuppression,
+      noiseSuppressionMode,
+      noiseSuppression: noiseSuppressionMode !== "off",
       echoCancellation,
       autoGain: autoGainControl,
       vadEnabled,
@@ -2400,7 +2436,7 @@ export default function AppSettingsView({
     selectedOutputId,
     inputGain,
     outputVolume,
-    noiseSuppression,
+    noiseSuppressionMode,
     echoCancellation,
     autoGainControl,
     vadEnabled,
@@ -6056,15 +6092,33 @@ export default function AppSettingsView({
                           </div>
                         </div>
 
-                        <div className={`${styles.processingCoreRow} ${styles.processingCoreRowCheckboxLayout}`}>
-                          <ProcessingCheckbox
-                            checked={noiseSuppression}
-                            ariaLabel="Alternar supressão de ruído"
-                            onChange={setNoiseSuppression}
-                          />
+                        <div className={styles.processingCoreRow}>
                           <div className={styles.processingCoreRowMeta}>
                             <p className={styles.processingCoreRowTitle}>Supressão de ruído</p>
-                            <p className={styles.processingCoreRowState}>Reduz ruído contínuo de fundo.</p>
+                            <p className={styles.processingCoreRowState}>
+                              Reduz ruído de fundo do microfone durante chamadas de voz.
+                            </p>
+                            <div className={styles.noiseSuppressionModeList} role="radiogroup" aria-label="Supressão de ruído">
+                              {NOISE_SUPPRESSION_MODE_OPTIONS.map((option) => {
+                                const isSelected = noiseSuppressionMode === option.value;
+                                return (
+                                  <button
+                                    key={option.value}
+                                    type="button"
+                                    role="radio"
+                                    aria-checked={isSelected}
+                                    className={`${styles.noiseSuppressionModeOption}${
+                                      isSelected ? ` ${styles.noiseSuppressionModeOptionSelected}` : ""
+                                    }`}
+                                    onClick={() => setNoiseSuppressionMode(option.value)}
+                                  >
+                                    <span className={styles.noiseSuppressionModeDot} aria-hidden="true" />
+                                    <span className={styles.noiseSuppressionModeLabel}>{option.label}</span>
+                                    <span className={styles.noiseSuppressionModeHint}>{option.description}</span>
+                                  </button>
+                                );
+                              })}
+                            </div>
                           </div>
                         </div>
 
