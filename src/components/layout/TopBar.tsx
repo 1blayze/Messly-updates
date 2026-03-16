@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import MaterialSymbolIcon from "../ui/MaterialSymbolIcon";
 import Tooltip from "../ui/Tooltip";
 import chatIconSrc from "../../assets/icons/ui/Chat.svg";
@@ -8,6 +8,8 @@ interface TopBarProps {
   section?: "friends" | "directMessages";
   onPrepareForUpdateInstall?: () => Promise<void> | void;
 }
+
+const UPDATER_BACKGROUND_CHECK_MIN_INTERVAL_MS = 45_000;
 
 function getSectionIconName(section: TopBarProps["section"]): string {
   switch (section) {
@@ -84,6 +86,43 @@ export default function TopBar({ section = "friends", onPrepareForUpdateInstall 
   const [updaterState, setUpdaterState] = useState<AppUpdaterState | null>(null);
   const [isUpdaterActionPending, setIsUpdaterActionPending] = useState(false);
   const [updaterActionError, setUpdaterActionError] = useState<string | null>(null);
+  const lastUpdaterBackgroundCheckAtRef = useRef(0);
+  const updaterStatus = normalizeUpdaterStatus(updaterState);
+
+  const runBackgroundUpdaterCheck = useCallback(async (): Promise<void> => {
+    if (!isDesktopRuntime) {
+      return;
+    }
+    const api = window.electronAPI;
+    if (!api?.updaterCheck) {
+      return;
+    }
+
+    const nowMs = Date.now();
+    if (nowMs - lastUpdaterBackgroundCheckAtRef.current < UPDATER_BACKGROUND_CHECK_MIN_INTERVAL_MS) {
+      return;
+    }
+    if (
+      isUpdaterActionPending ||
+      updaterStatus === "checking" ||
+      updaterStatus === "downloading" ||
+      updaterStatus === "installing" ||
+      updaterStatus === "applying" ||
+      updaterStatus === "relaunching"
+    ) {
+      return;
+    }
+
+    lastUpdaterBackgroundCheckAtRef.current = nowMs;
+    try {
+      const checkedState = await api.updaterCheck();
+      setUpdaterState(checkedState);
+    } catch (error) {
+      if (import.meta.env.DEV) {
+        console.warn("[topbar:updater:background-check]", error);
+      }
+    }
+  }, [isDesktopRuntime, isUpdaterActionPending, updaterStatus]);
 
   useEffect(() => {
     if (!isDesktopRuntime) {
@@ -121,6 +160,30 @@ export default function TopBar({ section = "friends", onPrepareForUpdateInstall 
       unsubscribe?.();
     };
   }, [isDesktopRuntime]);
+
+  useEffect(() => {
+    if (!isDesktopRuntime) {
+      return;
+    }
+
+    void runBackgroundUpdaterCheck();
+
+    const handleWindowFocus = (): void => {
+      void runBackgroundUpdaterCheck();
+    };
+    const handleVisibilityChange = (): void => {
+      if (document.visibilityState === "visible") {
+        void runBackgroundUpdaterCheck();
+      }
+    };
+
+    window.addEventListener("focus", handleWindowFocus);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      window.removeEventListener("focus", handleWindowFocus);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [isDesktopRuntime, runBackgroundUpdaterCheck]);
 
   const handleUpdaterAction = useCallback(async (): Promise<void> => {
     const api = window.electronAPI;
@@ -171,7 +234,6 @@ export default function TopBar({ section = "friends", onPrepareForUpdateInstall 
     }
   }, [isUpdaterActionPending, onPrepareForUpdateInstall, updaterState]);
 
-  const updaterStatus = normalizeUpdaterStatus(updaterState);
   const showUpdaterAction = isDesktopRuntime && (isUpdateActionVisible(updaterStatus) || Boolean(updaterActionError));
   const updaterTooltip = useMemo(
     () => getUpdaterTooltip(updaterState, isUpdaterActionPending, updaterActionError),
