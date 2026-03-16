@@ -229,7 +229,6 @@
   transform: translateY(0);
 }
 
-.actionButtonVoice:hover,
 .actionButtonVoice:focus-visible {
   background: rgba(229, 72, 90, 0.2);
   color: #ffe6ea;
@@ -242,7 +241,6 @@
   box-shadow: inset 0 0 0 1px rgba(229, 72, 90, 0.58);
 }
 
-.actionButtonVoice.actionButtonActive:hover,
 .actionButtonVoice.actionButtonActive:focus-visible {
   background: rgba(229, 72, 90, 0.32);
   color: #ffffff;
