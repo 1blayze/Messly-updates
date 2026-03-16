@@ -1921,6 +1921,7 @@ export default function DirectMessageChatView({
   const incomingVoiceInviteFromUserIdRef = useRef<string | null>(null);
   const voiceCallParticipantsRef = useRef<VoiceParticipantState[]>([]);
   const activeVoiceRoomIdRef = useRef<string>("");
+  const activeVoiceSessionTokenRef = useRef<symbol | null>(null);
   const hadRemoteParticipantInSessionRef = useRef(false);
   const isVoiceCallActiveRef = useRef(false);
   const isVoiceCallConnectingRef = useRef(false);
@@ -4121,6 +4122,7 @@ export default function DirectMessageChatView({
     latestVoiceSignalBySenderRef.current.clear();
     voiceCallParticipantsRef.current = [];
     activeVoiceRoomIdRef.current = voiceRoomId;
+    activeVoiceSessionTokenRef.current = null;
     hadRemoteParticipantInSessionRef.current = false;
 
     const existingVoiceCallClient = voiceCallClientRef.current;
@@ -4134,6 +4136,7 @@ export default function DirectMessageChatView({
     return () => {
       const existingVoiceCallClient = voiceCallClientRef.current;
       voiceCallClientRef.current = null;
+      activeVoiceSessionTokenRef.current = null;
       if (existingVoiceCallClient) {
         void existingVoiceCallClient.leave();
       }
@@ -5243,6 +5246,7 @@ export default function DirectMessageChatView({
     setVoiceCallElapsedTick(0);
     clearIncomingVoiceInviteState();
     voiceCallParticipantsRef.current = [];
+    activeVoiceSessionTokenRef.current = null;
     hadRemoteParticipantInSessionRef.current = false;
     if (existingVoiceCallClient) {
       await existingVoiceCallClient.leave().catch(() => undefined);
@@ -5298,8 +5302,9 @@ export default function DirectMessageChatView({
     }
     setVoiceCallParticipants(initialParticipants);
     voiceCallParticipantsRef.current = initialParticipants;
+    const sessionToken = Symbol("voice-call-session");
+    activeVoiceSessionTokenRef.current = sessionToken;
 
-    let currentSessionClient: VoiceCallClient | null = null;
     const voiceCallClient = new VoiceCallClient({
       roomId: activeVoiceRoomId,
       self: localIdentity,
@@ -5308,7 +5313,7 @@ export default function DirectMessageChatView({
       },
       mediaPreferences,
       onParticipantsChanged: (participants) => {
-        if (currentSessionClient && voiceCallClientRef.current !== currentSessionClient) {
+        if (activeVoiceSessionTokenRef.current !== sessionToken) {
           return;
         }
 
@@ -5358,7 +5363,6 @@ export default function DirectMessageChatView({
         setVoiceCallError(String(error.message ?? "").trim() || "Falha na chamada de voz.");
       },
     });
-    currentSessionClient = voiceCallClient;
 
     voiceCallClientRef.current = voiceCallClient;
     void voiceCallClient
