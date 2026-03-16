@@ -184,9 +184,6 @@ export default function UserCard({
     const trackTitle = String(spotifyConnection.playback.trackTitle ?? "").trim();
     return artistNames || trackTitle;
   }, [hasActiveSpotifyPlayback, spotifyConnection.connected, spotifyConnection.playback, spotifyConnection.showAsStatus]);
-  const voiceStatusIndicator = voiceCallUiSnapshot.deafened
-    ? "deafened"
-    : (voiceCallUiSnapshot.muted ? "muted" : "none");
 
   useEffect(() => {
     setProfileThemeState(readProfilePlusThemeState(authUser?.uid ?? currentUserId));
@@ -364,7 +361,6 @@ export default function UserCard({
         username={safeUsername}
         presenceLabel={presenceLabel}
         presenceState={presenceState}
-        voiceStatusIndicator={voiceStatusIndicator}
         spotifyStatusText={miniSpotifyStatusText}
         isMicEnabled={!voiceCallUiSnapshot.muted}
         isSoundEnabled={!voiceCallUiSnapshot.deafened}
