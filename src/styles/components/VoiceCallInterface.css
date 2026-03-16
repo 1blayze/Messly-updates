@@ -68,12 +68,14 @@
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  transition: background-color 120ms ease, opacity 120ms ease;
+  transition: background-color 120ms ease, transform 120ms ease, box-shadow 120ms ease, opacity 120ms ease;
 }
 
 .voice-call-panel__control-btn:hover,
 .voice-call-panel__control-btn:focus-visible {
-  background: rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.16);
+  transform: translateY(-1px);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
 }
 
 .voice-call-panel__control-btn:focus-visible {
@@ -91,7 +93,7 @@
 
 .voice-call-panel__control-btn--danger:hover,
 .voice-call-panel__control-btn--danger:focus-visible {
-  background: #d63c4f;
+  background: #f05f70;
 }
 
 .voice-call-panel__control-btn:disabled {
@@ -102,6 +104,8 @@
 .voice-call-panel__control-btn:disabled:hover,
 .voice-call-panel__control-btn:disabled:focus-visible {
   background: transparent;
+  transform: none;
+  box-shadow: none;
 }
 
 .voice-call-panel__control-icon {
