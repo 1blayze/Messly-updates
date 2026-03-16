@@ -3436,14 +3436,15 @@ export default function DirectMessageChatView({
     const localUserId = String(currentUser.userId ?? "").trim() || String(currentUserId ?? "").trim();
     const callStatus = String(call.status ?? "").trim().toUpperCase();
     const roomId = String(call.roomId ?? "").trim() || voiceRoomId;
-    const remoteParticipant = call.participants.find((participant) => {
+    const remoteParticipants = call.participants.filter((participant) => {
       const participantUserId = String(participant.userId ?? "").trim();
       if (!participantUserId || participantUserId === localUserId) {
         return false;
       }
       return String(participant.state ?? "").trim().toUpperCase() !== "DISCONNECTED";
-    }) ?? null;
-    const remoteUserId = String(remoteParticipant?.userId ?? "").trim() || String(targetUser.userId ?? "").trim();
+    });
+    const remoteParticipant = remoteParticipants[0] ?? null;
+    const remoteUserId = String(remoteParticipant?.userId ?? "").trim();
     const remoteDisplayName = String(remoteParticipant?.displayName ?? "").trim() || safeTargetDisplayName;
     const createdAtMs = Number(call.createdAt ?? Date.now());
     const normalizedCreatedAtMs = Number.isFinite(createdAtMs) ? createdAtMs : Date.now();
@@ -3473,9 +3474,20 @@ export default function DirectMessageChatView({
       return;
     }
 
+    if (!remoteParticipant) {
+      clearIncomingVoiceInviteState();
+      clearVoiceCallRejoinFallback();
+      clearSuppressedIncomingVoiceInvite();
+      setVoiceCallUiState("ENDED");
+      return;
+    }
+
     if (callStatus === "RINGING") {
       const callerUserId = String(call.createdBy ?? "").trim();
-      if (callerUserId && callerUserId !== localUserId) {
+      const callerIsActiveRemoteParticipant = remoteParticipants.some(
+        (participant) => String(participant.userId ?? "").trim() === callerUserId,
+      );
+      if (callerUserId && callerUserId !== localUserId && callerIsActiveRemoteParticipant) {
         applyIncomingVoiceInviteState(callerUserId, roomId, normalizedCreatedAtMs);
         return;
       }
@@ -3515,7 +3527,6 @@ export default function DirectMessageChatView({
     safeTargetDisplayName,
     setVoiceCallRejoinFallbackWithTtl,
     targetAvatarSrc,
-    targetUser.userId,
     voiceRoomId,
   ]);
 

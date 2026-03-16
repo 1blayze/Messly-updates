@@ -1644,11 +1644,20 @@ export class VoiceSignalingServer {
       endedAt = null;
       endedReason = null;
     } else if (nextByUser.size > 0) {
-      nextStatus = "RECONNECTING";
-      singleParticipantSince = singleParticipantSince ?? now;
-      ringExpiresAt = null;
-      endedAt = null;
-      endedReason = null;
+      if (wasConnectedBefore) {
+        nextStatus = "RECONNECTING";
+        singleParticipantSince = singleParticipantSince ?? now;
+        ringExpiresAt = null;
+        endedAt = null;
+        endedReason = null;
+      } else {
+        // The caller disconnected before any peer was connected; end immediately.
+        nextStatus = "ENDED";
+        endedAt = now;
+        endedReason = "NO_ACTIVE_PARTICIPANTS";
+        ringExpiresAt = null;
+        singleParticipantSince = null;
+      }
     } else {
       nextStatus = "ENDED";
       endedAt = endedAt ?? now;
