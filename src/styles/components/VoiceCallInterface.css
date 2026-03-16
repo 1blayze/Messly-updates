@@ -49,8 +49,8 @@
 .voice-call-panel__controls {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px;
+  gap: 0;
+  padding: 4px 6px;
   border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   background: #131416;
@@ -58,22 +58,26 @@
 }
 
 .voice-call-panel__control-btn {
-  width: 36px;
+  width: 42px;
   height: 36px;
   border-radius: 8px;
   border: 0;
-  background: #4b5563;
+  background: transparent;
   color: #f5f7fb;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  transition: filter 120ms ease;
+  transition: background-color 120ms ease, opacity 120ms ease;
+}
+
+.voice-call-panel__control-btn + .voice-call-panel__control-btn {
+  border-left: 1px solid rgba(255, 255, 255, 0.14);
 }
 
 .voice-call-panel__control-btn:hover,
 .voice-call-panel__control-btn:focus-visible {
-  filter: brightness(1.08);
+  background: rgba(255, 255, 255, 0.1);
 }
 
 .voice-call-panel__control-btn:focus-visible {
@@ -82,16 +86,21 @@
 }
 
 .voice-call-panel__control-btn--active {
-  background: #64748b;
+  background: rgba(255, 255, 255, 0.14);
 }
 
 .voice-call-panel__control-btn--danger {
-  background: #e35d6a;
+  background: transparent;
 }
 
 .voice-call-panel__control-btn:disabled {
-  opacity: 0.88;
+  opacity: 0.72;
   cursor: default;
+}
+
+.voice-call-panel__control-btn:disabled:hover,
+.voice-call-panel__control-btn:disabled:focus-visible {
+  background: transparent;
 }
 
 .voice-call-panel__control-icon {

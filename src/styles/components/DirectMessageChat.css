@@ -107,11 +107,12 @@
 }
 
 .dm-chat__rejoin-stage-controls--icon {
-  gap: 8px;
-  padding: 6px;
+  gap: 0;
+  padding: 4px 6px;
   border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   background: #131416;
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.42);
 }
 
 .dm-chat__rejoin-stage-title {
@@ -162,7 +163,7 @@
 
 .dm-chat__rejoin-stage-btn--icon {
   min-width: 0;
-  width: 36px;
+  width: 42px;
   height: 36px;
   padding: 0;
   border-radius: 8px;
@@ -171,15 +172,31 @@
   justify-content: center;
   background: transparent;
   border: 0;
+  transition: background-color 120ms ease, opacity 120ms ease;
 }
 
 .dm-chat__rejoin-stage-btn--icon.dm-chat__rejoin-stage-btn--accept {
   background: transparent;
 }
 
+.dm-chat__rejoin-stage-btn--icon + .dm-chat__rejoin-stage-btn--icon {
+  border-left: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+.dm-chat__rejoin-stage-btn--icon:hover,
+.dm-chat__rejoin-stage-btn--icon:focus-visible {
+  background: rgba(255, 255, 255, 0.1);
+  transform: none;
+}
+
 .dm-chat__rejoin-stage-btn--icon:disabled {
-  opacity: 0.88;
+  opacity: 0.72;
   cursor: default;
+}
+
+.dm-chat__rejoin-stage-btn--icon:disabled:hover,
+.dm-chat__rejoin-stage-btn--icon:disabled:focus-visible {
+  background: transparent;
 }
 
 .dm-chat__rejoin-stage-btn-icon {
