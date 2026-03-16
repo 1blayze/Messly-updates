@@ -50,7 +50,7 @@
   display: inline-flex;
   align-items: center;
   gap: 0;
-  padding: 7px 8px;
+  padding: 6px 8px;
   border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   background: #131416;
@@ -59,7 +59,7 @@
 
 .voice-call-panel__control-btn {
   width: 44px;
-  height: 42px;
+  height: 38px;
   border-radius: 8px;
   border: 0;
   background: transparent;
@@ -105,8 +105,8 @@
 }
 
 .voice-call-panel__control-icon {
-  width: 19px;
-  height: 19px;
+  width: 20px;
+  height: 20px;
   display: block;
   object-fit: contain;
 }
