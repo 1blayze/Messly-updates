@@ -53,6 +53,22 @@ function getConnectionLabel(state: VoiceConnectionState): string {
   }
 }
 
+function formatConnectionQuality(value: "excellent" | "good" | "fair" | "poor" | "unknown"): string {
+  switch (value) {
+    case "excellent":
+      return "Excelente";
+    case "good":
+      return "Boa";
+    case "fair":
+      return "Media";
+    case "poor":
+      return "Ruim";
+    case "unknown":
+    default:
+      return "Desconhecida";
+  }
+}
+
 export default function VoiceCallInterface({
   isOpen,
   isConnecting,
@@ -161,6 +177,7 @@ export default function VoiceCallInterface({
                 <p className="voice-call-panel__debug-metric">Loss: {formatMetric(row.packetLossPercent, "%")}</p>
                 <p className="voice-call-panel__debug-metric">In: {formatMetric(row.inboundBitrateKbps, " kbps")}</p>
                 <p className="voice-call-panel__debug-metric">Out: {formatMetric(row.outboundBitrateKbps, " kbps")}</p>
+                <p className="voice-call-panel__debug-metric">Qualidade: {formatConnectionQuality(row.connectionQuality)}</p>
               </article>
             ))}
           </div>
@@ -169,4 +186,3 @@ export default function VoiceCallInterface({
     </aside>
   );
 }
-

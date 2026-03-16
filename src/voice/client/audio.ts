@@ -3,6 +3,9 @@ export interface MicrophoneCaptureOptions {
   noiseSuppression?: boolean;
   autoGainControl?: boolean;
   channelCount?: number;
+  sampleRate?: number;
+  sampleSize?: number;
+  latency?: number;
   deviceId?: string | null;
   inputVolumePercent?: number | null;
 }
@@ -12,6 +15,9 @@ const DEFAULT_MIC_OPTIONS: Required<MicrophoneCaptureOptions> = {
   noiseSuppression: true,
   autoGainControl: true,
   channelCount: 1,
+  sampleRate: 48_000,
+  sampleSize: 16,
+  latency: 0.01,
   deviceId: "",
   inputVolumePercent: 100,
 };
@@ -25,39 +31,55 @@ export async function captureMicrophoneStream(
     ? Math.max(0, Math.min(100, requestedInputVolumePercent)) / 100
     : 1;
 
-  const constraints: MediaTrackConstraints = {
+  const baseConstraints: MediaTrackConstraints = {
     echoCancellation: options.echoCancellation ?? DEFAULT_MIC_OPTIONS.echoCancellation,
     noiseSuppression: options.noiseSuppression ?? DEFAULT_MIC_OPTIONS.noiseSuppression,
     autoGainControl: options.autoGainControl ?? DEFAULT_MIC_OPTIONS.autoGainControl,
     channelCount: options.channelCount ?? DEFAULT_MIC_OPTIONS.channelCount,
   };
-  (constraints as MediaTrackConstraints & { volume?: number }).volume = normalizedInputVolume;
+  (baseConstraints as MediaTrackConstraints & { volume?: number }).volume = normalizedInputVolume;
 
-  const constraintsWithDevice: MediaTrackConstraints = normalizedDeviceId
-    ? {
-        ...constraints,
-        deviceId: {
-          exact: normalizedDeviceId,
-        },
-      }
-    : constraints;
+  const highFidelityConstraints: MediaTrackConstraints = {
+    ...baseConstraints,
+    sampleRate: options.sampleRate ?? DEFAULT_MIC_OPTIONS.sampleRate,
+    sampleSize: options.sampleSize ?? DEFAULT_MIC_OPTIONS.sampleSize,
+  };
+  (highFidelityConstraints as MediaTrackConstraints & { latency?: number }).latency =
+    options.latency ?? DEFAULT_MIC_OPTIONS.latency;
 
-  try {
-    return await navigator.mediaDevices.getUserMedia({
-      video: false,
-      audio: constraintsWithDevice,
-    });
-  } catch (error) {
-    if (!normalizedDeviceId) {
-      throw error;
-    }
-
-    // Fall back to default device if the saved device ID is no longer available.
-    return navigator.mediaDevices.getUserMedia({
-      video: false,
-      audio: constraints,
+  const constraintsQueue: MediaTrackConstraints[] = [];
+  if (normalizedDeviceId) {
+    constraintsQueue.push({
+      ...highFidelityConstraints,
+      deviceId: {
+        exact: normalizedDeviceId,
+      },
     });
   }
+  constraintsQueue.push(highFidelityConstraints);
+  if (normalizedDeviceId) {
+    constraintsQueue.push({
+      ...baseConstraints,
+      deviceId: {
+        exact: normalizedDeviceId,
+      },
+    });
+  }
+  constraintsQueue.push(baseConstraints);
+
+  let lastError: unknown = null;
+  for (const audioConstraints of constraintsQueue) {
+    try {
+      return await navigator.mediaDevices.getUserMedia({
+        video: false,
+        audio: audioConstraints,
+      });
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError ?? new Error("Falha ao capturar microfone.");
 }
 
 export function stopMediaStream(stream: MediaStream | null | undefined): void {

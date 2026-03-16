@@ -16,7 +16,13 @@ const SIGNALING_RECONNECT_BASE_DELAY_MS = 800;
 const SIGNALING_RECONNECT_MAX_DELAY_MS = 8_000;
 const DIAGNOSTICS_POLL_INTERVAL_MS = 2_000;
 const JOIN_RETRY_INTERVAL_MS = 2_500;
-const DEFAULT_AUDIO_MAX_BITRATE = 32_000;
+const VOICE_AUDIO_TARGET_MAX_BITRATE = 256_000;
+const VOICE_AUDIO_FLOOR_MAX_BITRATE = 64_000;
+const VOICE_AUDIO_STEP_UP_BITRATE = 16_000;
+const VOICE_AUDIO_STEP_DOWN_SOFT_FACTOR = 0.75;
+const VOICE_AUDIO_STEP_DOWN_HARD_FACTOR = 0.55;
+const VOICE_AUDIO_GOOD_SAMPLE_THRESHOLD = 3;
+const VOICE_AUDIO_DEGRADED_SAMPLE_THRESHOLD = 2;
 
 const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
   {
@@ -48,6 +54,7 @@ export interface VoiceDiagnosticsPeerSnapshot {
   packetLossPercent: number | null;
   inboundBitrateKbps: number | null;
   outboundBitrateKbps: number | null;
+  connectionQuality: "excellent" | "good" | "fair" | "poor" | "unknown";
 }
 
 export interface VoiceDiagnosticsSnapshot {
@@ -60,6 +67,9 @@ export interface VoiceCallMediaPreferences {
   outputDeviceId?: string | null;
   inputVolumePercent?: number | null;
   outputVolumePercent?: number | null;
+  sampleRate?: number | null;
+  channelCount?: number | null;
+  targetBitrate?: number | null;
   echoCancellation?: boolean;
   noiseSuppression?: boolean;
   autoGainControl?: boolean;
@@ -96,6 +106,10 @@ interface PeerConnectionContext {
   remoteStream: MediaStream;
   pendingIceCandidates: RTCIceCandidateInit[];
   statsAccumulator: PeerStatsAccumulator | null;
+  audioSender: RTCRtpSender | null;
+  currentMaxBitrate: number;
+  goodNetworkSamples: number;
+  degradedNetworkSamples: number;
 }
 
 interface PendingSpeakingState {
@@ -298,6 +312,132 @@ function canonicalizeSdpString(sdpRaw: string, stripSsrcAttributes = false): str
   return `${filtered.join("\r\n")}\r\n`;
 }
 
+function parseFmtpConfig(configRaw: string): Map<string, string> {
+  const params = new Map<string, string>();
+  const tokens = String(configRaw ?? "")
+    .split(";")
+    .map((token) => token.trim())
+    .filter((token) => token.length > 0);
+
+  for (const token of tokens) {
+    const separatorIndex = token.indexOf("=");
+    if (separatorIndex <= 0) {
+      params.set(token.toLowerCase(), "1");
+      continue;
+    }
+    const key = token.slice(0, separatorIndex).trim().toLowerCase();
+    const value = token.slice(separatorIndex + 1).trim();
+    if (!key) {
+      continue;
+    }
+    params.set(key, value);
+  }
+
+  return params;
+}
+
+function buildFmtpConfig(params: Map<string, string>): string {
+  return Array.from(params.entries())
+    .map(([key, value]) => `${key}=${value}`)
+    .join(";");
+}
+
+function applyOpusVoiceProfile(sdpRaw: string): string {
+  const sdp = canonicalizeSdpString(sdpRaw, false);
+  if (!sdp) {
+    return sdp;
+  }
+
+  const lines = sdp
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .filter((line) => line.length > 0);
+
+  const opusPayloadTypes = new Set<string>();
+  for (const line of lines) {
+    const match = /^a=rtpmap:(\d+)\s+opus\/48000(?:\/\d+)?$/i.exec(line);
+    if (match?.[1]) {
+      opusPayloadTypes.add(match[1]);
+    }
+  }
+  if (opusPayloadTypes.size === 0) {
+    return sdp;
+  }
+
+  const outputLines: string[] = [];
+  const handledPayloadTypes = new Set<string>();
+  let sawPtime = false;
+  for (const line of lines) {
+    if (line.startsWith("a=ptime:")) {
+      outputLines.push("a=ptime:20");
+      sawPtime = true;
+      continue;
+    }
+
+    const fmtpMatch = /^a=fmtp:(\d+)\s+(.+)$/i.exec(line);
+    if (!fmtpMatch?.[1]) {
+      outputLines.push(line);
+      continue;
+    }
+
+    const payloadType = fmtpMatch[1];
+    if (!opusPayloadTypes.has(payloadType)) {
+      outputLines.push(line);
+      continue;
+    }
+
+    const existing = parseFmtpConfig(fmtpMatch[2] ?? "");
+    existing.set("maxaveragebitrate", String(VOICE_AUDIO_TARGET_MAX_BITRATE));
+    existing.set("stereo", "0");
+    existing.set("sprop-stereo", "0");
+    existing.set("useinbandfec", "1");
+    existing.set("usedtx", "1");
+    existing.set("minptime", "10");
+    existing.set("maxplaybackrate", "48000");
+    outputLines.push(`a=fmtp:${payloadType} ${buildFmtpConfig(existing)}`);
+    handledPayloadTypes.add(payloadType);
+  }
+
+  for (const payloadType of opusPayloadTypes) {
+    if (handledPayloadTypes.has(payloadType)) {
+      continue;
+    }
+    outputLines.push(
+      `a=fmtp:${payloadType} maxaveragebitrate=${VOICE_AUDIO_TARGET_MAX_BITRATE};stereo=0;sprop-stereo=0;useinbandfec=1;usedtx=1;minptime=10;maxplaybackrate=48000`,
+    );
+  }
+  if (!sawPtime) {
+    outputLines.push("a=ptime:20");
+  }
+
+  return `${outputLines.join("\r\n")}\r\n`;
+}
+
+function inferConnectionQuality(
+  pingMs: number | null,
+  jitterMs: number | null,
+  packetLossPercent: number | null,
+): "excellent" | "good" | "fair" | "poor" | "unknown" {
+  const hasAnyMetric = pingMs != null || jitterMs != null || packetLossPercent != null;
+  if (!hasAnyMetric) {
+    return "unknown";
+  }
+
+  const normalizedPing = pingMs ?? 80;
+  const normalizedJitter = jitterMs ?? 12;
+  const normalizedLoss = packetLossPercent ?? 0;
+  if (normalizedLoss <= 0.8 && normalizedJitter <= 10 && normalizedPing <= 70) {
+    return "excellent";
+  }
+  if (normalizedLoss <= 2.0 && normalizedJitter <= 20 && normalizedPing <= 120) {
+    return "good";
+  }
+  if (normalizedLoss <= 5.0 && normalizedJitter <= 40 && normalizedPing <= 220) {
+    return "fair";
+  }
+  return "poor";
+}
+
 function normalizeMediaPreferences(preferences: VoiceCallMediaPreferences | null | undefined): Required<VoiceCallMediaPreferences> {
   const normalizedInputDeviceId = String(preferences?.inputDeviceId ?? "").trim();
   const normalizedOutputDeviceId = String(preferences?.outputDeviceId ?? "").trim();
@@ -309,12 +449,27 @@ function normalizeMediaPreferences(preferences: VoiceCallMediaPreferences | null
   const normalizedOutputVolume = Number.isFinite(requestedOutputVolume)
     ? Math.max(0, Math.min(200, requestedOutputVolume))
     : 100;
+  const requestedSampleRate = Number(preferences?.sampleRate ?? 48_000);
+  const requestedChannelCount = Number(preferences?.channelCount ?? 1);
+  const requestedTargetBitrate = Number(preferences?.targetBitrate ?? VOICE_AUDIO_TARGET_MAX_BITRATE);
+  const normalizedSampleRate = Number.isFinite(requestedSampleRate)
+    ? Math.max(16_000, Math.min(48_000, Math.round(requestedSampleRate)))
+    : 48_000;
+  const normalizedChannelCount = Number.isFinite(requestedChannelCount)
+    ? Math.max(1, Math.min(2, Math.round(requestedChannelCount)))
+    : 1;
+  const normalizedTargetBitrate = Number.isFinite(requestedTargetBitrate)
+    ? Math.max(VOICE_AUDIO_FLOOR_MAX_BITRATE, Math.min(VOICE_AUDIO_TARGET_MAX_BITRATE, Math.round(requestedTargetBitrate)))
+    : VOICE_AUDIO_TARGET_MAX_BITRATE;
 
   return {
     inputDeviceId: normalizedInputDeviceId,
     outputDeviceId: normalizedOutputDeviceId,
     inputVolumePercent: normalizedInputVolume,
     outputVolumePercent: normalizedOutputVolume,
+    sampleRate: normalizedSampleRate,
+    channelCount: normalizedChannelCount,
+    targetBitrate: normalizedTargetBitrate,
     echoCancellation: preferences?.echoCancellation ?? true,
     noiseSuppression: preferences?.noiseSuppression ?? true,
     autoGainControl: preferences?.autoGainControl ?? true,
@@ -445,7 +600,8 @@ export class VoiceCallClient {
         echoCancellation: this.mediaPreferences.echoCancellation,
         noiseSuppression: this.mediaPreferences.noiseSuppression,
         autoGainControl: this.mediaPreferences.autoGainControl,
-        channelCount: 1,
+        sampleRate: this.mediaPreferences.sampleRate ?? 48_000,
+        channelCount: this.mediaPreferences.channelCount ?? 1,
         deviceId: this.mediaPreferences.inputDeviceId,
         inputVolumePercent: this.mediaPreferences.inputVolumePercent,
       });
@@ -833,11 +989,15 @@ export class VoiceCallClient {
       rtcpMuxPolicy: "require",
     });
     const remoteStream = new MediaStream();
+    let audioSender: RTCRtpSender | null = null;
 
     if (this.localStream) {
       for (const track of this.localStream.getAudioTracks()) {
         const sender = connection.addTrack(track, this.localStream);
         this.configureAudioSender(connection, sender);
+        if (!audioSender) {
+          audioSender = sender;
+        }
       }
     }
 
@@ -900,6 +1060,10 @@ export class VoiceCallClient {
       remoteStream,
       pendingIceCandidates: [],
       statsAccumulator: null,
+      audioSender,
+      currentMaxBitrate: this.mediaPreferences.targetBitrate ?? VOICE_AUDIO_TARGET_MAX_BITRATE,
+      goodNetworkSamples: 0,
+      degradedNetworkSamples: 0,
     };
     this.peers.set(userId, peerContext);
     this.updateRemoteParticipant(userId, { connectionState: "connecting" });
@@ -960,7 +1124,7 @@ export class VoiceCallClient {
     if (!description) {
       return null;
     }
-    const canonical = canonicalizeSdpString(description.sdp ?? "", false);
+    const canonical = applyOpusVoiceProfile(description.sdp ?? "");
     if (!canonical) {
       return null;
     }
@@ -984,14 +1148,20 @@ export class VoiceCallClient {
   }
 
   private configureAudioSender(connection: RTCPeerConnection, sender: RTCRtpSender): void {
+    const targetBitrate = this.mediaPreferences.targetBitrate ?? VOICE_AUDIO_TARGET_MAX_BITRATE;
     const transceiver = connection.getTransceivers().find((candidate) => candidate.sender === sender);
     if (transceiver?.setCodecPreferences && typeof RTCRtpSender !== "undefined") {
       const capabilities = RTCRtpSender.getCapabilities?.("audio")?.codecs ?? [];
       if (capabilities.length > 0) {
         const opusCodecs = capabilities.filter((codec) => codec.mimeType.toLowerCase() === "audio/opus");
         if (opusCodecs.length > 0) {
+          const preferredOpus = opusCodecs.map((codec) => ({
+            ...codec,
+            channels: 1,
+            sdpFmtpLine: "maxaveragebitrate=256000;stereo=0;sprop-stereo=0;useinbandfec=1;usedtx=1;minptime=10",
+          }));
           const fallbackCodecs = capabilities.filter((codec) => codec.mimeType.toLowerCase() !== "audio/opus");
-          transceiver.setCodecPreferences([...opusCodecs, ...fallbackCodecs]);
+          transceiver.setCodecPreferences([...preferredOpus, ...fallbackCodecs]);
         }
       }
     }
@@ -1000,10 +1170,83 @@ export class VoiceCallClient {
     const encodings = parameters.encodings && parameters.encodings.length > 0
       ? [...parameters.encodings]
       : [{}];
-    encodings[0] = {
-      ...encodings[0],
-      maxBitrate: DEFAULT_AUDIO_MAX_BITRATE,
+    const firstEncoding = encodings[0] as RTCRtpEncodingParameters & {
+      dtx?: "enabled" | "disabled";
+      networkPriority?: RTCPriorityType;
+      priority?: RTCPriorityType;
     };
+    firstEncoding.maxBitrate = targetBitrate;
+    firstEncoding.dtx = "enabled";
+    firstEncoding.priority = "high";
+    firstEncoding.networkPriority = "high";
+    encodings[0] = firstEncoding;
+    parameters.encodings = encodings;
+    void sender.setParameters(parameters).catch(() => undefined);
+  }
+
+  private adjustPeerBitrate(
+    peerContext: PeerConnectionContext,
+    packetLossPercent: number | null,
+    jitterMs: number | null,
+  ): void {
+    const sender = peerContext.audioSender;
+    if (!sender) {
+      return;
+    }
+
+    const normalizedLoss = packetLossPercent ?? 0;
+    const normalizedJitter = jitterMs ?? 0;
+    const isHardDegradation = normalizedLoss >= 8 || normalizedJitter >= 80;
+    const isSoftDegradation = normalizedLoss >= 3 || normalizedJitter >= 35;
+    const isGood = normalizedLoss <= 1 && normalizedJitter <= 16;
+
+    if (isHardDegradation || isSoftDegradation) {
+      peerContext.goodNetworkSamples = 0;
+      peerContext.degradedNetworkSamples += 1;
+    } else if (isGood) {
+      peerContext.degradedNetworkSamples = 0;
+      peerContext.goodNetworkSamples += 1;
+    } else {
+      peerContext.degradedNetworkSamples = 0;
+      peerContext.goodNetworkSamples = 0;
+    }
+
+    const targetBitrate = this.mediaPreferences.targetBitrate ?? VOICE_AUDIO_TARGET_MAX_BITRATE;
+    const current = peerContext.currentMaxBitrate > 0 ? peerContext.currentMaxBitrate : targetBitrate;
+    let next = current;
+    if (peerContext.degradedNetworkSamples >= VOICE_AUDIO_DEGRADED_SAMPLE_THRESHOLD) {
+      const factor = isHardDegradation ? VOICE_AUDIO_STEP_DOWN_HARD_FACTOR : VOICE_AUDIO_STEP_DOWN_SOFT_FACTOR;
+      next = Math.round(current * factor);
+      peerContext.degradedNetworkSamples = 0;
+    } else if (peerContext.goodNetworkSamples >= VOICE_AUDIO_GOOD_SAMPLE_THRESHOLD) {
+      next = current + VOICE_AUDIO_STEP_UP_BITRATE;
+      peerContext.goodNetworkSamples = 0;
+    }
+
+    const bounded = clamp(next, VOICE_AUDIO_FLOOR_MAX_BITRATE, targetBitrate);
+    if (Math.abs(bounded - current) < 4_000) {
+      return;
+    }
+
+    peerContext.currentMaxBitrate = bounded;
+    this.trySetSenderMaxBitrate(sender, bounded);
+  }
+
+  private trySetSenderMaxBitrate(sender: RTCRtpSender, maxBitrate: number): void {
+    const parameters = sender.getParameters();
+    const encodings = parameters.encodings && parameters.encodings.length > 0
+      ? [...parameters.encodings]
+      : [{}];
+    const firstEncoding = encodings[0] as RTCRtpEncodingParameters & {
+      dtx?: "enabled" | "disabled";
+      networkPriority?: RTCPriorityType;
+      priority?: RTCPriorityType;
+    };
+    firstEncoding.maxBitrate = maxBitrate;
+    firstEncoding.dtx = "enabled";
+    firstEncoding.priority = "high";
+    firstEncoding.networkPriority = "high";
+    encodings[0] = firstEncoding;
     parameters.encodings = encodings;
     void sender.setParameters(parameters).catch(() => undefined);
   }
@@ -1097,9 +1340,12 @@ export class VoiceCallClient {
       let packetLossPercent: number | null = null;
       let inboundBytes = 0;
       let outboundBytes = 0;
+      let inboundPacketsLost = 0;
+      let inboundPacketsReceived = 0;
       let selectedCandidatePairId: string | null = null;
       let candidatePairRttMs: number | null = null;
       let remoteInboundRttMs: number | null = null;
+      let remoteOutboundRttMs: number | null = null;
 
       stats.forEach((report) => {
         if (report.type === "transport") {
@@ -1122,6 +1368,8 @@ export class VoiceCallClient {
             candidatePair.state === "succeeded";
           if (isActivePair && typeof candidatePair.currentRoundTripTime === "number") {
             candidatePairRttMs = Math.round(candidatePair.currentRoundTripTime * 1_000);
+          } else if (candidatePairRttMs == null && typeof candidatePair.currentRoundTripTime === "number") {
+            candidatePairRttMs = Math.round(candidatePair.currentRoundTripTime * 1_000);
           }
         }
 
@@ -1132,25 +1380,31 @@ export class VoiceCallClient {
             packetsLost?: number;
             packetsReceived?: number;
           };
-          inboundBytes = typeof inbound.bytesReceived === "number" ? inbound.bytesReceived : inboundBytes;
+          inboundBytes += typeof inbound.bytesReceived === "number" ? inbound.bytesReceived : 0;
           if (typeof inbound.jitter === "number") {
-            jitterMs = Math.round(inbound.jitter * 1_000);
+            const nextJitterMs = Math.round(inbound.jitter * 1_000);
+            jitterMs = jitterMs == null ? nextJitterMs : Math.max(jitterMs, nextJitterMs);
           }
-          const packetsLost = typeof inbound.packetsLost === "number" ? inbound.packetsLost : 0;
-          const packetsReceived = typeof inbound.packetsReceived === "number" ? inbound.packetsReceived : 0;
-          const total = packetsLost + packetsReceived;
-          packetLossPercent = total > 0 ? Number(((packetsLost / total) * 100).toFixed(2)) : null;
+          inboundPacketsLost += typeof inbound.packetsLost === "number" ? inbound.packetsLost : 0;
+          inboundPacketsReceived += typeof inbound.packetsReceived === "number" ? inbound.packetsReceived : 0;
         }
 
         if (report.type === "outbound-rtp" && (report as RTCStats & { kind?: string }).kind === "audio") {
           const outbound = report as RTCStats & { bytesSent?: number };
-          outboundBytes = typeof outbound.bytesSent === "number" ? outbound.bytesSent : outboundBytes;
+          outboundBytes += typeof outbound.bytesSent === "number" ? outbound.bytesSent : 0;
         }
 
         if (report.type === "remote-inbound-rtp" && (report as RTCStats & { kind?: string }).kind === "audio") {
           const remoteInbound = report as RTCStats & { roundTripTime?: number };
           if (typeof remoteInbound.roundTripTime === "number") {
             remoteInboundRttMs = Math.round(remoteInbound.roundTripTime * 1_000);
+          }
+        }
+
+        if (report.type === "remote-outbound-rtp" && (report as RTCStats & { kind?: string }).kind === "audio") {
+          const remoteOutbound = report as RTCStats & { roundTripTime?: number };
+          if (typeof remoteOutbound.roundTripTime === "number") {
+            remoteOutboundRttMs = Math.round(remoteOutbound.roundTripTime * 1_000);
           }
         }
       });
@@ -1160,7 +1414,11 @@ export class VoiceCallClient {
           candidatePairRttMs = Math.round(selectedPair.currentRoundTripTime * 1_000);
         }
       }
-      pingMs = candidatePairRttMs ?? remoteInboundRttMs ?? this.lastSignalingRttMs;
+      const packetTotal = inboundPacketsLost + inboundPacketsReceived;
+      packetLossPercent = packetTotal > 0 ? Number(((inboundPacketsLost / packetTotal) * 100).toFixed(2)) : null;
+      pingMs = candidatePairRttMs ?? remoteInboundRttMs ?? remoteOutboundRttMs ?? this.lastSignalingRttMs;
+      this.adjustPeerBitrate(peerContext, packetLossPercent, jitterMs);
+      const connectionQuality = inferConnectionQuality(pingMs, jitterMs, packetLossPercent);
 
       const nowMs = performance.now();
       let inboundBitrateKbps: number | null = null;
@@ -1185,6 +1443,7 @@ export class VoiceCallClient {
         packetLossPercent,
         inboundBitrateKbps,
         outboundBitrateKbps,
+        connectionQuality,
       });
     }
 
