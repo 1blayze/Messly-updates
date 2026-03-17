@@ -146,8 +146,8 @@ const DIRECT_MESSAGE_SELECT_COLUMNS =
   "id,conversation_id,sender_id,client_id,content,type,created_at,edited_at,deleted_at,reply_to_id,reply_to_snapshot,payload";
 const DIRECT_ATTACHMENT_SELECT_COLUMNS =
   "message_id,file_key,original_key,thumb_key,mime_type,file_size,width,height,thumb_width,thumb_height,codec,duration_ms";
-const INITIAL_MESSAGES_CACHE_KEY = "messly:chat-initial-messages:v1";
-const INITIAL_MESSAGES_CACHE_VERSION = 1;
+const INITIAL_MESSAGES_CACHE_KEY = "messly:chat-initial-messages:v2";
+const INITIAL_MESSAGES_CACHE_VERSION = 2;
 const INITIAL_MESSAGES_CACHE_TTL_MS = 5 * 60_000;
 const INITIAL_MESSAGES_CACHE_MAX_ENTRIES = 24;
 const INITIAL_MESSAGES_PERSIST_MAX_ENTRIES = 18;
@@ -1462,7 +1462,10 @@ async function listChatMessagesDirect(params: {
     .limit(limit);
 
   const cursorCreatedAt = String(params.cursor?.createdAt ?? "").trim();
-  if (cursorCreatedAt) {
+  const cursorId = String(params.cursor?.id ?? "").trim();
+  if (cursorCreatedAt && cursorId) {
+    query = query.or(`created_at.lt.${cursorCreatedAt},and(created_at.eq.${cursorCreatedAt},id.lt.${cursorId})`);
+  } else if (cursorCreatedAt) {
     query = query.lt("created_at", cursorCreatedAt);
   }
 

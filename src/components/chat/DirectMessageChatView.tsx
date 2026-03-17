@@ -90,10 +90,8 @@ const AUTO_SCROLL_THRESHOLD_PX = 120;
 const SCROLL_TO_BOTTOM_DURATION_S = 0.35;
 const MEDIA_GROUP_WINDOW_MS = 15 * 1000;
 const MAX_VISIBLE_MEDIA_ATTACHMENTS = 5;
-const INITIAL_PAGE_SIZE = 24;
+const INITIAL_PAGE_SIZE = 50;
 const LOAD_OLDER_THRESHOLD_PX = 120;
-const ACTIVE_MESSAGE_WINDOW_MAX = 96;
-const ACTIVE_MESSAGE_WINDOW_TARGET = 84;
 const MESSAGE_VIRTUAL_OVERSCAN = 16;
 const MESSAGE_VIRTUAL_MIN_ROWS = 36;
 const MESSAGE_VIRTUAL_ESTIMATED_ROW_HEIGHT = 76;
@@ -585,7 +583,7 @@ interface ConversationMessagesCacheEntry {
 const CONVERSATION_CACHE_TTL_MS = 120_000;
 const CONVERSATION_CACHE_MAX_ENTRIES = 24;
 const CONVERSATION_CACHE_MAX_MESSAGES = 120;
-const CONVERSATION_CACHE_PERSIST_KEY = "messly:dm-cache:v1";
+const CONVERSATION_CACHE_PERSIST_KEY = "messly:dm-cache:v2";
 const CONVERSATION_CACHE_PERSIST_MAX_ENTRIES = 12;
 const CONVERSATION_CACHE_PERSIST_MAX_MESSAGES = 36;
 const USER_PROFILE_EXTRA_SELECT_VARIANTS: readonly string[] = [
@@ -1139,57 +1137,6 @@ function shouldRetainLocalMessageDuringReload(
   }
 
   return message.id.localeCompare(oldestServerMessage.id) >= 0;
-}
-
-type MessageTrimDirection = "drop-older" | "drop-newer";
-
-interface MessageWindowTrimResult {
-  messages: ChatMessageItem[];
-  droppedOlder: ChatMessageItem[];
-  droppedNewer: ChatMessageItem[];
-}
-
-function trimMessagesToActiveWindow(
-  messages: ChatMessageItem[],
-  direction: MessageTrimDirection,
-): MessageWindowTrimResult {
-  if (messages.length <= ACTIVE_MESSAGE_WINDOW_MAX) {
-    return {
-      messages,
-      droppedOlder: [],
-      droppedNewer: [],
-    };
-  }
-
-  const keepCount = Math.max(1, Math.min(ACTIVE_MESSAGE_WINDOW_TARGET, ACTIVE_MESSAGE_WINDOW_MAX));
-  if (direction === "drop-newer") {
-    const kept = messages.slice(0, keepCount);
-    return {
-      messages: kept,
-      droppedOlder: [],
-      droppedNewer: messages.slice(keepCount),
-    };
-  }
-
-  const startIndex = Math.max(messages.length - keepCount, 0);
-  const kept = messages.slice(startIndex);
-  return {
-    messages: kept,
-    droppedOlder: messages.slice(0, startIndex),
-    droppedNewer: [],
-  };
-}
-
-function buildOlderCursorFromMessages(messages: ChatMessageItem[]): MessageListCursor | null {
-  const oldestMessage = messages[0];
-  if (!oldestMessage) {
-    return null;
-  }
-
-  return {
-    createdAt: oldestMessage.createdAt,
-    id: oldestMessage.id,
-  };
 }
 
 function pruneAttachmentMapByMessageIds(
@@ -1940,7 +1887,6 @@ export default function DirectMessageChatView({
   const [emojiPopoverSource, setEmojiPopoverSource] = useState<"composer" | "profile">("composer");
   const [nextCursor, setNextCursor] = useState<MessageListCursor | null>(null);
   const [hasMoreBefore, setHasMoreBefore] = useState(false);
-  const [hasTrimmedNewerMessages, setHasTrimmedNewerMessages] = useState(false);
   const [isLoadingOlder, setIsLoadingOlder] = useState(false);
   const [showNewMessagesButton, setShowNewMessagesButton] = useState(false);
   const [isInitialConversationLoading, setIsInitialConversationLoading] = useState(true);
@@ -2010,7 +1956,6 @@ export default function DirectMessageChatView({
   const previousTailMessageIdRef = useRef<string | null>(null);
   const initialScrollDoneRef = useRef(false);
   const isNearBottomRef = useRef(true);
-  const isRestoringTrimmedWindowRef = useRef(false);
   const shouldAutoScrollAfterSendRef = useRef(false);
   const draftAttachmentsRef = useRef<DraftAttachmentItem[]>([]);
   const pendingDraftCursorRef = useRef<number | null>(null);
@@ -4115,24 +4060,6 @@ export default function DirectMessageChatView({
   ]);
 
   useEffect(() => {
-    if (messages.length <= ACTIVE_MESSAGE_WINDOW_MAX) {
-      return;
-    }
-
-    const trimmed = trimMessagesToActiveWindow(messages, "drop-older");
-    if (areMessagesEqual(messages, trimmed.messages)) {
-      return;
-    }
-
-    setMessages(trimmed.messages);
-    if (trimmed.droppedOlder.length > 0) {
-      const cursor = buildOlderCursorFromMessages(trimmed.messages);
-      setNextCursor(cursor);
-      setHasMoreBefore(Boolean(cursor));
-    }
-  }, [messages]);
-
-  useEffect(() => {
     const messageIds = new Set(messages.map((message) => message.id));
     setAttachmentUrlMap((current) => {
       const next = pruneAttachmentMapByMessageIds(current, messageIds);
@@ -4290,20 +4217,15 @@ export default function DirectMessageChatView({
         mergedWithCarryOver,
         knownDeletedMessageIds,
       );
-      const trimmed = trimMessagesToActiveWindow(mergedMessages, "drop-older");
-      const derivedOlderCursor = buildOlderCursorFromMessages(trimmed.messages);
-      const resolvedCursor = trimmed.droppedOlder.length > 0
-        ? derivedOlderCursor
-        : (listed.nextCursor ?? null);
-      const resolvedHasMoreBefore = trimmed.droppedOlder.length > 0 || Boolean(listed.nextCursor);
+      const resolvedCursor = listed.nextCursor ?? null;
+      const resolvedHasMoreBefore = Boolean(listed.nextCursor);
       if (!isConversationContextActive(requestConversationId)) {
         return;
       }
 
-      setMessages((current) => (areMessagesEqual(current, trimmed.messages) ? current : trimmed.messages));
+      setMessages((current) => (areMessagesEqual(current, mergedMessages) ? current : mergedMessages));
       setNextCursor(resolvedCursor);
       setHasMoreBefore(resolvedHasMoreBefore);
-      setHasTrimmedNewerMessages(false);
       hasAuthoritativeConversationSeedRef.current = true;
 
       setLoadError(null);
@@ -4380,11 +4302,7 @@ export default function DirectMessageChatView({
           sortMessages(Array.from(currentById.values())),
           knownDeletedMessageIds,
         );
-        const trimmed = trimMessagesToActiveWindow(mergedMessages, "drop-newer");
-        if (trimmed.droppedNewer.length > 0) {
-          setHasTrimmedNewerMessages(true);
-        }
-        setMessages((current) => (areMessagesEqual(current, trimmed.messages) ? current : trimmed.messages));
+        setMessages((current) => (areMessagesEqual(current, mergedMessages) ? current : mergedMessages));
       }
 
       setNextCursor(listed.nextCursor ?? null);
@@ -4527,13 +4445,11 @@ export default function DirectMessageChatView({
     setMediaViewerState(null);
     setIsEmojiOpen(false);
     setIsLoadingOlder(false);
-    setHasTrimmedNewerMessages(false);
     setShowNewMessagesButton(false);
     setVirtualFocusIndex(null);
     setVirtualScrollTop(0);
     setVirtualViewportHeight(0);
     isLoadingOlderRef.current = false;
-    isRestoringTrimmedWindowRef.current = false;
     pendingVirtualScrollMessageIdRef.current = null;
     setDraftAttachments((current) => {
       current.forEach((attachment) => {
@@ -5225,16 +5141,6 @@ export default function DirectMessageChatView({
 
     if (nearBottom) {
       setShowNewMessagesButton(false);
-      if (
-        hasTrimmedNewerMessages &&
-        !isLoadingOlderRef.current &&
-        !isRestoringTrimmedWindowRef.current
-      ) {
-        isRestoringTrimmedWindowRef.current = true;
-        void loadConversationMessages("window-restore-latest").finally(() => {
-          isRestoringTrimmedWindowRef.current = false;
-        });
-      }
     }
 
     if (container.scrollTop <= LOAD_OLDER_THRESHOLD_PX && hasMoreBefore && !isLoadingOlderRef.current) {
@@ -5242,8 +5148,6 @@ export default function DirectMessageChatView({
     }
   }, [
     hasMoreBefore,
-    hasTrimmedNewerMessages,
-    loadConversationMessages,
     loadOlderMessages,
     updateScrollThumb,
     virtualFocusIndex,
