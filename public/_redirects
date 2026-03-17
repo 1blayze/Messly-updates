@@ -7,4 +7,5 @@
 /landing/* /landing/:splat 200
 /terms /landing/terms.html 200
 /privacy /landing/privacy.html 200
+/assets/* /assets/:splat 200
 /* /index.html 200
