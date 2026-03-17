@@ -1,5 +1,6 @@
 ﻿const fs = require("node:fs");
 const path = require("node:path");
+const { spawnSync } = require("node:child_process");
 const { performance } = require("node:perf_hooks");
 const { pathToFileURL } = require("node:url");
 const dotenv = require("dotenv");
@@ -77,6 +78,7 @@ const APP_NOTIFICATION_ICON_PNG_PATH = path.resolve(
   "messly-notification.png",
 );
 const WINDOWS_BEHAVIOR_SETTINGS_FILE = "windows-behavior-settings.json";
+const WINDOWS_RUN_REGISTRY_KEY = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const HIDDEN_DIRECT_MESSAGES_STATE_FILE = "hidden-direct-messages-state.json";
 const SECURE_AUTH_STORAGE_FILE = "secure-auth-storage.json";
 const SECURE_AUTH_STORAGE_KEY_REGEX = /^[a-z0-9:_./-]{1,200}$/i;
@@ -1399,6 +1401,210 @@ function getWindowsBehaviorSettingsPath() {
   return path.join(app.getPath("userData"), WINDOWS_BEHAVIOR_SETTINGS_FILE);
 }
 
+function getWindowsStartupRegistryValueName() {
+  const preferred = String(APP_ID ?? "").trim() || String(APP_NAME ?? "").trim();
+  return preferred || "Messly";
+}
+
+function resolveLocalAppDataPath() {
+  const envLocalAppData = String(process.env.LOCALAPPDATA ?? "").trim();
+  if (envLocalAppData) {
+    return envLocalAppData;
+  }
+  try {
+    const appDataPath = String(app?.getPath?.("appData") ?? "").trim();
+    if (!appDataPath) {
+      return "";
+    }
+    return path.resolve(appDataPath, "..", "Local");
+  } catch {
+    return "";
+  }
+}
+
+function resolveLauncherExecutablePathForStartup() {
+  if (!app.isPackaged || process.platform !== "win32") {
+    return "";
+  }
+
+  const localAppDataPath = resolveLocalAppDataPath();
+  const envLauncherPath = String(process.env.MESSLY_LAUNCHER_PATH ?? "").trim();
+  const candidates = [
+    envLauncherPath,
+    path.resolve(path.dirname(process.execPath), "..", "MesslyLauncher.exe"),
+    localAppDataPath ? path.join(localAppDataPath, "Messly", "MesslyLauncher.exe") : "",
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate)) {
+        return path.resolve(candidate);
+      }
+    } catch {
+      // Ignore invalid candidates.
+    }
+  }
+
+  return "";
+}
+
+function quoteWindowsCommandLineArgument(value) {
+  const input = String(value ?? "");
+  if (input.length === 0) {
+    return '""';
+  }
+  if (!/[\s"]/u.test(input)) {
+    return input;
+  }
+
+  let result = '"';
+  let backslashCount = 0;
+
+  for (const character of input) {
+    if (character === "\\") {
+      backslashCount += 1;
+      continue;
+    }
+
+    if (character === '"') {
+      result += "\\".repeat(backslashCount * 2 + 1) + '"';
+      backslashCount = 0;
+      continue;
+    }
+
+    if (backslashCount > 0) {
+      result += "\\".repeat(backslashCount);
+      backslashCount = 0;
+    }
+    result += character;
+  }
+
+  if (backslashCount > 0) {
+    result += "\\".repeat(backslashCount * 2);
+  }
+  result += '"';
+  return result;
+}
+
+function buildWindowsStartupCommand(executablePath, args = []) {
+  const commandSegments = [quoteWindowsCommandLineArgument(executablePath)];
+  for (const arg of args) {
+    const normalizedArg = String(arg ?? "").trim();
+    if (!normalizedArg) {
+      continue;
+    }
+    commandSegments.push(quoteWindowsCommandLineArgument(normalizedArg));
+  }
+  return commandSegments.join(" ");
+}
+
+function getWindowsStartupRegistrationDetails(settings = loadWindowsBehaviorSettings()) {
+  const normalizedSettings = normalizeWindowsBehaviorSettings(settings);
+  const launcherPath = resolveLauncherExecutablePathForStartup();
+  if (launcherPath) {
+    const args = ["--launcher", "--silent"];
+    if (normalizedSettings.startMinimized) {
+      args.push(START_MINIMIZED_ARG);
+    }
+    return {
+      mode: "launcher",
+      executablePath: launcherPath,
+      args,
+      command: buildWindowsStartupCommand(launcherPath, args),
+    };
+  }
+
+  const executablePath = String(process.execPath ?? "").trim();
+  const args = normalizedSettings.startMinimized ? [START_MINIMIZED_ARG] : [];
+  return {
+    mode: "electron",
+    executablePath,
+    args,
+    command: executablePath ? buildWindowsStartupCommand(executablePath, args) : "",
+  };
+}
+
+function runWindowsRegistryCommand(args) {
+  return spawnSync("reg.exe", args, {
+    windowsHide: true,
+    encoding: "utf8",
+    timeout: 10000,
+  });
+}
+
+function readWindowsStartupCommandFromRegistry() {
+  if (process.platform !== "win32") {
+    return "";
+  }
+
+  try {
+    const valueName = getWindowsStartupRegistryValueName();
+    const result = runWindowsRegistryCommand(["query", WINDOWS_RUN_REGISTRY_KEY, "/v", valueName]);
+    if (result.error || result.status !== 0) {
+      return "";
+    }
+
+    const outputLines = (String(result.stdout ?? "") + "\n" + String(result.stderr ?? ""))
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    for (const line of outputLines) {
+      const parts = line.split(/\s{2,}/, 3);
+      if (parts.length < 3) {
+        continue;
+      }
+      if (String(parts[0] ?? "").trim().toLowerCase() !== valueName.toLowerCase()) {
+        continue;
+      }
+      return String(parts[2] ?? "").trim();
+    }
+  } catch {}
+
+  return "";
+}
+
+function writeWindowsStartupCommandToRegistry(command) {
+  const valueName = getWindowsStartupRegistryValueName();
+  const result = runWindowsRegistryCommand([
+    "add",
+    WINDOWS_RUN_REGISTRY_KEY,
+    "/v",
+    valueName,
+    "/t",
+    "REG_SZ",
+    "/d",
+    String(command ?? ""),
+    "/f",
+  ]);
+
+  if (result.error || result.status !== 0) {
+    const message = String(result.stderr ?? result.stdout ?? result.error?.message ?? "unknown").trim() || "unknown";
+    throw new Error("Falha ao registrar abertura na inicializacao: " + message);
+  }
+}
+
+function deleteWindowsStartupCommandFromRegistry() {
+  if (!readWindowsStartupCommandFromRegistry()) {
+    return;
+  }
+
+  const valueName = getWindowsStartupRegistryValueName();
+  const result = runWindowsRegistryCommand(["delete", WINDOWS_RUN_REGISTRY_KEY, "/v", valueName, "/f"]);
+  if (result.error || result.status !== 0) {
+    const message = String(result.stderr ?? result.stdout ?? result.error?.message ?? "unknown").trim() || "unknown";
+    throw new Error("Falha ao remover abertura na inicializacao: " + message);
+  }
+}
+
+function clearLegacyElectronLaunchAtStartupRegistration() {
+  try {
+    if (typeof app.setLoginItemSettings === "function") {
+      app.setLoginItemSettings({ openAtLogin: false });
+    }
+  } catch {}
+}
+
 function normalizeWindowsBehaviorSettings(rawSettings) {
   const source =
     rawSettings && typeof rawSettings === "object" && !Array.isArray(rawSettings)
@@ -1438,14 +1644,23 @@ function writeWindowsBehaviorSettingsToDisk(nextSettings) {
 
 function readLaunchAtStartupFromSystem() {
   try {
-    if (process.platform !== "win32" || typeof app.getLoginItemSettings !== "function") {
+    if (process.platform !== "win32") {
       return false;
     }
-    const loginSettings = app.getLoginItemSettings();
-    return Boolean(loginSettings?.openAtLogin);
+
+    const registryCommand = readWindowsStartupCommandFromRegistry();
+    if (registryCommand) {
+      return true;
+    }
+
+    if (typeof app.getLoginItemSettings === "function") {
+      const loginSettings = app.getLoginItemSettings();
+      return Boolean(loginSettings?.openAtLogin);
+    }
   } catch {
     return false;
   }
+  return false;
 }
 
 function loadWindowsBehaviorSettings() {
@@ -1466,16 +1681,33 @@ function syncLaunchAtStartupToSystem(enabled) {
   if (process.platform !== "win32") {
     return;
   }
+
+  const normalizedEnabled = Boolean(enabled);
+  const registration = getWindowsStartupRegistrationDetails();
+
   try {
+    if (registration.mode === "launcher" && registration.command) {
+      if (normalizedEnabled) {
+        writeWindowsStartupCommandToRegistry(registration.command);
+      } else {
+        deleteWindowsStartupCommandFromRegistry();
+        clearLegacyElectronLaunchAtStartupRegistration();
+      }
+      return;
+    }
+
     if (typeof app.setLoginItemSettings !== "function") {
       return;
     }
     app.setLoginItemSettings({
-      openAtLogin: Boolean(enabled),
-      path: process.execPath,
-      args: loadWindowsBehaviorSettings().startMinimized ? [START_MINIMIZED_ARG] : [],
+      openAtLogin: normalizedEnabled,
+      path: registration.executablePath || process.execPath,
+      args: registration.args,
     });
-  } catch {}
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error ?? "unknown");
+    console.warn("[windows-settings] failed to sync launch at startup: " + message);
+  }
 }
 
 function shouldStartMinimizedThisLaunch() {
@@ -1495,6 +1727,12 @@ function setWindowsBehaviorSettings(nextPartial) {
   syncLaunchAtStartupToSystem(next.launchAtStartup);
   writeWindowsBehaviorSettingsToDisk(next);
   return { ...next };
+}
+
+function reconcileWindowsBehaviorSettingsWithSystem() {
+  const settings = loadWindowsBehaviorSettings();
+  syncLaunchAtStartupToSystem(settings.launchAtStartup);
+  return settings;
 }
 
 function applyHardwareAccelerationPreferenceAtStartup() {
@@ -4894,7 +5132,7 @@ app.whenReady().then(async () => {
       });
   }
   registerMesslyProtocolClient();
-  loadWindowsBehaviorSettings();
+  reconcileWindowsBehaviorSettingsWithSystem();
   appUpdater = createConfiguredAppUpdater();
   appUpdater.setBroadcaster(broadcastUpdaterState);
   registerIpcHandlers();
