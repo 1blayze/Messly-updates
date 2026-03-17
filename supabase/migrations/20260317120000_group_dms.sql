@@ -22,8 +22,11 @@ alter table public.conversations
   alter column user1_id drop not null,
   alter column user2_id drop not null;
 
-drop constraint if exists conversations_distinct_users_chk on public.conversations;
-drop constraint if exists conversations_user_order_chk on public.conversations;
+alter table public.conversations
+  drop constraint if exists conversations_distinct_users_chk;
+
+alter table public.conversations
+  drop constraint if exists conversations_user_order_chk;
 alter table public.conversations
   drop constraint if exists conversations_shape_chk;
 

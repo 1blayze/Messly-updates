@@ -3766,6 +3766,38 @@ export default function DirectMessagesSidebar({
     ? getDmDisplayAvatar(identity.displayName, identity.username, identity.userId)
     : avatarSrc;
 
+  const createGroupFallbackUserIds = useMemo(() => {
+    const normalizedCurrentUserId = String(effectiveIdentityUserId ?? "").trim();
+    const fallbackUserIds = new Set<string>();
+
+    directMessages.forEach((dm) => {
+      if (dm.conversationType === "group_dm") {
+        dm.participantIds.forEach((participantIdRaw) => {
+          const participantId = String(participantIdRaw ?? "").trim();
+          if (!participantId || participantId === normalizedCurrentUserId) {
+            return;
+          }
+          fallbackUserIds.add(participantId);
+        });
+        return;
+      }
+
+      const dmUserId = String(dm.userId ?? "").trim();
+      if (!dmUserId || dmUserId === normalizedCurrentUserId || dmUserId.startsWith("group:")) {
+        return;
+      }
+      fallbackUserIds.add(dmUserId);
+    });
+
+    return Array.from(fallbackUserIds);
+  }, [directMessages, effectiveIdentityUserId]);
+
+  const handleOpenCreateGroupModal = useCallback((event?: { preventDefault?: () => void; stopPropagation?: () => void }): void => {
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+    setIsCreateGroupDmModalOpen(true);
+  }, []);
+
   const handleOpenAddFriendModal = useCallback((): void => {
     setIsAddFriendModalOpen(true);
     setFriendIdentifier("");
@@ -3993,8 +4025,11 @@ export default function DirectMessagesSidebar({
                 className="friends-sidebar__section-action-btn"
                 type="button"
                 aria-label="Criar grupo privado"
-                onClick={() => {
-                  setIsCreateGroupDmModalOpen(true);
+                onPointerDown={(event) => {
+                  handleOpenCreateGroupModal(event);
+                }}
+                onClick={(event) => {
+                  handleOpenCreateGroupModal(event);
                 }}
               >
                 <MaterialSymbolIcon name="add" size={16} />
@@ -4209,6 +4244,7 @@ export default function DirectMessagesSidebar({
       <CreateGroupDmModal
         isOpen={isCreateGroupDmModalOpen}
         currentUserId={effectiveIdentityUserId}
+        fallbackUserIds={createGroupFallbackUserIds}
         onClose={() => {
           setIsCreateGroupDmModalOpen(false);
         }}

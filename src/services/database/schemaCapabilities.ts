@@ -3,12 +3,12 @@ type SchemaCapabilityKey =
   | "conversation_members_table"
   | "create_group_dm_rpc";
 
-const SCHEMA_CAPABILITY_STORAGE_PREFIX = "messly:schema-capability:v2:";
+const SCHEMA_CAPABILITY_STORAGE_PREFIX = "messly:schema-capability:v3:";
 const schemaCapabilityCache = new Map<SchemaCapabilityKey, boolean | null>();
-const DEFAULT_SCHEMA_CAPABILITIES: Record<SchemaCapabilityKey, boolean> = {
-  conversations_extended_columns: false,
-  conversation_members_table: false,
-  create_group_dm_rpc: false,
+const DEFAULT_SCHEMA_CAPABILITIES: Record<SchemaCapabilityKey, boolean | null> = {
+  conversations_extended_columns: null,
+  conversation_members_table: null,
+  create_group_dm_rpc: null,
 };
 
 function readCapabilityFromStorage(key: SchemaCapabilityKey): boolean | null {
@@ -55,13 +55,8 @@ export function getSchemaCapability(key: SchemaCapabilityKey): boolean | null {
     return defaultValue;
   }
 
-  // Do not trust stale "true" values for capabilities disabled by default in legacy schema.
-  const normalizedValue = storedValue && !defaultValue ? false : storedValue;
-  schemaCapabilityCache.set(key, normalizedValue);
-  if (normalizedValue !== storedValue) {
-    writeCapabilityToStorage(key, normalizedValue);
-  }
-  return normalizedValue;
+  schemaCapabilityCache.set(key, storedValue);
+  return storedValue;
 }
 
 export function setSchemaCapability(key: SchemaCapabilityKey, value: boolean): void {

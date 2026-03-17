@@ -600,20 +600,21 @@ export async function createGroupConversation(
   }
 
   const createGroupRpcSupported = getSchemaCapability("create_group_dm_rpc");
-  if (createGroupRpcSupported === false) {
-    if (normalizedOtherParticipantIds.length === 1) {
-      const directConversation = await ensureDirectConversation(
-        normalizedCurrentUserId,
-        normalizedOtherParticipantIds[0],
-      );
-      const directDetails = await getConversationDetails(directConversation.id);
-      if (directDetails) {
-        return directDetails;
-      }
-      throw new Error("Falha ao criar conversa direta.");
+  const isDirectOnlySelection = normalizedOtherParticipantIds.length === 1;
+  const shouldTryRpc = createGroupRpcSupported !== false || !isDirectOnlySelection;
+
+  if (!shouldTryRpc) {
+    const directConversation = await ensureDirectConversation(
+      normalizedCurrentUserId,
+      normalizedOtherParticipantIds[0],
+    );
+    const directDetails = await getConversationDetails(directConversation.id);
+    if (directDetails) {
+      return directDetails;
     }
-    throw new Error("Grupo privado indisponivel neste ambiente.");
+    throw new Error("Falha ao criar conversa direta.");
   }
+
   if (createGroupRpcSupported === null) {
     // Optimistically mark as unsupported while probing to avoid concurrent duplicate probes.
     setSchemaCapability("create_group_dm_rpc", false);
@@ -627,7 +628,7 @@ export async function createGroupConversation(
   if (error) {
     if (isMissingCreateGroupDmRpcError(error)) {
       setSchemaCapability("create_group_dm_rpc", false);
-      if (normalizedOtherParticipantIds.length === 1) {
+      if (isDirectOnlySelection) {
         const directConversation = await ensureDirectConversation(
           normalizedCurrentUserId,
           normalizedOtherParticipantIds[0],

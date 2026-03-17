@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import AvatarImage from "../ui/AvatarImage";
 import Modal from "../ui/Modal";
 import { getAvatarUrl, getNameAvatarUrl, isDefaultAvatarUrl } from "../../services/cdn/mediaUrls";
@@ -28,14 +28,10 @@ interface ProfileRow {
   avatar_hash?: string | null;
 }
 
-interface ConversationFriendLookupRow {
-  user1_id?: string | null;
-  user2_id?: string | null;
-}
-
 interface CreateGroupDmModalProps {
   isOpen: boolean;
   currentUserId: string | null | undefined;
+  fallbackUserIds?: string[];
   onClose: () => void;
   onCreate: (participantIds: string[], generatedName: string) => Promise<void>;
 }
@@ -95,6 +91,7 @@ async function withTimeout<T>(promise: PromiseLike<T>, timeoutMs: number, messag
 export default function CreateGroupDmModal({
   isOpen,
   currentUserId,
+  fallbackUserIds,
   onClose,
   onCreate,
 }: CreateGroupDmModalProps) {
@@ -104,16 +101,28 @@ export default function CreateGroupDmModal({
   const [isLoadingCandidates, setIsLoadingCandidates] = useState(false);
   const [isCreatingGroup, setIsCreatingGroup] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const cachedAcceptedFriendIds = useAppSelector((state) =>
-    Object.keys(state.friends.relationships)
-      .map((userId) => String(userId ?? "").trim())
-      .filter((userId) => Boolean(userId))
-      .sort(),
-  );
+  const friendRelationships = useAppSelector((state) => state.friends.relationships);
+  const friendRelationshipsRef = useRef(friendRelationships);
   const cachedProfileEntities = useAppSelector((state) => state.profiles.entities);
+  const cachedProfileEntitiesRef = useRef(cachedProfileEntities);
+  const fallbackUserIdsRef = useRef<string[]>(Array.isArray(fallbackUserIds) ? fallbackUserIds : []);
+  const loadCandidatesRequestIdRef = useRef(0);
+
+  useEffect(() => {
+    friendRelationshipsRef.current = friendRelationships;
+  }, [friendRelationships]);
+
+  useEffect(() => {
+    cachedProfileEntitiesRef.current = cachedProfileEntities;
+  }, [cachedProfileEntities]);
+
+  useEffect(() => {
+    fallbackUserIdsRef.current = Array.isArray(fallbackUserIds) ? fallbackUserIds : [];
+  }, [fallbackUserIds]);
 
   useEffect(() => {
     if (!isOpen) {
+      loadCandidatesRequestIdRef.current += 1;
       setSearchTerm("");
       setSelectedUserIds([]);
       setCandidates([]);
@@ -130,59 +139,48 @@ export default function CreateGroupDmModal({
       return;
     }
 
-    let isDisposed = false;
+    const requestId = loadCandidatesRequestIdRef.current + 1;
+    loadCandidatesRequestIdRef.current = requestId;
     setIsLoadingCandidates(true);
     setLoadError(null);
 
     void (async () => {
       try {
+        const acceptedFriendIdsSnapshot = Object.keys(friendRelationshipsRef.current)
+          .map((userId) => String(userId ?? "").trim())
+          .filter((userId) => Boolean(userId))
+          .sort();
         const friendIdsSet = new Set(
-          cachedAcceptedFriendIds.filter((userId) => userId !== normalizedCurrentUserId),
+          acceptedFriendIdsSnapshot.filter((userId) => userId !== normalizedCurrentUserId),
         );
+        fallbackUserIdsRef.current.forEach((userIdRaw) => {
+          const userId = String(userIdRaw ?? "").trim();
+          if (!userId || userId === normalizedCurrentUserId) {
+            return;
+          }
+          friendIdsSet.add(userId);
+        });
 
         if (friendIdsSet.size === 0) {
-          const conversationsResponse = await withTimeout<{
-            data: ConversationFriendLookupRow[] | null;
-            error: { message?: string } | null;
-          }>(
-            supabase
-              .from("conversations")
-              .select("user1_id,user2_id")
-              .or(`user1_id.eq.${normalizedCurrentUserId},user2_id.eq.${normalizedCurrentUserId}`),
-            FRIEND_CANDIDATES_LOAD_TIMEOUT_MS,
-            "Tempo limite ao carregar conversas para montar a lista de amigos.",
-          );
-          if (conversationsResponse.error) {
-            throw conversationsResponse.error;
+          if (loadCandidatesRequestIdRef.current === requestId) {
+            setCandidates([]);
           }
-
-          (Array.isArray(conversationsResponse.data)
-            ? (conversationsResponse.data as ConversationFriendLookupRow[])
-            : []
-          ).forEach((conversation) => {
-            const user1Id = String(conversation.user1_id ?? "").trim();
-            const user2Id = String(conversation.user2_id ?? "").trim();
-            if (user1Id && user1Id !== normalizedCurrentUserId) {
-              friendIdsSet.add(user1Id);
-            }
-            if (user2Id && user2Id !== normalizedCurrentUserId) {
-              friendIdsSet.add(user2Id);
-            }
-          });
+          return;
         }
 
         const friendIds = Array.from(friendIdsSet);
 
         if (friendIds.length === 0) {
-          if (!isDisposed) {
+          if (loadCandidatesRequestIdRef.current === requestId) {
             setCandidates([]);
           }
           return;
         }
 
         const profilesByUserId = new Map<string, ProfileRow>();
+        const profileEntitiesSnapshot = cachedProfileEntitiesRef.current;
         friendIds.forEach((friendId) => {
-          const cachedProfile = cachedProfileEntities[friendId];
+          const cachedProfile = profileEntitiesSnapshot[friendId];
           if (!cachedProfile) {
             return;
           }
@@ -235,7 +233,7 @@ export default function CreateGroupDmModal({
           }),
         );
 
-        if (isDisposed) {
+        if (loadCandidatesRequestIdRef.current !== requestId) {
           return;
         }
 
@@ -245,22 +243,18 @@ export default function CreateGroupDmModal({
             .sort((left, right) => left.displayName.localeCompare(right.displayName, "pt-BR", { sensitivity: "base" })),
         );
       } catch (error) {
-        if (isDisposed) {
+        if (loadCandidatesRequestIdRef.current !== requestId) {
           return;
         }
         setCandidates([]);
         setLoadError(error instanceof Error ? error.message : "Nao foi possivel carregar seus amigos.");
       } finally {
-        if (!isDisposed) {
+        if (loadCandidatesRequestIdRef.current === requestId) {
           setIsLoadingCandidates(false);
         }
       }
     })();
-
-    return () => {
-      isDisposed = true;
-    };
-  }, [cachedAcceptedFriendIds, cachedProfileEntities, currentUserId, isOpen]);
+  }, [currentUserId, isOpen]);
 
   const normalizedSearchTerm = searchTerm.trim().toLowerCase();
   const selectedCandidates = useMemo(
