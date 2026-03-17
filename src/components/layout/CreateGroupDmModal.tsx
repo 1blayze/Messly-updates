@@ -212,6 +212,7 @@ export default function CreateGroupDmModal({
     [candidates, normalizedSearchTerm],
   );
   const hasReachedSelectionLimit = selectedUserIds.length >= MAX_GROUP_DM_OTHER_PARTICIPANTS;
+  const remainingFriendSlots = Math.max(0, MAX_GROUP_DM_OTHER_PARTICIPANTS - selectedUserIds.length);
 
   const handleRequestClose = (): void => {
     if (isCreatingGroup) {
@@ -254,8 +255,8 @@ export default function CreateGroupDmModal({
   return (
     <Modal
       isOpen={isOpen}
-      title="Criar grupo privado"
-      ariaLabel="Criar grupo privado"
+      title="Nova mensagem"
+      ariaLabel="Nova mensagem"
       onClose={handleRequestClose}
       panelClassName="create-group-dm-modal"
       bodyClassName="create-group-dm-modal__body"
@@ -277,36 +278,15 @@ export default function CreateGroupDmModal({
             }}
             disabled={selectedUserIds.length === 0 || isCreatingGroup}
           >
-            {isCreatingGroup ? "Criando..." : "Criar Grupo"}
+            {isCreatingGroup ? "Criando..." : "Criar mensagem"}
           </button>
         </div>
       )}
     >
       <div className="create-group-dm-modal__content">
-        <div className="create-group-dm-modal__selected">
-          <div className="create-group-dm-modal__selected-header">
-            <span className="create-group-dm-modal__selected-label">Selecionados</span>
-            <span className="create-group-dm-modal__selected-count">
-              {selectedUserIds.length + 1}/{MAX_GROUP_DM_MEMBERS} pessoas
-            </span>
-          </div>
-          <div className="create-group-dm-modal__chips">
-            {selectedCandidates.length > 0 ? selectedCandidates.map((candidate) => (
-              <button
-                key={candidate.userId}
-                className="create-group-dm-modal__chip"
-                type="button"
-                onClick={() => {
-                  toggleCandidate(candidate.userId);
-                }}
-              >
-                <span>{candidate.displayName}</span>
-              </button>
-            )) : (
-              <span className="create-group-dm-modal__chips-empty">Escolha pelo menos uma pessoa.</span>
-            )}
-          </div>
-        </div>
+        <p className="create-group-dm-modal__subtitle">
+          Voce pode adicionar mais {remainingFriendSlots} {remainingFriendSlots === 1 ? "amigo" : "amigos"}.
+        </p>
 
         <label className="create-group-dm-modal__search-wrap" htmlFor="create-group-dm-search">
           <input
@@ -317,7 +297,7 @@ export default function CreateGroupDmModal({
             onChange={(event) => {
               setSearchTerm(event.target.value);
             }}
-            placeholder="Buscar usuarios"
+            placeholder="Buscar amigos"
             autoComplete="off"
             spellCheck={false}
             disabled={isLoadingCandidates || isCreatingGroup}
@@ -368,10 +348,13 @@ export default function CreateGroupDmModal({
                 />
                 <div className="create-group-dm-modal__user-meta">
                   <span className="create-group-dm-modal__user-name">{candidate.displayName}</span>
-                  <span className="create-group-dm-modal__user-username">@{candidate.username}</span>
+                  <span className="create-group-dm-modal__user-username">{candidate.username}</span>
                 </div>
-                <span className="create-group-dm-modal__user-check" aria-hidden="true">
-                  {isSelected ? "Selecionado" : ""}
+                <span
+                  className={`create-group-dm-modal__user-check${isSelected ? " create-group-dm-modal__user-check--selected" : ""}`}
+                  aria-hidden="true"
+                >
+                  <span className="create-group-dm-modal__user-check-icon" />
                 </span>
               </button>
             );

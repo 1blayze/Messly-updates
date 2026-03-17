@@ -1,66 +1,27 @@
 .create-group-dm-modal {
-  width: min(560px, calc(100vw - 28px)) !important;
+  width: min(500px, calc(100vw - 18px)) !important;
+  max-height: min(620px, calc(100vh - 28px));
+  background: #2b2d31 !important;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 14px !important;
+  box-shadow: 0 22px 48px rgba(0, 0, 0, 0.44);
 }
 
-.create-group-dm-modal__body,
+.create-group-dm-modal__body {
+  padding: 0 !important;
+}
+
 .create-group-dm-modal__content {
   display: grid;
-  gap: 14px;
+  gap: 16px;
+  padding: 0 24px 0;
 }
 
-.create-group-dm-modal__selected {
-  display: grid;
-  gap: 10px;
-}
-
-.create-group-dm-modal__selected-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.create-group-dm-modal__selected-label,
-.create-group-dm-modal__selected-count {
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.03em;
-  text-transform: uppercase;
-  color: rgba(232, 238, 246, 0.82);
-}
-
-.create-group-dm-modal__chips {
-  min-height: 42px;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 10px 12px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.04);
-}
-
-.create-group-dm-modal__chips-empty {
-  color: rgba(218, 224, 233, 0.52);
-  font-size: 13px;
-}
-
-.create-group-dm-modal__chip {
-  border: 0;
-  border-radius: 999px;
-  background: rgba(53, 190, 129, 0.18);
-  color: #dff9ea;
-  padding: 6px 12px;
-  font-size: 13px;
-  font-weight: 500;
-  cursor: pointer;
-}
-
-.create-group-dm-modal__chip:hover,
-.create-group-dm-modal__chip:focus-visible {
-  background: rgba(53, 190, 129, 0.28);
-  outline: none;
+.create-group-dm-modal__subtitle {
+  margin: -6px 0 0;
+  color: rgba(219, 222, 225, 0.72);
+  font-size: 14px;
+  line-height: 1.35;
 }
 
 .create-group-dm-modal__search-wrap {
@@ -70,35 +31,39 @@
 .create-group-dm-modal__search {
   width: 100%;
   height: 42px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.06);
-  color: var(--text-primary);
+  border: 1px solid #5965f3;
+  border-radius: 8px;
+  background: transparent;
+  color: #f2f3f5;
   padding: 0 14px;
-  font-size: 14px;
+  font-size: 15px;
+}
+
+.create-group-dm-modal__search::placeholder {
+  color: rgba(219, 222, 225, 0.56);
 }
 
 .create-group-dm-modal__search:focus {
   outline: none;
-  border-color: rgba(53, 190, 129, 0.48);
-  box-shadow: 0 0 0 1px rgba(53, 190, 129, 0.24);
+  box-shadow: 0 0 0 1px #5965f3;
 }
 
 .create-group-dm-modal__list {
-  max-height: 340px;
+  min-height: 320px;
+  max-height: 360px;
   overflow-y: auto;
   display: grid;
-  gap: 6px;
+  gap: 2px;
   padding-right: 4px;
 }
 
 .create-group-dm-modal__user {
   width: 100%;
   border: 0;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--text-primary);
-  padding: 10px 12px;
+  border-radius: 8px;
+  background: transparent;
+  color: #f2f3f5;
+  padding: 8px 10px;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -107,24 +72,20 @@
 }
 
 .create-group-dm-modal__user:hover,
-.create-group-dm-modal__user:focus-visible {
-  background: rgba(255, 255, 255, 0.08);
+.create-group-dm-modal__user:focus-visible,
+.create-group-dm-modal__user--selected {
+  background: rgba(255, 255, 255, 0.06);
   outline: none;
 }
 
-.create-group-dm-modal__user--selected {
-  background: rgba(53, 190, 129, 0.14);
-  box-shadow: inset 0 0 0 1px rgba(53, 190, 129, 0.3);
-}
-
 .create-group-dm-modal__user:disabled {
-  opacity: 0.52;
+  opacity: 0.48;
   cursor: not-allowed;
 }
 
 .create-group-dm-modal__user-avatar {
-  width: 40px;
-  height: 40px;
+  width: 36px;
+  height: 36px;
   border-radius: 999px;
   flex-shrink: 0;
 }
@@ -145,20 +106,45 @@
 }
 
 .create-group-dm-modal__user-name {
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 600;
+  color: #f2f3f5;
 }
 
 .create-group-dm-modal__user-username {
-  font-size: 12px;
-  color: rgba(220, 226, 235, 0.72);
+  font-size: 13px;
+  color: rgba(219, 222, 225, 0.62);
 }
 
 .create-group-dm-modal__user-check {
-  font-size: 12px;
-  font-weight: 600;
-  color: #7de6a9;
+  width: 22px;
+  height: 22px;
+  border: 2px solid rgba(255, 255, 255, 0.36);
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
+  transition: none;
+}
+
+.create-group-dm-modal__user-check-icon {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  background: transparent;
+}
+
+.create-group-dm-modal__user-check--selected {
+  border-color: #5865f2;
+  background: #5865f2;
+}
+
+.create-group-dm-modal__user-check--selected .create-group-dm-modal__user-check-icon {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: #ffffff;
 }
 
 .create-group-dm-modal__empty,
@@ -170,7 +156,7 @@
 }
 
 .create-group-dm-modal__empty {
-  color: rgba(220, 226, 235, 0.62);
+  color: rgba(219, 222, 225, 0.62);
 }
 
 .create-group-dm-modal__feedback--error,
@@ -180,40 +166,43 @@
 
 .create-group-dm-modal__footer {
   width: 100%;
-  display: flex;
-  justify-content: flex-end;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
   gap: 10px;
+  padding: 20px 24px 22px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  margin-top: 18px;
 }
 
 .create-group-dm-modal__button {
-  min-width: 128px;
-  height: 38px;
+  width: 100%;
+  height: 40px;
   border-radius: 10px;
   border: 0;
   font-size: 14px;
-  font-weight: 600;
+  font-weight: 700;
   cursor: pointer;
 }
 
 .create-group-dm-modal__button--secondary {
-  background: rgba(255, 255, 255, 0.08);
-  color: rgba(244, 246, 248, 0.92);
+  background: rgba(255, 255, 255, 0.06);
+  color: #f2f3f5;
 }
 
 .create-group-dm-modal__button--secondary:hover,
 .create-group-dm-modal__button--secondary:focus-visible {
-  background: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.1);
   outline: none;
 }
 
 .create-group-dm-modal__button--primary {
-  background: #35be81;
-  color: #08110d;
+  background: #5865f2;
+  color: #ffffff;
 }
 
 .create-group-dm-modal__button--primary:hover,
 .create-group-dm-modal__button--primary:focus-visible {
-  background: #49cf92;
+  background: #6a75f5;
   outline: none;
 }
 
