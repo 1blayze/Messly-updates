@@ -16,8 +16,9 @@ export type FriendRequestListRow = z.infer<typeof friendRequestRowSchema>;
 
 export async function listFriendRequests(
   status: FriendRequestStatusFilter = "pending",
+  currentUserIdOverride?: string | null | undefined,
 ): Promise<FriendRequestListRow[]> {
-  const authUserId = String((await authService.getCurrentUserId()) ?? "").trim();
+  const authUserId = String(currentUserIdOverride ?? (await authService.getCurrentUserId()) ?? "").trim();
   if (!authUserId) {
     return [];
   }

@@ -105,7 +105,7 @@ export default function CreateGroupDmModal({
 
     void (async () => {
       try {
-        const acceptedRequests = await listFriendRequests("accepted");
+        const acceptedRequests = await listFriendRequests("accepted", normalizedCurrentUserId);
         const friendIds = Array.from(
           new Set(
             acceptedRequests

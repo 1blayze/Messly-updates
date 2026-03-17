@@ -3830,8 +3830,8 @@ export default function DirectMessagesSidebar({
       }
 
       const [pendingRequests, acceptedRequests] = await Promise.all([
-        listFriendRequests("pending"),
-        listFriendRequests("accepted"),
+        listFriendRequests("pending", currentUserId),
+        listFriendRequests("accepted", currentUserId),
       ]);
       const existingRequest = [...pendingRequests, ...acceptedRequests].find((request) => {
         const requesterId = String(request.requester_id ?? "").trim();

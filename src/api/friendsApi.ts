@@ -51,8 +51,8 @@ async function fetchProfilesByIds(userIds: string[]): Promise<UserProfileEntity[
 
 export async function hydrateFriends(currentUserId: string): Promise<FriendsHydrationPayload> {
   const [acceptedRows, pendingRows] = await Promise.all([
-    listFriendRequests("accepted"),
-    listFriendRequests("pending"),
+    listFriendRequests("accepted", currentUserId),
+    listFriendRequests("pending", currentUserId),
   ]);
 
   const acceptedUserIds = acceptedRows

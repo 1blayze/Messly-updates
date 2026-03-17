@@ -58,15 +58,16 @@ export function useFriendRequestsRealtime(
   const queryClient = useQueryClient();
   const normalizedUserId = String(currentUserId ?? "").trim();
   const hasValidUserId = UUID_REGEX.test(normalizedUserId);
+  const FRIEND_REQUESTS_QUERY_VERSION = "v2";
   const queryKey = useMemo(
-    () => ["friend_requests", normalizedUserId, status] as const,
+    () => ["friend_requests", FRIEND_REQUESTS_QUERY_VERSION, normalizedUserId, status] as const,
     [normalizedUserId, status],
   );
 
   const query = useQuery({
     queryKey,
     enabled: hasValidUserId,
-    queryFn: () => listFriendRequests(status),
+    queryFn: () => listFriendRequests(status, normalizedUserId),
     staleTime: Infinity,
     gcTime: 10 * 60_000,
     refetchOnMount: false,
