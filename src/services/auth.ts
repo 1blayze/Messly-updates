@@ -25,16 +25,20 @@ import { getSecureJson, removeSecureItem, setSecureJson } from "./auth/secureSto
 const PENDING_VERIFICATION_KEY = "messly.auth.pending-verification";
 const LEGACY_SESSION_STORAGE_KEY = "messly.auth.session";
 const SESSION_REFRESH_BUFFER_MS = 30_000;
-const EDGE_ACCESS_TOKEN_VALIDATION_TTL_MS = 15_000;
+const EDGE_ACCESS_TOKEN_VALIDATION_TTL_MS = 60_000;
+const EDGE_ACCESS_TOKEN_VALIDATION_FAILURE_COOLDOWN_MS = 20_000;
 const AUTH_SESSION_READ_TIMEOUT_MS = 8_000;
 const AUTH_SESSION_REFRESH_TIMEOUT_MS = 10_000;
 const AUTH_LOGIN_TIMEOUT_MS = 12_000;
 const AUTH_TOKEN_VALIDATION_TIMEOUT_MS = 8_000;
 
 let refreshSessionPromise: Promise<Session | null> | null = null;
+let validatedEdgeAccessTokenPromise: Promise<string | null> | null = null;
 let authStateSyncInitialized = false;
 let legacySessionCleanupStarted = false;
 let lastValidatedEdgeAccessToken: { token: string; validatedAt: number } | null = null;
+let edgeAccessTokenValidationCooldownUntilMs = 0;
+const accessTokenValidationInFlight = new Map<string, Promise<boolean>>();
 
 export interface PendingVerificationState {
   email: string;
@@ -159,9 +163,32 @@ function isSupabaseSessionCorruptedError(error: unknown): boolean {
   );
 }
 
+function isTransientNetworkFetchError(error: unknown): boolean {
+  const status = Number((error as { status?: unknown } | null)?.status ?? 0);
+  const code = String((error as { code?: unknown } | null)?.code ?? "").trim().toUpperCase();
+  const name = String((error as { name?: unknown } | null)?.name ?? "").trim().toLowerCase();
+  const message = String((error as { message?: unknown } | null)?.message ?? "").trim().toLowerCase();
+  const details = String((error as { details?: unknown } | null)?.details ?? "").trim().toLowerCase();
+  const combined = `${code} ${name} ${message} ${details}`;
+
+  if (status === 0 || status === 408 || status === 429 || status === 502 || status === 503 || status === 504) {
+    return true;
+  }
+
+  return (
+    combined.includes("failed to fetch") ||
+    combined.includes("networkerror") ||
+    combined.includes("network request failed") ||
+    combined.includes("timeout") ||
+    combined.includes("err_insufficient_resources") ||
+    combined.includes("load failed")
+  );
+}
+
 async function persistSessionState(session: Session | null, fallbackRefreshToken?: string | null): Promise<void> {
   setInMemorySession(session);
   lastValidatedEdgeAccessToken = null;
+  edgeAccessTokenValidationCooldownUntilMs = 0;
   await removeSecureItem(LEGACY_SESSION_STORAGE_KEY).catch(() => undefined);
   const nextRefreshToken = String(session?.refresh_token ?? fallbackRefreshToken ?? "").trim();
   if (nextRefreshToken) {
@@ -232,6 +259,8 @@ async function clearSessionState(): Promise<void> {
 
   clearAccessToken();
   lastValidatedEdgeAccessToken = null;
+  edgeAccessTokenValidationCooldownUntilMs = 0;
+  accessTokenValidationInFlight.clear();
   if (shouldSignOutLocal) {
     await supabase.auth.signOut({ scope: "local" }).catch(() => undefined);
   }
@@ -511,6 +540,8 @@ class AuthService {
 
   invalidateEdgeAccessTokenValidationCache(): void {
     lastValidatedEdgeAccessToken = null;
+    edgeAccessTokenValidationCooldownUntilMs = 0;
+    accessTokenValidationInFlight.clear();
   }
 
   private canReuseValidatedEdgeAccessToken(accessTokenRaw: string | null | undefined): boolean {
@@ -548,30 +579,49 @@ class AuthService {
       return true;
     }
 
-    try {
-      const result = await withTimeout(
-        supabase.auth.getUser(accessToken),
-        AUTH_TOKEN_VALIDATION_TIMEOUT_MS,
-        "Tempo limite ao validar token no Supabase.",
-      );
-      const accepted = !result.error && Boolean(result.data.user?.id);
-      if (accepted) {
-        this.markValidatedEdgeAccessToken(accessToken);
-        return true;
-      }
+    const inFlightValidation = accessTokenValidationInFlight.get(accessToken);
+    if (inFlightValidation) {
+      return inFlightValidation;
+    }
 
-      if (lastValidatedEdgeAccessToken?.token === accessToken) {
-        lastValidatedEdgeAccessToken = null;
-      }
-      return false;
-    } catch (error) {
-      if (isSupabaseSessionCorruptedError(error)) {
+    const validationPromise = (async () => {
+      try {
+        const result = await withTimeout(
+          supabase.auth.getUser(accessToken),
+          AUTH_TOKEN_VALIDATION_TIMEOUT_MS,
+          "Tempo limite ao validar token no Supabase.",
+        );
+        const accepted = !result.error && Boolean(result.data.user?.id);
+        if (accepted) {
+          this.markValidatedEdgeAccessToken(accessToken);
+          return true;
+        }
+
         if (lastValidatedEdgeAccessToken?.token === accessToken) {
           lastValidatedEdgeAccessToken = null;
         }
         return false;
+      } catch (error) {
+        if (isSupabaseSessionCorruptedError(error)) {
+          if (lastValidatedEdgeAccessToken?.token === accessToken) {
+            lastValidatedEdgeAccessToken = null;
+          }
+          return false;
+        }
+
+        if (isTransientNetworkFetchError(error)) {
+          edgeAccessTokenValidationCooldownUntilMs = Date.now() + EDGE_ACCESS_TOKEN_VALIDATION_FAILURE_COOLDOWN_MS;
+          return false;
+        }
+        throw error;
       }
-      throw error;
+    })();
+
+    accessTokenValidationInFlight.set(accessToken, validationPromise);
+    try {
+      return await validationPromise;
+    } finally {
+      accessTokenValidationInFlight.delete(accessToken);
     }
   }
 
@@ -786,37 +836,64 @@ class AuthService {
   }
 
   async getValidatedEdgeAccessToken(): Promise<string | null> {
-    const currentAccessToken = await this.getCurrentAccessToken();
-    try {
-      if (await this.isAccessTokenAcceptedBySupabase(currentAccessToken)) {
-        return currentAccessToken;
-      }
-    } catch (error) {
-      if (import.meta.env.DEV) {
-        console.warn("[auth] falha ao validar token atual para Edge Function", error);
-      }
+    if (validatedEdgeAccessTokenPromise) {
+      return validatedEdgeAccessTokenPromise;
     }
 
-    let refreshedSession: Session | null;
-    try {
-      refreshedSession = await this.refreshSession();
-    } catch {
-      return null;
-    }
-    const refreshedAccessToken = String(refreshedSession?.access_token ?? "").trim();
-    try {
-      if (await this.isAccessTokenAcceptedBySupabase(refreshedAccessToken)) {
+    validatedEdgeAccessTokenPromise = (async () => {
+      const currentAccessToken = await this.getCurrentAccessToken();
+
+      if (Date.now() < edgeAccessTokenValidationCooldownUntilMs) {
+        return isLikelyJwt(currentAccessToken) ? currentAccessToken : null;
+      }
+
+      try {
+        if (await this.isAccessTokenAcceptedBySupabase(currentAccessToken)) {
+          return currentAccessToken;
+        }
+      } catch (error) {
+        if (import.meta.env.DEV) {
+          console.warn("[auth] falha ao validar token atual para Edge Function", error);
+        }
+      }
+
+      if (Date.now() < edgeAccessTokenValidationCooldownUntilMs && isLikelyJwt(currentAccessToken)) {
+        return currentAccessToken;
+      }
+
+      let refreshedSession: Session | null;
+      try {
+        refreshedSession = await this.refreshSession();
+      } catch {
+        return null;
+      }
+      const refreshedAccessToken = String(refreshedSession?.access_token ?? "").trim();
+      try {
+        if (await this.isAccessTokenAcceptedBySupabase(refreshedAccessToken)) {
+          return refreshedAccessToken;
+        }
+      } catch (error) {
+        if (import.meta.env.DEV) {
+          console.warn("[auth] falha ao validar token renovado para Edge Function", error);
+        }
+        if (isTransientNetworkFetchError(error) && isLikelyJwt(refreshedAccessToken)) {
+          edgeAccessTokenValidationCooldownUntilMs = Date.now() + EDGE_ACCESS_TOKEN_VALIDATION_FAILURE_COOLDOWN_MS;
+          return refreshedAccessToken;
+        }
+        return null;
+      }
+
+      if (Date.now() < edgeAccessTokenValidationCooldownUntilMs && isLikelyJwt(refreshedAccessToken)) {
         return refreshedAccessToken;
       }
-    } catch (error) {
-      if (import.meta.env.DEV) {
-        console.warn("[auth] falha ao validar token renovado para Edge Function", error);
-      }
-      // Never trust tokens that failed remote validation. This avoids Invalid JWT
-      // loops against Supabase Edge Functions like spotify-connections.
       return null;
+    })();
+
+    try {
+      return await validatedEdgeAccessTokenPromise;
+    } finally {
+      validatedEdgeAccessTokenPromise = null;
     }
-    return null;
   }
 
   async getCurrentUserId(): Promise<string | null> {
