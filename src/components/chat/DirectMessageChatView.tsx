@@ -565,6 +565,8 @@ interface DirectMessageChatViewProps {
   currentUserId: string;
   currentUser: DirectMessageChatParticipant;
   targetUser: DirectMessageChatParticipant;
+  conversationType?: "dm" | "group_dm";
+  conversationParticipants?: DirectMessageChatParticipant[];
   onOpenSettings?: (section?: "account" | "profile" | "connections" | "social" | "devices" | "audio" | "windows") => void;
   isTargetFriend?: boolean;
   isTargetFriendRequestPending?: boolean;
@@ -1864,6 +1866,8 @@ export default function DirectMessageChatView({
   currentUserId,
   currentUser,
   targetUser,
+  conversationType = "dm",
+  conversationParticipants = [],
   onOpenSettings,
   isTargetFriend = false,
   isTargetFriendRequestPending = false,
@@ -1872,6 +1876,7 @@ export default function DirectMessageChatView({
   onBlockTarget,
   mutualFriends = [],
 }: DirectMessageChatViewProps) {
+  const isGroupConversation = conversationType === "group_dm";
   const [messages, setMessages] = useState<ChatMessageItem[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
@@ -2046,8 +2051,11 @@ export default function DirectMessageChatView({
     "Voce";
   const targetPresenceState: PresenceState = targetUser.presenceState ?? "invisivel";
   const targetPresenceLabel = PRESENCE_LABELS[targetPresenceState];
-  const isSidebarProfileCurrentUser = targetUser.userId === currentUserId;
+  const isSidebarProfileCurrentUser = !isGroupConversation && targetUser.userId === currentUserId;
   const targetSidebarSpotifyActivity = useMemo(() => {
+    if (isGroupConversation) {
+      return null;
+    }
     const activity = targetUser.spotifyActivity ?? null;
     if (!activity || activity.showOnProfile === false) {
       return null;
@@ -2067,7 +2075,7 @@ export default function DirectMessageChatView({
     )
       ? activity
       : null;
-  }, [targetUser.spotifyActivity]);
+  }, [isGroupConversation, targetUser.spotifyActivity]);
   const handleOpenSidebarSpotifyTrack = useCallback((): void => {
     const trackUrl = String(targetSidebarSpotifyActivity?.trackUrl ?? "").trim();
     if (!trackUrl) {
@@ -2470,6 +2478,22 @@ export default function DirectMessageChatView({
       Boolean(seedThemeAccentColor) ||
       Boolean(seedAboutText) ||
       Boolean(seedMemberSinceLabel);
+
+    if (isGroupConversation) {
+      setIsTargetProfileResolved(true);
+      setTargetBannerSrc(seedBannerSrc);
+      setTargetBannerHasCustomAsset(seedHasCustomBannerAsset);
+      setTargetBannerColor(seedBannerColor);
+      setTargetThemePrimaryColor(seedThemePrimaryColor);
+      setTargetThemeAccentColor(seedThemeAccentColor);
+      setTargetAboutText(seedAboutText);
+      setCanExpandBiography(false);
+      setTargetMemberSinceLabel(seedMemberSinceLabel);
+      return () => {
+        cancelled = true;
+      };
+    }
+
     const cached = targetId ? targetProfileCache.get(targetId) ?? null : null;
 
     if (cached) {
@@ -2639,6 +2663,7 @@ export default function DirectMessageChatView({
       cancelled = true;
     };
   }, [
+    isGroupConversation,
     isSidebarFullProfileOpen,
     targetUser.aboutText,
     targetUser.bannerColor,
@@ -2684,13 +2709,32 @@ export default function DirectMessageChatView({
     return new Set(normalizedIds);
   }, [currentUser.firebaseUid, currentUser.userId, currentUserId]);
 
-  const targetParticipantIds = useMemo(() => {
-    const normalizedIds = [
-      String(targetUser.userId ?? "").trim().toLowerCase(),
-      String(targetUser.firebaseUid ?? "").trim().toLowerCase(),
-    ].filter(Boolean);
-    return new Set(normalizedIds);
-  }, [targetUser.firebaseUid, targetUser.userId]);
+  const conversationParticipantsById = useMemo(() => {
+    const map = new Map<string, DirectMessageChatParticipant>();
+    conversationParticipants.forEach((participant) => {
+      const normalizedUserId = String(participant.userId ?? "").trim().toLowerCase();
+      if (normalizedUserId) {
+        map.set(normalizedUserId, participant);
+      }
+      const normalizedFirebaseUid = String(participant.firebaseUid ?? "").trim().toLowerCase();
+      if (normalizedFirebaseUid) {
+        map.set(normalizedFirebaseUid, participant);
+      }
+    });
+
+    if (!isGroupConversation) {
+      const normalizedTargetUserId = String(targetUser.userId ?? "").trim().toLowerCase();
+      if (normalizedTargetUserId) {
+        map.set(normalizedTargetUserId, targetUser);
+      }
+      const normalizedTargetFirebaseUid = String(targetUser.firebaseUid ?? "").trim().toLowerCase();
+      if (normalizedTargetFirebaseUid) {
+        map.set(normalizedTargetFirebaseUid, targetUser);
+      }
+    }
+
+    return map;
+  }, [conversationParticipants, isGroupConversation, targetUser]);
 
   const isCurrentUserSender = useCallback(
     (userId: string): boolean => {
@@ -2706,12 +2750,15 @@ export default function DirectMessageChatView({
       if (normalizedUserId && currentParticipantIds.has(normalizedUserId)) {
         return currentUser;
       }
-      if (normalizedUserId && targetParticipantIds.has(normalizedUserId)) {
-        return targetUser;
+      if (normalizedUserId) {
+        const participant = conversationParticipantsById.get(normalizedUserId);
+        if (participant) {
+          return participant;
+        }
       }
-      return targetUser;
+      return isGroupConversation ? currentUser : targetUser;
     },
-    [currentParticipantIds, currentUser, targetParticipantIds, targetUser],
+    [conversationParticipantsById, currentParticipantIds, currentUser, isGroupConversation, targetUser],
   );
 
   const openMessageProfileParticipant = useMemo(() => {
@@ -6720,7 +6767,7 @@ export default function DirectMessageChatView({
         </div>
         <div className="dm-chat__header-tools">
           <div className="dm-chat__header-actions" aria-label="Acoes da conversa">
-            {!voiceCallButtonActive ? (
+            {!isGroupConversation && !voiceCallButtonActive ? (
               <Tooltip text="Iniciar ou entrar na chamada de voz" position="top" delay={180}>
                 <button
                   type="button"
@@ -6737,21 +6784,23 @@ export default function DirectMessageChatView({
                 </button>
               </Tooltip>
             ) : null}
-            <Tooltip text="Chamada de video indisponivel nesta versao" position="top" delay={180}>
-              <button
-                type="button"
-                className="dm-chat__header-action-btn dm-chat__header-action-btn--icon-only"
-                aria-label="Chamada de video indisponivel"
-                disabled
-              >
-                <img
-                  className="dm-chat__header-action-icon"
-                  src={headerVideoOffIconUrl}
-                  alt=""
-                  aria-hidden="true"
-                />
-              </button>
-            </Tooltip>
+            {!isGroupConversation ? (
+              <Tooltip text="Chamada de video indisponivel nesta versao" position="top" delay={180}>
+                <button
+                  type="button"
+                  className="dm-chat__header-action-btn dm-chat__header-action-btn--icon-only"
+                  aria-label="Chamada de video indisponivel"
+                  disabled
+                >
+                  <img
+                    className="dm-chat__header-action-icon"
+                    src={headerVideoOffIconUrl}
+                    alt=""
+                    aria-hidden="true"
+                  />
+                </button>
+              </Tooltip>
+            ) : null}
           </div>
           <label
             className={`dm-chat__header-search${normalizedHeaderSearchValue && headerSearchMatchIds.length === 0 ? " dm-chat__header-search--empty" : ""}`}
@@ -6939,7 +6988,9 @@ export default function DirectMessageChatView({
               />
               <h3 className="dm-chat__intro-name">{safeTargetDisplayName}</h3>
               <p className="dm-chat__intro-copy">
-                Este e o inicio da sua conversa privada com {safeTargetDisplayName}.
+                {isGroupConversation
+                  ? `Este e o inicio do seu grupo privado com ${safeTargetDisplayName}.`
+                  : `Este e o inicio da sua conversa privada com ${safeTargetDisplayName}.`}
               </p>
             </section>
           ) : null}
@@ -6958,8 +7009,11 @@ export default function DirectMessageChatView({
             ) : null;
             const isFromCurrentUser = isCurrentUserSender(message.senderId);
             const sender = getParticipantById(message.senderId);
-            const senderAvatar = isFromCurrentUser ? currentAvatarSrc : targetAvatarSrc;
-            const senderFallbackAvatar = isFromCurrentUser ? currentFallbackAvatar : targetFallbackAvatar;
+            const senderAvatar = String(sender?.avatarSrc ?? "").trim()
+              || (isFromCurrentUser ? currentAvatarSrc : targetAvatarSrc);
+            const senderFallbackAvatar = getNameAvatarUrl(
+              String(sender?.displayName ?? sender?.username ?? "U").trim() || "U",
+            );
             const resolvedAttachmentUrl = resolveRenderedAttachmentUrl(message);
             const isEditing = editingMessageId === message.id;
             const canReply = !message.optimistic && !message.failed && !message.deletedAt;
@@ -7480,7 +7534,7 @@ export default function DirectMessageChatView({
       </form>
         </div>
 
-        {!shouldHideVoiceCallChrome ? (
+        {!shouldHideVoiceCallChrome && !isGroupConversation ? (
         <aside
           className="dm-chat__profile-sidebar"
           aria-label={`Perfil de ${safeTargetDisplayName}`}
@@ -7745,7 +7799,7 @@ export default function DirectMessageChatView({
           )
         : null}
 
-      {isSidebarFullProfileOpen && typeof document !== "undefined"
+      {!isGroupConversation && isSidebarFullProfileOpen && typeof document !== "undefined"
         ? createPortal(
             <div className="dm-chat__center-profile" onClick={closeSidebarFullProfile}>
               <div

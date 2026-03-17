@@ -1,15 +1,12 @@
 import { HttpError } from "./http.ts";
 import { getSupabaseAdminClient } from "./supabaseAdmin.ts";
 
-interface ConversationRow {
-  id?: string | null;
-  user1_id?: string | null;
-  user2_id?: string | null;
+interface ConversationMemberRow {
+  user_id?: string | null;
 }
 
 interface ConversationParticipants {
-  user1Id: string;
-  user2Id: string;
+  userIds: string[];
 }
 
 interface CachedValue<T> {
@@ -36,19 +33,26 @@ function setCachedValue<T>(map: Map<string, CachedValue<T>>, key: string, value:
   map.set(key, { value, expiresAtMs: Date.now() + ttlMs });
 }
 
-function normalizeConversationParticipants(row: ConversationRow | null): ConversationParticipants | null {
-  const user1Id = String(row?.user1_id ?? "").trim();
-  const user2Id = String(row?.user2_id ?? "").trim();
-  if (!user1Id || !user2Id || user1Id === user2Id) {
+function normalizeConversationParticipants(rows: ConversationMemberRow[] | null | undefined): ConversationParticipants | null {
+  const userIds = Array.from(
+    new Set(
+      (Array.isArray(rows) ? rows : [])
+        .map((row) => String(row?.user_id ?? "").trim())
+        .filter((userId) => Boolean(userId)),
+    ),
+  );
+
+  if (userIds.length === 0) {
     return null;
   }
-  return { user1Id, user2Id };
+
+  return { userIds };
 }
 
 export async function resolveUserId(authUid: string | null | undefined): Promise<string> {
   const userId = String(authUid ?? "").trim();
   if (!userId) {
-    throw new HttpError(401, "UNAUTHENTICATED", "Sessão não identificada.");
+    throw new HttpError(401, "UNAUTHENTICATED", "SessÃ£o nÃ£o identificada.");
   }
   return userId;
 }
@@ -66,20 +70,17 @@ async function loadConversationParticipantsForMember(
 
   const supabase = getSupabaseAdminClient();
   const { data, error } = await supabase
-    .from("conversations")
-    .select("id,user1_id,user2_id")
-    .eq("id", conversationId)
-    .or(`user1_id.eq.${userId},user2_id.eq.${userId}`)
-    .limit(1)
-    .maybeSingle();
+    .from("conversation_members")
+    .select("user_id")
+    .eq("conversation_id", conversationId);
 
   if (error) {
-    throw new HttpError(500, "CONVERSATION_AUTH_FAILED", "Falha ao validar permissão da conversa.");
+    throw new HttpError(500, "CONVERSATION_AUTH_FAILED", "Falha ao validar permissÃ£o da conversa.");
   }
 
-  const participants = normalizeConversationParticipants(data as ConversationRow | null);
-  if (!participants) {
-    throw new HttpError(403, "FORBIDDEN", "Usuário sem permissão para esta conversa.");
+  const participants = normalizeConversationParticipants(data as ConversationMemberRow[] | null | undefined);
+  if (!participants || !participants.userIds.includes(userId)) {
+    throw new HttpError(403, "FORBIDDEN", "UsuÃ¡rio sem permissÃ£o para esta conversa.");
   }
 
   setCachedValue(conversationMembershipCache, membershipCacheKey, true, MEMBERSHIP_CACHE_TTL_MS);
@@ -135,8 +136,13 @@ async function areUserIdsBlocked(user1Id: string, user2Id: string): Promise<bool
 export async function assertConversationCanSendMessages(conversationId: string, userId: string): Promise<void> {
   const participants = await loadConversationParticipantsForMember(conversationId, userId);
 
-  if (await areUserIdsBlocked(participants.user1Id, participants.user2Id)) {
-    throw new HttpError(403, "CONVERSATION_BLOCKED", "Não é possível enviar mensagem para este usuário.");
+  if (participants.userIds.length !== 2) {
+    return;
+  }
+
+  const [user1Id, user2Id] = participants.userIds;
+  if (await areUserIdsBlocked(user1Id, user2Id)) {
+    throw new HttpError(403, "CONVERSATION_BLOCKED", "NÃ£o Ã© possÃ­vel enviar mensagem para este usuÃ¡rio.");
   }
 }
 
@@ -144,5 +150,3 @@ export async function assertConversationCanSendMessages(conversationId: string, 
 export async function upsertUserIdentity(): Promise<void> {
   return;
 }
-
-

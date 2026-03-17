@@ -7,14 +7,22 @@ const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-
 
 export interface ConversationRealtimeRow {
   id: string;
-  user1_id: string;
-  user2_id: string;
+  type: "dm" | "group_dm";
+  created_by: string | null;
+  name: string | null;
+  avatar_url: string | null;
+  user1_id: string | null;
+  user2_id: string | null;
   created_at: string | null;
   last_activity_at: string | null;
 }
 
 interface ConversationRecord {
   id?: string | null;
+  type?: string | null;
+  created_by?: string | null;
+  name?: string | null;
+  avatar_url?: string | null;
   user1_id?: string | null;
   user2_id?: string | null;
   created_at?: string | null;
@@ -50,24 +58,29 @@ function normalizeConversation(
   lastActivityAtOverride?: string | null,
 ): ConversationRealtimeRow | null {
   const id = String(record?.id ?? "").trim();
-  const user1Id = String(record?.user1_id ?? "").trim();
-  const user2Id = String(record?.user2_id ?? "").trim();
-  if (!id || !user1Id || !user2Id) {
+  if (!id) {
+    return null;
+  }
+
+  const normalizedType = String(record?.type ?? "").trim().toLowerCase() === "group_dm" ? "group_dm" : "dm";
+  const user1Id = String(record?.user1_id ?? "").trim() || null;
+  const user2Id = String(record?.user2_id ?? "").trim() || null;
+  if (normalizedType === "dm" && (!user1Id || !user2Id)) {
     return null;
   }
 
   return {
     id,
+    type: normalizedType,
+    created_by: String(record?.created_by ?? "").trim() || null,
+    name: String(record?.name ?? "").trim() || null,
+    avatar_url: String(record?.avatar_url ?? "").trim() || null,
     user1_id: user1Id,
     user2_id: user2Id,
     created_at: record?.created_at ? String(record.created_at) : null,
     last_activity_at:
       String(lastActivityAtOverride ?? record?.created_at ?? "").trim() || null,
   };
-}
-
-function isRelevantConversation(row: ConversationRealtimeRow, currentUserId: string): boolean {
-  return row.user1_id === currentUserId || row.user2_id === currentUserId;
 }
 
 function removeConversationById(current: ConversationRealtimeRow[], id: string): ConversationRealtimeRow[] {
@@ -146,11 +159,10 @@ function normalizeMessageInsertEvent(record: MessageRecord | null | undefined): 
   };
 }
 
-async function fetchConversations(currentUserId: string): Promise<ConversationRealtimeRow[]> {
+async function fetchConversations(_currentUserId: string): Promise<ConversationRealtimeRow[]> {
   const { data, error } = await supabase
     .from("conversations")
-    .select("id,user1_id,user2_id,created_at")
-    .or(`user1_id.eq.${currentUserId},user2_id.eq.${currentUserId}`)
+    .select("id,type,created_by,name,avatar_url,user1_id,user2_id,created_at")
     .order("created_at", { ascending: false });
 
   if (error) {
@@ -240,12 +252,7 @@ export function useConversationsRealtime(
 
       queryClient.setQueryData<ConversationRealtimeRow[]>(queryKey, (current) => {
         const safeCurrent = Array.isArray(current) ? current : [];
-        const relevantConversation = nextConversation ?? oldConversation;
-        const isRelevant = Boolean(
-          relevantConversation && isRelevantConversation(relevantConversation, normalizedUserId),
-        );
-
-        if (payload.eventType === "DELETE" || !isRelevant || !nextConversation) {
+        if (payload.eventType === "DELETE" || !nextConversation) {
           return removeConversationById(safeCurrent, conversationId);
         }
 
@@ -301,8 +308,6 @@ export function useConversationsRealtime(
 
       channel = supabase
         .channel(`realtime:conversations:${normalizedUserId}`)
-        // NOTE: Postgres Changes does not support OR filters for user1_id/user2_id reliably.
-        // We subscribe to table events and filter on client by currentUserId.
         .on(
           "postgres_changes",
           { event: "*", schema: "public", table: "conversations" },

@@ -1,0 +1,223 @@
+.create-group-dm-modal {
+  width: min(560px, calc(100vw - 28px)) !important;
+}
+
+.create-group-dm-modal__body,
+.create-group-dm-modal__content {
+  display: grid;
+  gap: 14px;
+}
+
+.create-group-dm-modal__selected {
+  display: grid;
+  gap: 10px;
+}
+
+.create-group-dm-modal__selected-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.create-group-dm-modal__selected-label,
+.create-group-dm-modal__selected-count {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: rgba(232, 238, 246, 0.82);
+}
+
+.create-group-dm-modal__chips {
+  min-height: 42px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.create-group-dm-modal__chips-empty {
+  color: rgba(218, 224, 233, 0.52);
+  font-size: 13px;
+}
+
+.create-group-dm-modal__chip {
+  border: 0;
+  border-radius: 999px;
+  background: rgba(53, 190, 129, 0.18);
+  color: #dff9ea;
+  padding: 6px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.create-group-dm-modal__chip:hover,
+.create-group-dm-modal__chip:focus-visible {
+  background: rgba(53, 190, 129, 0.28);
+  outline: none;
+}
+
+.create-group-dm-modal__search-wrap {
+  display: block;
+}
+
+.create-group-dm-modal__search {
+  width: 100%;
+  height: 42px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-primary);
+  padding: 0 14px;
+  font-size: 14px;
+}
+
+.create-group-dm-modal__search:focus {
+  outline: none;
+  border-color: rgba(53, 190, 129, 0.48);
+  box-shadow: 0 0 0 1px rgba(53, 190, 129, 0.24);
+}
+
+.create-group-dm-modal__list {
+  max-height: 340px;
+  overflow-y: auto;
+  display: grid;
+  gap: 6px;
+  padding-right: 4px;
+}
+
+.create-group-dm-modal__user {
+  width: 100%;
+  border: 0;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-primary);
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.create-group-dm-modal__user:hover,
+.create-group-dm-modal__user:focus-visible {
+  background: rgba(255, 255, 255, 0.08);
+  outline: none;
+}
+
+.create-group-dm-modal__user--selected {
+  background: rgba(53, 190, 129, 0.14);
+  box-shadow: inset 0 0 0 1px rgba(53, 190, 129, 0.3);
+}
+
+.create-group-dm-modal__user:disabled {
+  opacity: 0.52;
+  cursor: not-allowed;
+}
+
+.create-group-dm-modal__user-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
+.create-group-dm-modal__user-meta {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  gap: 2px;
+}
+
+.create-group-dm-modal__user-name,
+.create-group-dm-modal__user-username {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.create-group-dm-modal__user-name {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.create-group-dm-modal__user-username {
+  font-size: 12px;
+  color: rgba(220, 226, 235, 0.72);
+}
+
+.create-group-dm-modal__user-check {
+  font-size: 12px;
+  font-weight: 600;
+  color: #7de6a9;
+  flex-shrink: 0;
+}
+
+.create-group-dm-modal__empty,
+.create-group-dm-modal__feedback,
+.create-group-dm-modal__limit-note {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.create-group-dm-modal__empty {
+  color: rgba(220, 226, 235, 0.62);
+}
+
+.create-group-dm-modal__feedback--error,
+.create-group-dm-modal__limit-note {
+  color: #f38b8b;
+}
+
+.create-group-dm-modal__footer {
+  width: 100%;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.create-group-dm-modal__button {
+  min-width: 128px;
+  height: 38px;
+  border-radius: 10px;
+  border: 0;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.create-group-dm-modal__button--secondary {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(244, 246, 248, 0.92);
+}
+
+.create-group-dm-modal__button--secondary:hover,
+.create-group-dm-modal__button--secondary:focus-visible {
+  background: rgba(255, 255, 255, 0.12);
+  outline: none;
+}
+
+.create-group-dm-modal__button--primary {
+  background: #35be81;
+  color: #08110d;
+}
+
+.create-group-dm-modal__button--primary:hover,
+.create-group-dm-modal__button--primary:focus-visible {
+  background: #49cf92;
+  outline: none;
+}
+
+.create-group-dm-modal__button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

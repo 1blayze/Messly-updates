@@ -28,6 +28,8 @@ import {
   type VoiceAccountCallStateUpdate,
 } from "../voice/client/accountState";
 import { getAvatarUrl, getBannerUrl, getNameAvatarUrl, isDefaultAvatarUrl, isDefaultBannerUrl } from "../services/cdn/mediaUrls";
+import { getConversationDetails } from "../api/conversationsApi";
+import { getGroupDmAvatarUrl, resolveGroupDmDisplayName } from "../services/chat/groupDm";
 import { normalizeBannerColor } from "../services/profile/bannerColor";
 import { supabase } from "../lib/supabaseClient";
 import { ensureProfileForUser } from "../services/profile/profileService";
@@ -806,10 +808,13 @@ function areSidebarSelectionsEqual(
     if (
       currentItem.conversationId !== nextItem.conversationId ||
       currentItem.userId !== nextItem.userId ||
+      currentItem.conversationType !== nextItem.conversationType ||
       currentItem.username !== nextItem.username ||
       currentItem.displayName !== nextItem.displayName ||
       currentItem.avatarSrc !== nextItem.avatarSrc ||
       currentItem.presenceState !== nextItem.presenceState ||
+      (currentItem.participantIds ?? []).join("|") !== (nextItem.participantIds ?? []).join("|") ||
+      JSON.stringify(currentItem.participants ?? []) !== JSON.stringify(nextItem.participants ?? []) ||
       !areSpotifyActivitiesEqual(currentItem.spotifyActivity ?? null, nextItem.spotifyActivity ?? null) ||
       (currentItem.firebaseUid ?? "") !== (nextItem.firebaseUid ?? "") ||
       (currentItem.aboutText ?? "") !== (nextItem.aboutText ?? "") ||
@@ -2078,79 +2083,122 @@ export default function AppShell() {
         return cached;
       }
 
-      const { data: conversation, error: conversationError } = await supabase
-        .from("conversations")
-        .select("id,user1_id,user2_id")
-        .eq("id", normalizedConversationId)
-        .limit(1)
-        .maybeSingle();
-
-      if (conversationError || !conversation) {
+      const conversation = await getConversationDetails(normalizedConversationId);
+      if (!conversation) {
         return null;
       }
 
-      const typedConversation = conversation as ConversationIdentityRow;
-      if (typedConversation.user1_id !== currentUserId && typedConversation.user2_id !== currentUserId) {
+      const otherParticipants = conversation.participants.filter((participant) => participant.id !== currentUserId);
+      if (conversation.type === "group_dm") {
+        const participants: NonNullable<SidebarDirectMessageSelection["participants"]> = otherParticipants.map((participant) => {
+          const username = String(participant.username ?? "").trim() || "usuario";
+          const displayName = normalizeProfileDisplayName(participant.displayName, username, username);
+          const fallbackAvatar = getNameAvatarUrl(displayName || username || "U");
+          return {
+            userId: participant.id,
+            username,
+            displayName,
+            avatarSrc: String(participant.avatarUrl ?? "").trim() || fallbackAvatar,
+            presenceState: presenceStore.getPresenceState(participant.id),
+            firebaseUid: participant.firebaseUid ?? undefined,
+            aboutText: participant.aboutText ?? undefined,
+            bannerColor: participant.bannerColor ?? null,
+            themePrimaryColor: normalizeBannerColor(participant.themePrimaryColor) ?? null,
+            themeAccentColor: normalizeBannerColor(participant.themeAccentColor) ?? null,
+            bannerKey: participant.bannerKey ?? null,
+            bannerHash: participant.bannerHash ?? null,
+            memberSinceAt: participant.createdAt ?? null,
+            spotifyActivity: presenceStore.getPresenceSnapshot(participant.id).spotifyActivity ?? null,
+          };
+        });
+        const participantIds = participants.map((participant) => participant.userId);
+        const presenceStates = participants.map((participant) => participant.presenceState ?? "invisivel");
+        const presenceState = presenceStates.includes("online")
+          ? "online"
+          : presenceStates.includes("idle")
+            ? "idle"
+            : presenceStates.includes("dnd")
+              ? "dnd"
+              : "invisivel";
+        const bestSpotifyActivity = participants.reduce<PresenceSpotifyActivity | null>((best, participant) => {
+          const activity = participant.spotifyActivity ?? null;
+          if (!activity) {
+            return best;
+          }
+          if (!best || activity.updatedAt > best.updatedAt) {
+            return activity;
+          }
+          return best;
+        }, null);
+
+        return {
+          conversationId: conversation.id,
+          userId: `group:${conversation.id}`,
+          conversationType: "group_dm",
+          username: "grupo",
+          displayName: resolveGroupDmDisplayName(
+            conversation.name,
+            participants.map((participant) => participant.displayName),
+          ),
+          avatarSrc: String(conversation.avatarUrl ?? "").trim() || getGroupDmAvatarUrl(),
+          presenceState,
+          participantIds,
+          participants,
+          spotifyActivity: bestSpotifyActivity,
+        };
+      }
+
+      const targetParticipant = otherParticipants[0] ?? null;
+      if (!targetParticipant) {
         return null;
       }
 
-      const targetUserId =
-        typedConversation.user1_id === currentUserId ? typedConversation.user2_id : typedConversation.user1_id;
-      if (!targetUserId) {
-        return null;
-      }
-
-      const { data: userRowRaw, error: userError } = await supabase
-        .from("profiles")
-        .select(PROFILE_SAFE_COLUMNS)
-        .eq("id", targetUserId)
-        .limit(1)
-        .maybeSingle();
-      const userRow = userRowRaw as ProfileAny | null;
-
-      if (userError || !userRow) {
-        return null;
-      }
-
-      const username = String(userRow.username ?? "").trim() || "username";
-      const displayName = normalizeProfileDisplayName(userRow.display_name, username, username);
+      const targetUserId = targetParticipant.id;
+      const username = String(targetParticipant.username ?? "").trim() || "username";
+      const displayName = normalizeProfileDisplayName(targetParticipant.displayName, username, username);
       const fallbackAvatar = getFriendDisplayAvatar(displayName, username, targetUserId);
 
-      let avatarSrc = fallbackAvatar;
-      try {
-        const primaryAvatar = await getAvatarUrl(targetUserId, userRow.avatar_key ?? null, userRow.avatar_hash ?? null);
-        avatarSrc = primaryAvatar;
-        if (isDefaultAvatarUrl(primaryAvatar)) {
-          const legacyAvatarUrl = String(userRow.avatar_url ?? "").trim();
-          if (legacyAvatarUrl) {
-            const resolvedLegacyAvatar = await getAvatarUrl(targetUserId, legacyAvatarUrl, userRow.avatar_hash ?? null);
-            avatarSrc = isDefaultAvatarUrl(resolvedLegacyAvatar) ? fallbackAvatar : resolvedLegacyAvatar;
-          } else {
-            avatarSrc = fallbackAvatar;
-          }
-        }
-      } catch {
+      let avatarSrc = String(targetParticipant.avatarUrl ?? "").trim() || fallbackAvatar;
+      if (isDefaultAvatarUrl(avatarSrc)) {
         avatarSrc = fallbackAvatar;
       }
 
       const presenceSnapshot = presenceStore.getPresenceSnapshot(targetUserId);
 
       return {
-        conversationId: typedConversation.id,
+        conversationId: conversation.id,
         userId: targetUserId,
+        conversationType: "dm",
         username,
         displayName,
         avatarSrc,
         presenceState: presenceSnapshot.presenceState,
+        participantIds: [targetUserId],
+        participants: [{
+          userId: targetUserId,
+          username,
+          displayName,
+          avatarSrc,
+          presenceState: presenceSnapshot.presenceState,
+          firebaseUid: targetParticipant.firebaseUid ?? undefined,
+          aboutText: targetParticipant.aboutText ?? undefined,
+          bannerColor: targetParticipant.bannerColor ?? null,
+          themePrimaryColor: normalizeBannerColor(targetParticipant.themePrimaryColor) ?? null,
+          themeAccentColor: normalizeBannerColor(targetParticipant.themeAccentColor) ?? null,
+          bannerKey: targetParticipant.bannerKey ?? null,
+          bannerHash: targetParticipant.bannerHash ?? null,
+          memberSinceAt: targetParticipant.createdAt ?? null,
+          spotifyActivity: presenceSnapshot.spotifyActivity ?? null,
+        }],
         spotifyActivity: presenceSnapshot.spotifyActivity ?? null,
-        firebaseUid: String(userRow.firebase_uid ?? "").trim() || undefined,
-        aboutText: String(userRow.about ?? "").trim(),
-        bannerColor: userRow.banner_color ?? null,
-        themePrimaryColor: normalizeBannerColor(userRow.profile_theme_primary_color) ?? null,
-        themeAccentColor: normalizeBannerColor(userRow.profile_theme_accent_color) ?? null,
-        bannerKey: userRow.banner_key ?? null,
-        bannerHash: userRow.banner_hash ?? null,
-        memberSinceAt: userRow.created_at ?? null,
+        firebaseUid: targetParticipant.firebaseUid ?? undefined,
+        aboutText: targetParticipant.aboutText ?? undefined,
+        bannerColor: targetParticipant.bannerColor ?? null,
+        themePrimaryColor: normalizeBannerColor(targetParticipant.themePrimaryColor) ?? null,
+        themeAccentColor: normalizeBannerColor(targetParticipant.themeAccentColor) ?? null,
+        bannerKey: targetParticipant.bannerKey ?? null,
+        bannerHash: targetParticipant.bannerHash ?? null,
+        memberSinceAt: targetParticipant.createdAt ?? null,
       };
     },
     [currentUserId, sidebarDirectMessagesByConversationId],
@@ -2690,6 +2738,9 @@ export default function AppShell() {
   }, [openPendingProfile?.userId]);
 
   useEffect(() => {
+    if (activeDirectMessage?.conversationType === "group_dm") {
+      return;
+    }
     const targetUserId = String(activeDirectMessage?.userId ?? "").trim();
     if (!targetUserId) {
       return;
@@ -2727,7 +2778,7 @@ export default function AppShell() {
       unsubscribe();
       stopWatching();
     };
-  }, [activeDirectMessage?.userId]);
+  }, [activeDirectMessage?.conversationType, activeDirectMessage?.userId]);
 
   useEffect(() => {
     setActiveFriendMenuUserId((current) => {
@@ -2930,10 +2981,24 @@ export default function AppShell() {
       setActiveDirectMessage({
         conversationId,
         userId: openPendingProfile.userId,
+        conversationType: "dm",
         username: openPendingProfile.username,
         displayName: openPendingProfile.displayName,
         avatarSrc: openPendingProfile.avatarSrc,
         presenceState: openPendingProfile.presenceState,
+        participantIds: [openPendingProfile.userId],
+        participants: [{
+          userId: openPendingProfile.userId,
+          username: openPendingProfile.username,
+          displayName: openPendingProfile.displayName,
+          avatarSrc: openPendingProfile.avatarSrc,
+          presenceState: openPendingProfile.presenceState,
+          aboutText: openPendingProfile.aboutText,
+          bannerColor: openPendingProfile.bannerColor,
+          themePrimaryColor: openPendingProfile.themePrimaryColor,
+          themeAccentColor: openPendingProfile.themeAccentColor,
+          bannerSrc: openPendingProfile.bannerSrc,
+        }],
         aboutText: openPendingProfile.aboutText,
         bannerColor: openPendingProfile.bannerColor,
         themePrimaryColor: openPendingProfile.themePrimaryColor,
@@ -2955,10 +3020,21 @@ export default function AppShell() {
       setActiveDirectMessage({
         conversationId,
         userId: friend.userId,
+        conversationType: "dm",
         username: friend.username,
         displayName: friend.displayName,
         avatarSrc: friend.avatarSrc,
         presenceState: friend.presenceState,
+        participantIds: [friend.userId],
+        participants: [{
+          userId: friend.userId,
+          username: friend.username,
+          displayName: friend.displayName,
+          avatarSrc: friend.avatarSrc,
+          presenceState: friend.presenceState,
+          spotifyActivity: friend.spotifyActivity ?? null,
+          firebaseUid: friend.firebaseUid,
+        }],
         spotifyActivity: friend.spotifyActivity ?? null,
         firebaseUid: friend.firebaseUid,
       });
@@ -3263,19 +3339,20 @@ export default function AppShell() {
   const shouldKeepDirectMessageMountedForVoiceCall =
     !activeDirectMessage && (voiceCallUiSnapshot.callActive || voiceCallUiSnapshot.callConnecting);
   const chatViewDirectMessage = activeDirectMessage ?? (shouldKeepDirectMessageMountedForVoiceCall ? resolvedPinnedDirectMessageDuringCall : null);
+  const isChatViewGroupConversation = chatViewDirectMessage?.conversationType === "group_dm";
   const activeDirectMessageFriend = useMemo(() => {
-    if (!chatViewDirectMessage) {
+    if (!chatViewDirectMessage || isChatViewGroupConversation) {
       return null;
     }
 
     return friends.find((friend) => friend.userId === chatViewDirectMessage.userId) ?? null;
-  }, [chatViewDirectMessage, friends]);
+  }, [chatViewDirectMessage, friends, isChatViewGroupConversation]);
 
   useEffect(() => {
     const normalizedCurrentUserId = String(currentUserId ?? "").trim();
     const normalizedTargetUserId = String(chatViewDirectMessage?.userId ?? "").trim();
 
-    if (!normalizedCurrentUserId || !normalizedTargetUserId || normalizedTargetUserId === normalizedCurrentUserId) {
+    if (isChatViewGroupConversation || !normalizedCurrentUserId || !normalizedTargetUserId || normalizedTargetUserId === normalizedCurrentUserId) {
       activeDirectMessageMutualTargetUserIdRef.current = "";
       setActiveDirectMessageMutualFriendIds((current) => (current.length === 0 ? current : []));
       return;
@@ -3314,10 +3391,10 @@ export default function AppShell() {
     return () => {
       isDisposed = true;
     };
-  }, [chatViewDirectMessage?.userId, currentUserId, friendPresenceUserIdsKey]);
+  }, [chatViewDirectMessage?.userId, currentUserId, friendPresenceUserIdsKey, isChatViewGroupConversation]);
 
   const activeDirectMessageMutualFriends = useMemo(() => {
-    if (!chatViewDirectMessage || activeDirectMessageMutualFriendIds.length === 0) {
+    if (!chatViewDirectMessage || isChatViewGroupConversation || activeDirectMessageMutualFriendIds.length === 0) {
       return [];
     }
 
@@ -3331,16 +3408,16 @@ export default function AppShell() {
         username: friend.username,
         avatarSrc: friend.avatarSrc,
       }));
-  }, [activeDirectMessageMutualFriendIds, allFriends, chatViewDirectMessage]);
+  }, [activeDirectMessageMutualFriendIds, allFriends, chatViewDirectMessage, isChatViewGroupConversation]);
   const isActiveDirectMessagePendingOutgoingRequest = useMemo(() => {
-    if (!chatViewDirectMessage || !isFriendRequestsAvailable) {
+    if (!chatViewDirectMessage || isChatViewGroupConversation || !isFriendRequestsAvailable) {
       return false;
     }
 
     return pendingCards.some(
       (card) => card.targetUserId === chatViewDirectMessage.userId && card.direction === "outgoing",
     );
-  }, [chatViewDirectMessage, isFriendRequestsAvailable, pendingCards]);
+  }, [chatViewDirectMessage, isChatViewGroupConversation, isFriendRequestsAvailable, pendingCards]);
   const chatCurrentUser = useMemo<DirectMessageChatParticipant | null>(() => {
     if (!currentUserId) {
       return null;
@@ -3410,10 +3487,19 @@ export default function AppShell() {
         targetSelection = {
           conversationId,
           userId: normalizedPeerUserId,
+          conversationType: "dm",
           username: normalizedPeerUserId,
           displayName: fallbackDisplayName,
           avatarSrc: fallbackAvatar,
           presenceState: "online",
+          participantIds: [normalizedPeerUserId],
+          participants: [{
+            userId: normalizedPeerUserId,
+            username: normalizedPeerUserId,
+            displayName: fallbackDisplayName,
+            avatarSrc: fallbackAvatar,
+            presenceState: "online",
+          }],
         };
       } catch (error) {
         setFriendsError(resolveOpenConversationErrorMessage(error));
@@ -3671,6 +3757,8 @@ export default function AppShell() {
                     conversationId={chatViewDirectMessage.conversationId}
                     currentUserId={chatCurrentUser.userId}
                     currentUser={chatCurrentUser}
+                    conversationType={chatViewDirectMessage.conversationType ?? "dm"}
+                    conversationParticipants={chatViewDirectMessage.participants ?? []}
                     targetUser={{
                       userId: chatViewDirectMessage.userId,
                       username: chatViewDirectMessage.username,
@@ -3690,22 +3778,30 @@ export default function AppShell() {
                       memberSinceAt: chatViewDirectMessage.memberSinceAt ?? null,
                     }}
                     onOpenSettings={handleOpenSettings}
-                    isTargetFriend={Boolean(activeDirectMessageFriend)}
+                    isTargetFriend={!isChatViewGroupConversation && Boolean(activeDirectMessageFriend)}
                     onUnfriendTarget={
-                      activeDirectMessageFriend
+                      !isChatViewGroupConversation && activeDirectMessageFriend
                         ? async () => {
                             await handleUnfriend(activeDirectMessageFriend);
                           }
                         : undefined
                     }
-                    onAddFriendTarget={async () => {
-                      await handleAddFriendTargetUser(chatViewDirectMessage.userId);
-                    }}
-                    isTargetFriendRequestPending={isActiveDirectMessagePendingOutgoingRequest}
-                    mutualFriends={activeDirectMessageMutualFriends}
-                    onBlockTarget={async () => {
-                      await handleBlockTargetUser(chatViewDirectMessage.userId);
-                    }}
+                    onAddFriendTarget={
+                      !isChatViewGroupConversation
+                        ? async () => {
+                            await handleAddFriendTargetUser(chatViewDirectMessage.userId);
+                          }
+                        : undefined
+                    }
+                    isTargetFriendRequestPending={!isChatViewGroupConversation && isActiveDirectMessagePendingOutgoingRequest}
+                    mutualFriends={!isChatViewGroupConversation ? activeDirectMessageMutualFriends : []}
+                    onBlockTarget={
+                      !isChatViewGroupConversation
+                        ? async () => {
+                            await handleBlockTargetUser(chatViewDirectMessage.userId);
+                          }
+                        : undefined
+                    }
                   />
                 </Suspense>
               </div>

@@ -59,6 +59,9 @@ function normalizeConversationType(
   conversationTypeRaw: unknown,
 ): "dm" | "group" | "channel" | "guild" | "unknown" {
   const value = String(conversationTypeRaw ?? "").trim().toLowerCase();
+  if (value === "group_dm") {
+    return "group";
+  }
   if (value === "dm" || value === "group" || value === "channel" || value === "guild") {
     return value;
   }

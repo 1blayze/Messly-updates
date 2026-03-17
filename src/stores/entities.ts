@@ -8,7 +8,7 @@ import type {
 import type { ProfileRow } from "../services/profile/profileService";
 
 export type GatewayPresenceStatus = "online" | "idle" | "dnd" | "offline" | "invisible";
-export type ConversationScopeType = "dm" | "guild" | "channel";
+export type ConversationScopeType = "dm" | "group_dm" | "guild" | "channel";
 export type MessageDeliveryState = "pending" | "sent" | "failed";
 
 export interface SpotifyActivityEntity {
@@ -50,6 +50,9 @@ export interface ConversationEntity {
   scopeType: ConversationScopeType;
   scopeId: string;
   participantIds: string[];
+  name?: string | null;
+  avatarUrl?: string | null;
+  createdBy?: string | null;
   lastMessageId: string | null;
   lastMessageAt: string | null;
   unreadCount: number;

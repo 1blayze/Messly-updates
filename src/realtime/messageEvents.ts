@@ -33,14 +33,14 @@ function resolveNotificationConversationType(
   if (scopeType === "dm") {
     return "dm";
   }
+  if (scopeType === "group_dm" || scopeType === "group") {
+    return "group";
+  }
   if (scopeType === "channel") {
     return "channel";
   }
   if (scopeType === "guild") {
     return "guild";
-  }
-  if (scopeType === "group") {
-    return "group";
   }
   return "unknown";
 }

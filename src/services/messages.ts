@@ -1,4 +1,8 @@
-import { ensureDirectConversation, listDirectConversations } from "../api/conversationsApi";
+import {
+  createGroupConversation as createGroupConversationApi,
+  ensureDirectConversation,
+  listUserConversations,
+} from "../api/conversationsApi";
 import { deleteMedia } from "../api/mediaController";
 import {
   deleteConversationMessage,
@@ -17,7 +21,7 @@ import type { SendableChatMessageType } from "./chat/chatApi";
 
 class MessagesService {
   async hydrateConversations(currentUserId: string): Promise<void> {
-    const conversations = await listDirectConversations(currentUserId);
+    const conversations = await listUserConversations(currentUserId);
     messlyStore.dispatch(conversationsActions.conversationsHydrated(conversations));
     await writeCachedConversations(Object.fromEntries(conversations.map((conversation) => [conversation.id, conversation])));
   }
@@ -51,6 +55,28 @@ class MessagesService {
   async ensureDirectConversation(currentUserId: string, otherUserId: string): Promise<string> {
     const conversation = await ensureDirectConversation(currentUserId, otherUserId);
     messlyStore.dispatch(conversationsActions.conversationUpserted(conversation));
+    gatewayService.subscribeConversation(conversation.id);
+    return conversation.id;
+  }
+
+  async createGroupConversation(currentUserId: string, participantIds: string[], name?: string | null): Promise<string> {
+    const conversation = await createGroupConversationApi(currentUserId, participantIds, name);
+    messlyStore.dispatch(
+      conversationsActions.conversationUpserted({
+        id: conversation.id,
+        scopeType: conversation.type,
+        scopeId: conversation.id,
+        participantIds: conversation.participantIds,
+        name: conversation.name,
+        avatarUrl: conversation.avatarUrl,
+        createdBy: conversation.createdBy,
+        lastMessageId: null,
+        lastMessageAt: conversation.createdAt,
+        unreadCount: 0,
+        typingUserIds: [],
+        updatedAt: conversation.createdAt,
+      }),
+    );
     gatewayService.subscribeConversation(conversation.id);
     return conversation.id;
   }

@@ -120,8 +120,36 @@
   margin-bottom: 10px;
 }
 
+.friends-sidebar__section-label--with-action {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
 .friends-sidebar__section-label--large {
   font-size: 15px;
+}
+
+.friends-sidebar__section-action-btn {
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: rgba(232, 238, 246, 0.82);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.friends-sidebar__section-action-btn:hover,
+.friends-sidebar__section-action-btn:focus-visible {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(248, 250, 252, 0.96);
+  outline: none;
 }
 
 .friends-sidebar__item {
