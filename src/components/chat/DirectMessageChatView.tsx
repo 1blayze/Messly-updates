@@ -2735,6 +2735,66 @@ export default function DirectMessageChatView({
 
     return map;
   }, [conversationParticipants, isGroupConversation, targetUser]);
+  const groupSidebarMembers = useMemo(() => {
+    if (!isGroupConversation) {
+      return [];
+    }
+
+    const orderedParticipants: DirectMessageChatParticipant[] = [];
+    const seenParticipantIds = new Set<string>();
+    const pushParticipant = (participant: DirectMessageChatParticipant | null | undefined): void => {
+      if (!participant) {
+        return;
+      }
+
+      const normalizedUserId = String(participant.userId ?? "").trim().toLowerCase();
+      const normalizedFirebaseUid = String(participant.firebaseUid ?? "").trim().toLowerCase();
+      const participantLookupIds = [normalizedUserId, normalizedFirebaseUid].filter(Boolean);
+      if (participantLookupIds.length === 0 || participantLookupIds.some((value) => seenParticipantIds.has(value))) {
+        return;
+      }
+
+      participantLookupIds.forEach((value) => {
+        seenParticipantIds.add(value);
+      });
+      orderedParticipants.push(participant);
+    };
+
+    pushParticipant(currentUser);
+    conversationParticipants.forEach((participant) => {
+      pushParticipant(participant);
+    });
+
+    return orderedParticipants.map((participant) => {
+      const displayName = String(participant.displayName ?? "").trim()
+        || String(participant.username ?? "").trim()
+        || "Usuario";
+      const username = String(participant.username ?? "").trim() || "usuario";
+      const fallbackAvatar = getNameAvatarUrl(displayName || username || "U");
+      const avatarSrc = String(participant.avatarSrc ?? "").trim() || fallbackAvatar;
+      const presenceState: PresenceState = participant.presenceState ?? "invisivel";
+      const presenceLabel = PRESENCE_LABELS[presenceState];
+      const normalizedUserId = String(participant.userId ?? "").trim();
+      const normalizedFirebaseUid = String(participant.firebaseUid ?? "").trim();
+      const lookupId = normalizedUserId || normalizedFirebaseUid;
+      const isCurrentMember =
+        (normalizedUserId && currentParticipantIds.has(normalizedUserId.toLowerCase()))
+        || (normalizedFirebaseUid && currentParticipantIds.has(normalizedFirebaseUid.toLowerCase()));
+
+      return {
+        lookupId,
+        key: lookupId || `${displayName}:${username}`,
+        displayName,
+        username,
+        avatarSrc,
+        fallbackAvatar,
+        presenceState,
+        presenceLabel,
+        isCurrentMember,
+      };
+    });
+  }, [conversationParticipants, currentParticipantIds, currentUser, isGroupConversation]);
+  const groupSidebarMemberCount = groupSidebarMembers.length;
 
   const isCurrentUserSender = useCallback(
     (userId: string): boolean => {
@@ -7539,6 +7599,67 @@ export default function DirectMessageChatView({
         </div>
       </form>
         </div>
+
+        {!shouldHideVoiceCallChrome && isGroupConversation ? (
+        <aside
+          className="dm-chat__profile-sidebar dm-chat__group-sidebar"
+          aria-label={`Membros do grupo: ${groupSidebarMemberCount}`}
+        >
+          <section className="dm-chat__group-sidebar-panel">
+            <header className="dm-chat__group-sidebar-header">
+              <p className="dm-chat__group-sidebar-title">Membros - {groupSidebarMemberCount}</p>
+            </header>
+
+            {groupSidebarMembers.length > 0 ? (
+              <div className="dm-chat__group-sidebar-list" role="list" aria-label="Lista de membros do grupo">
+                {groupSidebarMembers.map((member) => (
+                  <button
+                    key={member.key}
+                    type="button"
+                    role="listitem"
+                    className={`dm-chat__group-member${openMessageProfileUserId === member.lookupId ? " dm-chat__group-member--active" : ""}`}
+                    onClick={(event) => {
+                      handleOpenMessageProfilePopover(event, member.lookupId);
+                    }}
+                    aria-label={`Abrir mini perfil de ${member.displayName}`}
+                  >
+                    <span className="dm-chat__group-member-avatar-wrap">
+                      <img
+                        className="dm-chat__group-member-avatar"
+                        src={member.avatarSrc}
+                        alt={`Avatar de ${member.displayName}`}
+                        loading="lazy"
+                        onError={(event) => {
+                          const target = event.currentTarget;
+                          if (target.src !== member.fallbackAvatar) {
+                            target.src = member.fallbackAvatar;
+                          }
+                        }}
+                      />
+                      <span
+                        className={`dm-chat__group-member-presence dm-chat__group-member-presence--${member.presenceState}`}
+                        aria-label={`Status: ${member.presenceLabel}`}
+                        role="img"
+                      />
+                    </span>
+
+                    <span className="dm-chat__group-member-body">
+                      <span className="dm-chat__group-member-name" title={member.displayName}>
+                        {member.displayName}
+                      </span>
+                      <span className="dm-chat__group-member-meta" title={member.isCurrentMember ? "Voce" : `@${member.username}`}>
+                        {member.isCurrentMember ? "Voce" : `@${member.username}`}
+                      </span>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <p className="dm-chat__group-sidebar-empty">Nenhum membro carregado ainda.</p>
+            )}
+          </section>
+        </aside>
+        ) : null}
 
         {!shouldHideVoiceCallChrome && !isGroupConversation ? (
         <aside

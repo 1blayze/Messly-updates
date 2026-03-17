@@ -299,7 +299,7 @@ export default function CreateGroupDmModal({
   };
 
   const handleCreateGroup = async (): Promise<void> => {
-    if (selectedCandidates.length === 0 || isCreatingGroup) {
+    if (selectedCandidates.length < 2 || isCreatingGroup) {
       return;
     }
 
@@ -341,7 +341,7 @@ export default function CreateGroupDmModal({
             onClick={() => {
               void handleCreateGroup();
             }}
-            disabled={selectedUserIds.length === 0 || isCreatingGroup}
+            disabled={selectedUserIds.length < 2 || isCreatingGroup}
           >
             {isCreatingGroup ? "Criando..." : "Criar grupo privado"}
           </button>
@@ -351,6 +351,10 @@ export default function CreateGroupDmModal({
       <div className="create-group-dm-modal__content">
         <p className="create-group-dm-modal__subtitle">
           Voce pode adicionar mais {remainingFriendSlots} {remainingFriendSlots === 1 ? "amigo" : "amigos"}.
+        </p>
+
+        <p className="create-group-dm-modal__helper">
+          Selecione pelo menos 2 amigos para criar um grupo privado.
         </p>
 
         <label className="create-group-dm-modal__search-wrap" htmlFor="create-group-dm-search">

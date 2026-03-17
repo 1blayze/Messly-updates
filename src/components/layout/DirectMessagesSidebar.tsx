@@ -10,6 +10,7 @@ import {
 } from "react";
 import MaterialSymbolIcon from "../ui/MaterialSymbolIcon";
 import AvatarImage from "../ui/AvatarImage";
+import GroupCompositeAvatar from "../ui/GroupCompositeAvatar";
 import UserCard from "../UserCard/UserCard";
 import Modal from "../ui/Modal";
 import Tooltip from "../ui/Tooltip";
@@ -1132,11 +1133,29 @@ const DirectMessageListItem = memo(function DirectMessageListItem({
 }: DirectMessageListItemProps) {
   const resolvedDisplayName = normalizeIdentityDisplayName(dm.displayName, dm.username, dm.username);
   const fallbackNameAvatar = getDmDisplayAvatar(resolvedDisplayName, dm.username, dm.userId);
+  const isGroupDm = dm.conversationType === "group_dm";
+  const safeGroupFallbackAvatarSrc = String(dm.avatarSrc ?? "").trim() || getGroupDmAvatarUrl();
+  const groupMemberCount = useMemo(() => {
+    if (!isGroupDm) {
+      return 0;
+    }
+
+    const participantIds = new Set(
+      [
+        ...dm.participantIds,
+        ...dm.participants.map((participant) => participant.userId),
+      ]
+        .map((participantId) => String(participantId ?? "").trim())
+        .filter((participantId) => Boolean(participantId)),
+    );
+
+    return participantIds.size > 0 ? participantIds.size + 1 : 0;
+  }, [dm.participantIds, dm.participants, isGroupDm]);
+  const groupMembersLabel = groupMemberCount <= 0
+    ? "Grupo privado"
+    : (groupMemberCount === 1 ? "1 membro" : `${groupMemberCount} membros`);
   const safeDmAvatarSrc = (() => {
     const raw = String(dm.avatarSrc ?? "").trim();
-    if (dm.conversationType === "group_dm") {
-      return raw || getGroupDmAvatarUrl();
-    }
     if (!raw || isDefaultAvatarUrl(raw)) {
       return fallbackNameAvatar;
     }
@@ -1170,22 +1189,35 @@ const DirectMessageListItem = memo(function DirectMessageListItem({
       }}
     >
       <div className="friends-sidebar__dm-avatar-wrap">
-        <AvatarImage
-          className="friends-sidebar__dm-avatar"
-          src={safeDmAvatarSrc}
-          name={resolvedDisplayName}
-          alt={`Avatar de ${resolvedDisplayName}`}
-          loading="lazy"
-        />
-        <span
-          className={`friends-sidebar__dm-presence friends-sidebar__dm-presence--${dm.presenceState}`}
-          aria-hidden="true"
-        />
+        {isGroupDm ? (
+          <GroupCompositeAvatar
+            className="friends-sidebar__dm-avatar"
+            participants={dm.participants}
+            label={resolvedDisplayName}
+            fallbackSrc={safeGroupFallbackAvatarSrc}
+          />
+        ) : (
+          <>
+            <AvatarImage
+              className="friends-sidebar__dm-avatar"
+              src={safeDmAvatarSrc}
+              name={resolvedDisplayName}
+              alt={`Avatar de ${resolvedDisplayName}`}
+              loading="lazy"
+            />
+            <span
+              className={`friends-sidebar__dm-presence friends-sidebar__dm-presence--${dm.presenceState}`}
+              aria-hidden="true"
+            />
+          </>
+        )}
       </div>
 
       <button className="friends-sidebar__dm-main" type="button">
         <span className="friends-sidebar__dm-name">{resolvedDisplayName}</span>
-        {dm.spotifyActivity && dm.userId !== identityUserId ? (
+        {isGroupDm ? (
+          <span className="friends-sidebar__dm-subtitle">{groupMembersLabel}</span>
+        ) : dm.spotifyActivity && dm.userId !== identityUserId ? (
           <span className="friends-sidebar__dm-spotify-status">
             <img className="friends-sidebar__dm-spotify-icon" src={musicalIcon} alt="" aria-hidden="true" />
             <span className="friends-sidebar__dm-spotify-track">
@@ -1212,7 +1244,7 @@ const DirectMessageListItem = memo(function DirectMessageListItem({
           <button
             className="friends-sidebar__dm-close"
             type="button"
-            aria-label={`Fechar DM de ${resolvedDisplayName}`}
+            aria-label={isGroupDm ? `Fechar grupo privado ${resolvedDisplayName}` : `Fechar DM de ${resolvedDisplayName}`}
             onClick={(event) => {
               event.stopPropagation();
               onHide(dm.conversationId);

@@ -343,6 +343,16 @@
   text-overflow: ellipsis;
 }
 
+.friends-sidebar__dm-subtitle {
+  min-width: 0;
+  color: rgba(223, 228, 236, 0.72);
+  font-size: 12px;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .friends-sidebar__dm-spotify-status {
   min-width: 0;
   color: #a0a0a0;

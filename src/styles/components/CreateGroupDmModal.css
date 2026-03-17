@@ -24,6 +24,13 @@
   line-height: 1.35;
 }
 
+.create-group-dm-modal__helper {
+  margin: -2px 0 0;
+  color: rgba(219, 222, 225, 0.54);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .create-group-dm-modal__search-wrap {
   display: block;
 }

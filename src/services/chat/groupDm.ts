@@ -17,12 +17,7 @@ export function buildGroupDmName(displayNames: string[]): string {
     return "Grupo privado";
   }
 
-  const fullName = uniqueNames.join(", ");
-  if (fullName.length <= 72) {
-    return fullName;
-  }
-
-  const previewNames = uniqueNames.slice(0, 3);
+  const previewNames = uniqueNames.slice(0, 2);
   const remainingCount = uniqueNames.length - previewNames.length;
   if (remainingCount <= 0) {
     return previewNames.join(", ");
@@ -35,9 +30,15 @@ export function resolveGroupDmDisplayName(
   storedName: string | null | undefined,
   participantDisplayNames: string[],
 ): string {
+  const resolvedDynamicName = buildGroupDmName(participantDisplayNames);
+  if (resolvedDynamicName !== "Grupo privado") {
+    return resolvedDynamicName;
+  }
+
   const normalizedStoredName = String(storedName ?? "").trim();
   if (normalizedStoredName) {
     return normalizedStoredName;
   }
-  return buildGroupDmName(participantDisplayNames);
+
+  return resolvedDynamicName;
 }
