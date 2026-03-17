@@ -3528,6 +3528,7 @@ export default function AppShell() {
           onSelectDirectMessage={(dm) => {
             setActiveDirectMessage(dm);
           }}
+          onBlockDirectMessageUser={handleBlockTargetUser}
           onOpenFriends={() => {
             setActiveDirectMessage(null);
           }}

@@ -357,7 +357,7 @@
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  color: rgba(223, 228, 236, 0.86);
+  color: var(--button-ghost-text-hover);
 }
 
 .friends-sidebar__dm-favorite-icon {
@@ -420,7 +420,8 @@
 .friends-sidebar__dm-context-menu {
   position: fixed;
   z-index: 35;
-  min-width: 228px;
+  min-width: 188px;
+  max-width: 196px;
   padding: 8px;
   border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: 8px;
@@ -460,6 +461,16 @@
 .friends-sidebar__dm-context-menu-item:focus-visible {
   background: rgba(255, 255, 255, 0.08);
   outline: none;
+}
+
+.friends-sidebar__dm-context-menu-item--danger {
+  color: #f87171;
+}
+
+.friends-sidebar__dm-context-menu-item--danger:hover,
+.friends-sidebar__dm-context-menu-item--danger:focus-visible {
+  background: rgba(248, 113, 113, 0.14);
+  color: #fda4af;
 }
 
 .friends-sidebar__add-friend-modal {

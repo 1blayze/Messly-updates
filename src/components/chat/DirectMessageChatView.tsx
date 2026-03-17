@@ -84,6 +84,8 @@ const VOICE_CALL_SERVER_FALLBACK_TTL_MS = 30 * 60_000;
 const AUDIO_SETTINGS_STORAGE_KEY_PREFIX = "messly:audio-settings:";
 const VOICE_GLOBAL_REJOIN_EVENT = "messly:voice-rejoin-request";
 const VOICE_GLOBAL_REJOIN_PENDING_ROOM_ID_KEY = "messly:voice-rejoin:pending-room-id";
+const DM_OPEN_FULL_PROFILE_EVENT = "messly:dm-open-full-profile";
+const DM_OPEN_FULL_PROFILE_PENDING_CONVERSATION_KEY = "messly:dm-open-full-profile:conversation-id";
 
 const GROUP_BREAK_MS = 5 * 60 * 1000;
 const AUTO_SCROLL_THRESHOLD_PX = 120;
@@ -2840,6 +2842,33 @@ export default function DirectMessageChatView({
     closeMessageProfilePopover();
     setIsSidebarFullProfileOpen(true);
   }, [closeMessageProfilePopover]);
+
+  useEffect(() => {
+    const handleOpenFullProfileRequest = (event: Event): void => {
+      const customEvent = event as CustomEvent<{ conversationId?: string | null }>;
+      const requestedConversationId = String(customEvent.detail?.conversationId ?? "").trim();
+      if (!requestedConversationId || requestedConversationId !== conversationId) {
+        return;
+      }
+      handleOpenSidebarFullProfile();
+    };
+
+    window.addEventListener(DM_OPEN_FULL_PROFILE_EVENT, handleOpenFullProfileRequest as EventListener);
+
+    const pendingConversationId = sessionStorage.getItem(DM_OPEN_FULL_PROFILE_PENDING_CONVERSATION_KEY);
+    if (pendingConversationId && pendingConversationId === conversationId) {
+      sessionStorage.removeItem(DM_OPEN_FULL_PROFILE_PENDING_CONVERSATION_KEY);
+      handleOpenFullProfileRequest(
+        new CustomEvent<{ conversationId: string }>(DM_OPEN_FULL_PROFILE_EVENT, {
+          detail: { conversationId: pendingConversationId },
+        }),
+      );
+    }
+
+    return () => {
+      window.removeEventListener(DM_OPEN_FULL_PROFILE_EVENT, handleOpenFullProfileRequest as EventListener);
+    };
+  }, [conversationId, handleOpenSidebarFullProfile]);
 
   const handleOpenCurrentUserSettings = useCallback((): void => {
     closeMessageProfilePopover();

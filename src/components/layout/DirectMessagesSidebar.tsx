@@ -103,6 +103,7 @@ interface DirectMessagesSidebarProps {
   onSelectDirectMessage?: (dm: SidebarDirectMessageSelection) => void;
   onOpenFriends?: () => void;
   onDirectMessagesChange?: (items: SidebarDirectMessageSelection[]) => void;
+  onBlockDirectMessageUser?: (userId: string) => Promise<void> | void;
 }
 
 interface AddFriendFeedbackState {
@@ -247,6 +248,8 @@ const DM_PRELOAD_MAX_AGE_MS = 90_000;
 const DM_PRELOAD_LIST_WARMUP_COUNT = 6;
 const DM_PRELOAD_LIST_WARMUP_ENABLED = import.meta.env.PROD;
 const DM_REORDER_FLIP_DURATION_MS = 220;
+const DM_OPEN_FULL_PROFILE_EVENT = "messly:dm-open-full-profile";
+const DM_OPEN_FULL_PROFILE_PENDING_CONVERSATION_KEY = "messly:dm-open-full-profile:conversation-id";
 
 function areHiddenDmConversationIdsEqual(current: string[], next: string[]): boolean {
   if (current.length !== next.length) {
@@ -922,13 +925,20 @@ function normalizePresenceState(value: unknown): PresenceState {
 
 function FavoriteStarIcon({ className }: { className?: string }) {
   return (
-    <img
+    <span
       className={className}
-      src={starIcon}
-      alt=""
+      style={{
+        backgroundColor: "currentColor",
+        WebkitMaskImage: `url(${starIcon})`,
+        maskImage: `url(${starIcon})`,
+        WebkitMaskRepeat: "no-repeat",
+        maskRepeat: "no-repeat",
+        WebkitMaskPosition: "center",
+        maskPosition: "center",
+        WebkitMaskSize: "contain",
+        maskSize: "contain",
+      }}
       aria-hidden="true"
-      loading="lazy"
-      decoding="async"
     />
   );
 }
@@ -1413,6 +1423,7 @@ export default function DirectMessagesSidebar({
   onSelectDirectMessage,
   onOpenFriends,
   onDirectMessagesChange,
+  onBlockDirectMessageUser,
 }: DirectMessagesSidebarProps) {
   const dispatch = useAppDispatch();
   const { user, authReady, session } = useAuthSession();
@@ -3023,7 +3034,27 @@ export default function DirectMessagesSidebar({
 
     handleDirectMessageActivate(dm);
     setDmContextMenu(null);
+    if (typeof window !== "undefined") {
+      window.sessionStorage.setItem(DM_OPEN_FULL_PROFILE_PENDING_CONVERSATION_KEY, normalizedConversationId);
+      window.setTimeout(() => {
+        window.dispatchEvent(new CustomEvent<{ conversationId: string }>(DM_OPEN_FULL_PROFILE_EVENT, {
+          detail: {
+            conversationId: normalizedConversationId,
+          },
+        }));
+      }, 120);
+    }
   }, [handleDirectMessageActivate]);
+
+  const handleBlockDirectMessageUser = useCallback(async (userId: string): Promise<void> => {
+    const normalizedUserId = String(userId ?? "").trim();
+    if (!normalizedUserId || !onBlockDirectMessageUser) {
+      return;
+    }
+
+    await onBlockDirectMessageUser(normalizedUserId);
+    setDmContextMenu(null);
+  }, [onBlockDirectMessageUser]);
 
   const toggleFavoriteDirectMessage = useCallback((conversationId: string): void => {
     const normalizedConversationId = String(conversationId ?? "").trim();
@@ -3413,7 +3444,7 @@ export default function DirectMessagesSidebar({
           <div
             className="friends-sidebar__dm-context-menu"
             role="menu"
-            aria-label={`Acoes para ${dmContextMenu.displayName}`}
+            aria-label={`Ações para ${dmContextMenu.displayName}`}
             style={{
               left: Math.max(12, dmContextMenu.x),
               top: Math.max(12, dmContextMenu.y),
@@ -3444,8 +3475,8 @@ export default function DirectMessagesSidebar({
               >
                 <span>
                   {directMessagesRef.current.find((item) => item.conversationId === dmContextMenu.conversationId)?.isFavorite
-                    ? "Desfavoritar usuario"
-                    : "Favoritar usuario"}
+                    ? "Desfavoritar usuário"
+                    : "Favoritar usuário"}
                 </span>
               </button>
             </div>
@@ -3462,6 +3493,17 @@ export default function DirectMessagesSidebar({
                 }}
               >
                 <span>Fechar mensagem direta</span>
+              </button>
+
+              <button
+                className="friends-sidebar__dm-context-menu-item friends-sidebar__dm-context-menu-item--danger"
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  void handleBlockDirectMessageUser(dmContextMenu.userId);
+                }}
+              >
+                <span>Bloquear</span>
               </button>
             </div>
           </div>
