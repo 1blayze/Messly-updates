@@ -68,8 +68,53 @@ interface ConversationProfileRow {
 
 const CONVERSATION_SELECT_COLUMNS =
   "id,type,created_by,name,avatar_url,user1_id,user2_id,created_at";
+const LEGACY_CONVERSATION_SELECT_COLUMNS = "id,user1_id,user2_id,created_at";
 const CONVERSATION_PROFILE_SELECT_COLUMNS =
   "id,username,display_name,avatar_url,avatar_key,avatar_hash,firebase_uid:id,about:bio,banner_color,profile_theme_primary_color,profile_theme_accent_color,banner_key,banner_hash,created_at";
+
+function isConversationSchemaCompatibilityError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const candidate = error as { code?: string; message?: string; details?: string; hint?: string };
+  const code = String(candidate.code ?? "").trim().toUpperCase();
+  const message = String(candidate.message ?? "").toLowerCase();
+  const details = String(candidate.details ?? "").toLowerCase();
+  const hint = String(candidate.hint ?? "").toLowerCase();
+  if (code === "PGRST204" || code === "42703") {
+    return true;
+  }
+  return (
+    message.includes("conversations") &&
+    (message.includes("column") || details.includes("column") || hint.includes("column")) &&
+    (
+      message.includes("type")
+      || message.includes("created_by")
+      || message.includes("avatar_url")
+      || message.includes("name")
+      || details.includes("type")
+      || details.includes("created_by")
+      || details.includes("avatar_url")
+      || details.includes("name")
+    )
+  );
+}
+
+function isMissingConversationMembersTableError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const candidate = error as { code?: string; message?: string; details?: string };
+  const code = String(candidate.code ?? "").trim().toUpperCase();
+  const message = String(candidate.message ?? "").toLowerCase();
+  const details = String(candidate.details ?? "").toLowerCase();
+  return (
+    code === "42P01" ||
+    code === "PGRST205" ||
+    message.includes("conversation_members") ||
+    details.includes("conversation_members")
+  );
+}
 
 function toNullableTrimmedString(value: unknown): string | null {
   const normalized = String(value ?? "").trim();
@@ -148,6 +193,9 @@ async function loadConversationMembers(conversationIds: string[]): Promise<Map<s
     .in("conversation_id", normalizedConversationIds);
 
   if (error) {
+    if (isMissingConversationMembersTableError(error)) {
+      return new Map<string, string[]>();
+    }
     throw error;
   }
 
@@ -240,16 +288,26 @@ export async function listUserConversations(currentUserId: string): Promise<Conv
     return [];
   }
 
-  const { data, error } = await supabase
+  let rows: ConversationRow[] = [];
+  const primary = await supabase
     .from("conversations")
     .select(CONVERSATION_SELECT_COLUMNS)
     .order("created_at", { ascending: false });
-
-  if (error) {
-    throw error;
+  if (primary.error) {
+    if (!isConversationSchemaCompatibilityError(primary.error)) {
+      throw primary.error;
+    }
+    const legacy = await supabase
+      .from("conversations")
+      .select(LEGACY_CONVERSATION_SELECT_COLUMNS)
+      .order("created_at", { ascending: false });
+    if (legacy.error) {
+      throw legacy.error;
+    }
+    rows = (Array.isArray(legacy.data) ? legacy.data : []) as ConversationRow[];
+  } else {
+    rows = (Array.isArray(primary.data) ? primary.data : []) as ConversationRow[];
   }
-
-  const rows = (Array.isArray(data) ? data : []) as ConversationRow[];
   const membersByConversationId = await loadConversationMembers(rows.map((row) => row.id));
 
   return rows.map((row) => {
@@ -266,7 +324,7 @@ export async function ensureDirectConversation(userA: string, userB: string): Pr
     throw new Error("Participantes invalidos para criar DM.");
   }
 
-  const existing = await supabase
+  const existingWithType = await supabase
     .from("conversations")
     .select(CONVERSATION_SELECT_COLUMNS)
     .eq("type", "dm")
@@ -275,15 +333,28 @@ export async function ensureDirectConversation(userA: string, userB: string): Pr
     .limit(1)
     .maybeSingle();
 
-  if (existing.error) {
-    throw existing.error;
+  let existing = existingWithType;
+  if (existingWithType.error) {
+    if (!isConversationSchemaCompatibilityError(existingWithType.error)) {
+      throw existingWithType.error;
+    }
+    existing = await supabase
+      .from("conversations")
+      .select(LEGACY_CONVERSATION_SELECT_COLUMNS)
+      .eq("user1_id", left)
+      .eq("user2_id", right)
+      .limit(1)
+      .maybeSingle();
+    if (existing.error) {
+      throw existing.error;
+    }
   }
 
   if (existing.data) {
     return mapConversationRow(existing.data as ConversationRow, [left, right]);
   }
 
-  const inserted = await supabase
+  const insertedWithType = await supabase
     .from("conversations")
     .insert({
       type: "dm",
@@ -295,26 +366,35 @@ export async function ensureDirectConversation(userA: string, userB: string): Pr
     .limit(1)
     .maybeSingle();
 
+  let inserted = insertedWithType;
+  if (insertedWithType.error && isConversationSchemaCompatibilityError(insertedWithType.error)) {
+    inserted = await supabase
+      .from("conversations")
+      .insert({
+        user1_id: left,
+        user2_id: right,
+      })
+      .select(LEGACY_CONVERSATION_SELECT_COLUMNS)
+      .limit(1)
+      .maybeSingle();
+  }
+
   if (inserted.error) {
     if (inserted.error.code === "23505") {
       const retry = await supabase
         .from("conversations")
-        .select(CONVERSATION_SELECT_COLUMNS)
-        .eq("type", "dm")
+        .select(LEGACY_CONVERSATION_SELECT_COLUMNS)
         .eq("user1_id", left)
         .eq("user2_id", right)
         .limit(1)
         .maybeSingle();
-
       if (retry.error) {
         throw retry.error;
       }
-
       if (retry.data) {
         return mapConversationRow(retry.data as ConversationRow, [left, right]);
       }
     }
-
     throw inserted.error;
   }
 
@@ -331,18 +411,31 @@ export async function getConversationDetails(conversationId: string): Promise<Co
     return null;
   }
 
-  const { data, error } = await supabase
+  let row: ConversationRow | null = null;
+  const primary = await supabase
     .from("conversations")
     .select(CONVERSATION_SELECT_COLUMNS)
     .eq("id", normalizedConversationId)
     .limit(1)
     .maybeSingle();
-
-  if (error) {
-    throw error;
+  if (primary.error) {
+    if (!isConversationSchemaCompatibilityError(primary.error)) {
+      throw primary.error;
+    }
+    const legacy = await supabase
+      .from("conversations")
+      .select(LEGACY_CONVERSATION_SELECT_COLUMNS)
+      .eq("id", normalizedConversationId)
+      .limit(1)
+      .maybeSingle();
+    if (legacy.error) {
+      throw legacy.error;
+    }
+    row = (legacy.data as ConversationRow | null) ?? null;
+  } else {
+    row = (primary.data as ConversationRow | null) ?? null;
   }
 
-  const row = (data as ConversationRow | null) ?? null;
   if (!row) {
     return null;
   }

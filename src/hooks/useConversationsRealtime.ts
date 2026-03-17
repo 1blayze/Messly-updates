@@ -4,6 +4,9 @@ import type { RealtimeChannel, RealtimePostgresChangesPayload } from "@supabase/
 import { supabase } from "../services/supabase";
 import type { ChatMessageType } from "../services/chat/chatApi";
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const CONVERSATIONS_QUERY_VERSION = "v2";
+const CONVERSATION_SELECT_COLUMNS = "id,type,created_by,name,avatar_url,user1_id,user2_id,created_at";
+const LEGACY_CONVERSATION_SELECT_COLUMNS = "id,user1_id,user2_id,created_at";
 
 export interface ConversationRealtimeRow {
   id: string;
@@ -51,6 +54,34 @@ export interface ConversationMessageInsertEvent {
 
 interface UseConversationsRealtimeOptions {
   onMessageInsert?: ((event: ConversationMessageInsertEvent) => void) | null;
+}
+
+function isConversationSchemaCompatibilityError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const candidate = error as { code?: string; message?: string; details?: string; hint?: string };
+  const code = String(candidate.code ?? "").trim().toUpperCase();
+  const message = String(candidate.message ?? "").toLowerCase();
+  const details = String(candidate.details ?? "").toLowerCase();
+  const hint = String(candidate.hint ?? "").toLowerCase();
+  if (code === "PGRST204" || code === "42703") {
+    return true;
+  }
+  return (
+    message.includes("conversations") &&
+    (message.includes("column") || details.includes("column") || hint.includes("column")) &&
+    (
+      message.includes("type")
+      || message.includes("created_by")
+      || message.includes("avatar_url")
+      || message.includes("name")
+      || details.includes("type")
+      || details.includes("created_by")
+      || details.includes("avatar_url")
+      || details.includes("name")
+    )
+  );
 }
 
 function normalizeConversation(
@@ -160,16 +191,26 @@ function normalizeMessageInsertEvent(record: MessageRecord | null | undefined): 
 }
 
 async function fetchConversations(_currentUserId: string): Promise<ConversationRealtimeRow[]> {
-  const { data, error } = await supabase
+  let rows: ConversationRecord[] = [];
+  const primary = await supabase
     .from("conversations")
-    .select("id,type,created_by,name,avatar_url,user1_id,user2_id,created_at")
+    .select(CONVERSATION_SELECT_COLUMNS)
     .order("created_at", { ascending: false });
-
-  if (error) {
-    throw error;
+  if (primary.error) {
+    if (!isConversationSchemaCompatibilityError(primary.error)) {
+      throw primary.error;
+    }
+    const legacy = await supabase
+      .from("conversations")
+      .select(LEGACY_CONVERSATION_SELECT_COLUMNS)
+      .order("created_at", { ascending: false });
+    if (legacy.error) {
+      throw legacy.error;
+    }
+    rows = Array.isArray(legacy.data) ? (legacy.data as ConversationRecord[]) : [];
+  } else {
+    rows = Array.isArray(primary.data) ? (primary.data as ConversationRecord[]) : [];
   }
-
-  const rows = Array.isArray(data) ? (data as ConversationRecord[]) : [];
   const conversationIds = rows
     .map((row) => String(row.id ?? "").trim())
     .filter((conversationId) => Boolean(conversationId));
@@ -209,7 +250,7 @@ export function useConversationsRealtime(
     options?.onMessageInsert ?? null,
   );
   const queryKey = useMemo(
-    () => ["conversations", normalizedUserId] as const,
+    () => ["conversations", CONVERSATIONS_QUERY_VERSION, normalizedUserId] as const,
     [normalizedUserId],
   );
 

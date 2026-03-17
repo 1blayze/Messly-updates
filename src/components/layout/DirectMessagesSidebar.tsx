@@ -1477,6 +1477,17 @@ async function loadConversationMemberMap(conversationIds: string[]): Promise<Map
     .in("conversation_id", normalizedConversationIds);
 
   if (error) {
+    const code = String((error as { code?: string }).code ?? "").trim().toUpperCase();
+    const message = String((error as { message?: string }).message ?? "").toLowerCase();
+    const details = String((error as { details?: string }).details ?? "").toLowerCase();
+    if (
+      code === "42P01" ||
+      code === "PGRST205" ||
+      message.includes("conversation_members") ||
+      details.includes("conversation_members")
+    ) {
+      return new Map<string, string[]>();
+    }
     throw error;
   }
 
