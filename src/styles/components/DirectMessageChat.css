@@ -1550,9 +1550,10 @@
   border: 1px solid rgba(255, 255, 255, 0.08);
   box-shadow: 0 8px 18px rgba(0, 0, 0, 0.35);
   opacity: 0;
-  transform: translateY(4px);
+  visibility: hidden;
+  transform: none;
   pointer-events: none;
-  transition: opacity 120ms ease, transform 120ms ease;
+  transition: none;
   backdrop-filter: blur(6px);
   z-index: 340;
   isolation: isolate;
@@ -1574,7 +1575,8 @@
 .dm-chat__message-item:hover .dm-chat__message-actions,
 .dm-chat__message-item:focus-within .dm-chat__message-actions {
   opacity: 1;
-  transform: translateY(0);
+  visibility: visible;
+  transform: none;
   pointer-events: auto;
 }
 
@@ -1582,8 +1584,9 @@
 .dm-chat__message-item:hover .dm-chat__message-actions--hidden,
 .dm-chat__message-item:focus-within .dm-chat__message-actions--hidden {
   opacity: 0;
+  visibility: hidden;
   pointer-events: none;
-  transform: translateY(4px);
+  transform: none;
 }
 
 .dm-chat__message-action {
@@ -1598,7 +1601,7 @@
   justify-content: center;
   cursor: pointer;
   box-shadow: var(--button-secondary-shadow);
-  transition: var(--button-transition);
+  transition: none;
 }
 
 .dm-chat__message-action:hover,
