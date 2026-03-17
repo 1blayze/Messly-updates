@@ -3,6 +3,9 @@ import react from "@vitejs/plugin-react";
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
+  const isDesktopBuild = String(env.MESSLY_DESKTOP_BUILD ?? process.env.MESSLY_DESKTOP_BUILD ?? "")
+    .trim()
+    .toLowerCase() === "true";
   const supabaseUrl = String(env.VITE_SUPABASE_URL ?? "").trim().replace(/\/+$/, "");
   const messlyApiUrl = String(env.VITE_MESSLY_API_URL ?? "https://messly.site").trim().replace(/\/+$/, "");
   const supabaseDevProxy = supabaseUrl
@@ -39,7 +42,7 @@ export default defineConfig(({ mode }) => {
   };
 
   return {
-    base: "./",
+    base: isDesktopBuild ? "./" : "/",
     plugins: [
       react(),
       {
