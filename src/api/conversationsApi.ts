@@ -117,6 +117,27 @@ function isMissingConversationMembersTableError(error: unknown): boolean {
   );
 }
 
+function isMissingCreateGroupDmRpcError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const candidate = error as { code?: string; message?: string; details?: string; hint?: string };
+  const code = String(candidate.code ?? "").trim().toUpperCase();
+  const message = String(candidate.message ?? "").toLowerCase();
+  const details = String(candidate.details ?? "").toLowerCase();
+  const hint = String(candidate.hint ?? "").toLowerCase();
+  return (
+    code === "404" ||
+    code === "PGRST202" ||
+    code === "42883" ||
+    message.includes("create_group_dm") ||
+    details.includes("create_group_dm") ||
+    hint.includes("create_group_dm") ||
+    message.includes("function was not found") ||
+    details.includes("function was not found")
+  );
+}
+
 function toNullableTrimmedString(value: unknown): string | null {
   const normalized = String(value ?? "").trim();
   return normalized || null;
@@ -578,14 +599,49 @@ export async function createGroupConversation(
     throw new Error("O grupo privado suporta no maximo 10 pessoas contando com voce.");
   }
 
+  const createGroupRpcSupported = getSchemaCapability("create_group_dm_rpc");
+  if (createGroupRpcSupported === false) {
+    if (normalizedOtherParticipantIds.length === 1) {
+      const directConversation = await ensureDirectConversation(
+        normalizedCurrentUserId,
+        normalizedOtherParticipantIds[0],
+      );
+      const directDetails = await getConversationDetails(directConversation.id);
+      if (directDetails) {
+        return directDetails;
+      }
+      throw new Error("Falha ao criar conversa direta.");
+    }
+    throw new Error("Grupo privado indisponivel neste ambiente.");
+  }
+  if (createGroupRpcSupported === null) {
+    // Optimistically mark as unsupported while probing to avoid concurrent duplicate probes.
+    setSchemaCapability("create_group_dm_rpc", false);
+  }
+
   const { data, error } = await supabase.rpc("create_group_dm", {
     p_participant_ids: normalizedOtherParticipantIds,
     p_name: toNullableTrimmedString(name),
   });
 
   if (error) {
+    if (isMissingCreateGroupDmRpcError(error)) {
+      setSchemaCapability("create_group_dm_rpc", false);
+      if (normalizedOtherParticipantIds.length === 1) {
+        const directConversation = await ensureDirectConversation(
+          normalizedCurrentUserId,
+          normalizedOtherParticipantIds[0],
+        );
+        const directDetails = await getConversationDetails(directConversation.id);
+        if (directDetails) {
+          return directDetails;
+        }
+      }
+      throw new Error("Grupo privado indisponivel neste ambiente.");
+    }
     throw error;
   }
+  setSchemaCapability("create_group_dm_rpc", true);
 
   const createdRow = (Array.isArray(data) ? data[0] : data) as ConversationRow | null;
   const createdConversationId = String(createdRow?.id ?? "").trim();

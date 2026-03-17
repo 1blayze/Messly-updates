@@ -1,9 +1,15 @@
 type SchemaCapabilityKey =
   | "conversations_extended_columns"
-  | "conversation_members_table";
+  | "conversation_members_table"
+  | "create_group_dm_rpc";
 
-const SCHEMA_CAPABILITY_STORAGE_PREFIX = "messly:schema-capability:";
+const SCHEMA_CAPABILITY_STORAGE_PREFIX = "messly:schema-capability:v2:";
 const schemaCapabilityCache = new Map<SchemaCapabilityKey, boolean | null>();
+const DEFAULT_SCHEMA_CAPABILITIES: Record<SchemaCapabilityKey, boolean> = {
+  conversations_extended_columns: false,
+  conversation_members_table: false,
+  create_group_dm_rpc: false,
+};
 
 function readCapabilityFromStorage(key: SchemaCapabilityKey): boolean | null {
   if (typeof window === "undefined") {
@@ -43,6 +49,12 @@ export function getSchemaCapability(key: SchemaCapabilityKey): boolean | null {
   }
 
   const storedValue = readCapabilityFromStorage(key);
+  if (storedValue === null) {
+    const defaultValue = DEFAULT_SCHEMA_CAPABILITIES[key];
+    schemaCapabilityCache.set(key, defaultValue);
+    return defaultValue;
+  }
+
   schemaCapabilityCache.set(key, storedValue);
   return storedValue;
 }
