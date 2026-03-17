@@ -2002,6 +2002,7 @@ export default function DirectMessageChatView({
   const messageRefs = useRef<Map<string, HTMLElement>>(new Map());
   const messagesRef = useRef<ChatMessageItem[]>([]);
   const activeConversationIdRef = useRef(conversationId);
+  const hasAuthoritativeConversationSeedRef = useRef(false);
   const deletedMessageIdsRef = useRef<Set<string>>(new Set());
   const pendingVirtualScrollMessageIdRef = useRef<string | null>(null);
   const forceNextAutoScrollRef = useRef(false);
@@ -4144,6 +4145,10 @@ export default function DirectMessageChatView({
   }, [messages]);
 
   useEffect(() => {
+    if (!hasAuthoritativeConversationSeedRef.current) {
+      return;
+    }
+
     const stableMessages = messages.filter((message) => !message.optimistic && isVisibleChatMessage(message));
     if (stableMessages.some((message) => message.conversationId !== conversationId)) {
       return;
@@ -4214,8 +4219,10 @@ export default function DirectMessageChatView({
           ? ((await preloadChatMessages({
               conversationId,
               limit: INITIAL_PAGE_SIZE,
-              // Prefer sidebar preload/in-flight cache on first open to reduce perceived wait.
-              force: false,
+              // The view already seeds from cache before this request runs.
+              // Force a real load here so a partial preload entry does not
+              // replace the full timeline with only the last message.
+              force: true,
             })) ??
             (await listChatMessages({
               conversationId,
@@ -4297,6 +4304,7 @@ export default function DirectMessageChatView({
       setNextCursor(resolvedCursor);
       setHasMoreBefore(resolvedHasMoreBefore);
       setHasTrimmedNewerMessages(false);
+      hasAuthoritativeConversationSeedRef.current = true;
 
       setLoadError(null);
       void markConversationAsRead(visibleServerMessages);
@@ -4439,6 +4447,7 @@ export default function DirectMessageChatView({
     );
 
     if (cachedConversationHasMessages && cachedConversation) {
+      hasAuthoritativeConversationSeedRef.current = true;
       setMessages(cachedConversation.messages);
       setNextCursor(cachedConversation.nextCursor);
       setHasMoreBefore(cachedConversation.hasMoreBefore);
@@ -4452,6 +4461,7 @@ export default function DirectMessageChatView({
         messageCount: cachedConversation.messages.length,
       });
     } else if (staleConversationHasMessages && staleConversationSeed) {
+      hasAuthoritativeConversationSeedRef.current = true;
       setMessages(staleConversationSeed.messages);
       setNextCursor(staleConversationSeed.nextCursor);
       setHasMoreBefore(staleConversationSeed.hasMoreBefore);
@@ -4465,6 +4475,7 @@ export default function DirectMessageChatView({
         messageCount: staleConversationSeed.messages.length,
       });
     } else if (preloadedConversation && preloadedWindow && preloadedWindowHasMessages) {
+      hasAuthoritativeConversationSeedRef.current = false;
       setMessages(preloadedWindow.visibleMessages);
       setNextCursor(preloadedConversation.nextCursor ?? null);
       setHasMoreBefore(Boolean(preloadedConversation.nextCursor));
@@ -4478,6 +4489,7 @@ export default function DirectMessageChatView({
         messageCount: preloadedWindow.visibleMessages.length,
       });
     } else if (stalePreloadedConversation && stalePreloadedWindow && stalePreloadedWindowHasMessages) {
+      hasAuthoritativeConversationSeedRef.current = false;
       setMessages(stalePreloadedWindow.visibleMessages);
       setNextCursor(stalePreloadedConversation.nextCursor ?? null);
       setHasMoreBefore(Boolean(stalePreloadedConversation.nextCursor));
@@ -4491,6 +4503,7 @@ export default function DirectMessageChatView({
         messageCount: stalePreloadedWindow.visibleMessages.length,
       });
     } else {
+      hasAuthoritativeConversationSeedRef.current = false;
       setMessages([]);
       setNextCursor(null);
       setHasMoreBefore(false);
