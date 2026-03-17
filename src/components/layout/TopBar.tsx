@@ -62,8 +62,8 @@ function getUpdaterTooltip(state: AppUpdaterState | null, isActionPending: boole
   const status = normalizeUpdaterStatus(state);
   if (status === "available") {
     return state?.latestVersion
-      ? `Atualização ${state.latestVersion} disponível. Clique para baixar.`
-      : "Atualização disponível. Clique para baixar.";
+      ? `Atualização ${state.latestVersion} disponível. Clique para atualizar.`
+      : "Atualização disponível. Clique para atualizar.";
   }
   if (status === "downloading") {
     const progress = Number(state?.progressPercent ?? 0);
@@ -206,9 +206,18 @@ export default function TopBar({ section = "friends", onPrepareForUpdateInstall 
 
     try {
       if (updaterStatus === "available") {
-        const result = await api.updaterDownload?.();
-        if (result?.state) {
-          setUpdaterState(result.state);
+        if (onPrepareForUpdateInstall) {
+          await onPrepareForUpdateInstall();
+        }
+
+        if (api.updaterInstall) {
+          await api.updaterInstall();
+          return;
+        }
+
+        const fallbackDownloadResult = await api.updaterDownload?.();
+        if (fallbackDownloadResult?.state) {
+          setUpdaterState(fallbackDownloadResult.state);
         }
         return;
       }

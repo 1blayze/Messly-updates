@@ -19,7 +19,7 @@ const { app, BrowserWindow, BrowserView, Tray, desktopCapturer, ipcMain, Menu, s
 const { APP_ID, APP_NAME, WINDOWS_APP_USER_MODEL_ID } = require("./config/appIdentity.cjs");
 const { getBackendEnv } = require("./config/env.cjs");
 const { createMediaUploadError, isMediaUploadError } = require("./media/uploadErrors.cjs");
-const { createElectronUpdaterAdapter } = require("./update/electronUpdaterAdapter.cjs");
+const { createReleaseManifestUpdaterAdapter } = require("./update/releaseManifestUpdaterAdapter.cjs");
 const { createNotificationManager } = require("./notifications/notificationManager.cjs");
 const { NotificationNavigationCoordinator } = require("./notifications/notificationNavigationCoordinator.cjs");
 const {
@@ -137,7 +137,7 @@ const STARTUP_AUTO_UPDATE_BLOCK_TIMEOUT_MS = readBoundedIntegerEnv(
   5_000,
   180_000,
 );
-const BLOCK_MAIN_WINDOW_ON_STARTUP_UPDATE = readBooleanEnvFlag(process.env.AUTO_UPDATE_BLOCK_STARTUP, app.isPackaged);
+const BLOCK_MAIN_WINDOW_ON_STARTUP_UPDATE = readBooleanEnvFlag(process.env.AUTO_UPDATE_BLOCK_STARTUP, false);
 const STARTUP_AUTO_UPDATE_CHECK_RETRY_MAX = readBoundedIntegerEnv(
   process.env.AUTO_UPDATE_STARTUP_CHECK_RETRIES,
   3,
@@ -2978,13 +2978,6 @@ async function collectWindowsNetworkDiagnosticsSnapshot() {
 
 function createConfiguredAppUpdater() {
   const managedByExternalLauncher = readBooleanEnvFlag(process.env.MESSLY_EXTERNAL_LAUNCHER, false);
-  if (managedByExternalLauncher) {
-    logStartupDiagnostic("updater:managed-by-launcher", {
-      managedByExternalLauncher,
-    });
-    return createDisabledUpdater("Atualizacoes gerenciadas pelo Messly Launcher.");
-  }
-
   const enableInDev = readBooleanEnvFlag(process.env.AUTO_UPDATE_ENABLE_IN_DEV, false);
   if (!app.isPackaged && !enableInDev) {
     logStartupDiagnostic("updater:disabled-in-dev", {
@@ -2995,17 +2988,20 @@ function createConfiguredAppUpdater() {
   }
 
   try {
-    const updater = createElectronUpdaterAdapter({
+    const updater = createReleaseManifestUpdaterAdapter({
       app,
+      shell,
+      managedByExternalLauncher,
     });
     logStartupDiagnostic("updater:initialized", {
       appIsPackaged: app.isPackaged,
-      adapter: "electron-updater",
+      adapter: "release-manifest",
+      managedByExternalLauncher,
     });
     return updater;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error ?? "unknown");
-    console.warn(`[updater] Falha ao iniciar o updater oficial: ${message}`);
+    console.warn(`[updater] Falha ao iniciar o updater por manifest: ${message}`);
     logStartupDiagnostic("updater:initialize-failed", {
       message,
     }, "warn");
@@ -3133,9 +3129,22 @@ async function runStartupAutoUpdateIfEnabled() {
     return;
   }
 
-  const autoInstallOnStartup = readBooleanEnvFlag(process.env.AUTO_UPDATE_INSTALL_ON_STARTUP, true);
+  const autoInstallOnStartup = readBooleanEnvFlag(process.env.AUTO_UPDATE_INSTALL_ON_STARTUP, false);
   if (!autoInstallOnStartup) {
     logStartupDiagnostic("updater:startup-auto-install-disabled", {});
+    try {
+      await runStartupUpdateStepWithRetry(
+        "Verificando atualizacoes",
+        STARTUP_AUTO_UPDATE_CHECK_RETRY_MAX,
+        async () => appUpdater.checkForUpdates(),
+        STARTUP_AUTO_UPDATE_CHECK_STEP_TIMEOUT_MS,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error ?? "unknown");
+      logStartupDiagnostic("updater:startup-check-while-disabled-failed", {
+        message,
+      }, "warn");
+    }
     return;
   }
 
@@ -4985,7 +4994,7 @@ app.whenReady().then(async () => {
   setTimeout(() => {
     appUpdater.startAutoCheck(
       Number.isFinite(autoCheckIntervalMs) ? autoCheckIntervalMs : undefined,
-      { skipInitialCheck: true },
+      { skipInitialCheck: false },
     );
   }, 1500);
 
