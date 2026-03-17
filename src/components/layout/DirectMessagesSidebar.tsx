@@ -54,6 +54,7 @@ import { notificationsActions } from "../../stores/notificationsSlice";
 import { useAppDispatch, useAppSelector } from "../../stores/store";
 import { createClientNonce } from "../../utils/ids";
 import musicalIcon from "../../assets/icons/ui/musical.svg";
+import starIcon from "../../assets/icons/ui/favorite.svg";
 import "../../styles/components/DirectMessagesSidebar.css";
 
 interface SidebarIdentity {
@@ -921,17 +922,14 @@ function normalizePresenceState(value: unknown): PresenceState {
 
 function FavoriteStarIcon({ className }: { className?: string }) {
   return (
-    <svg
+    <img
       className={className}
-      viewBox="0 0 24 24"
+      src={starIcon}
+      alt=""
       aria-hidden="true"
-      focusable="false"
-    >
-      <path
-        d="M12 2.25 14.78 7.88l6.22.9-4.5 4.39 1.06 6.2L12 16.46 6.44 19.37l1.06-6.2L3 8.78l6.22-.9L12 2.25Z"
-        fill="currentColor"
-      />
-    </svg>
+      loading="lazy"
+      decoding="async"
+    />
   );
 }
 
@@ -1023,31 +1021,31 @@ const DirectMessageListItem = memo(function DirectMessageListItem({
       </button>
 
       <div className="friends-sidebar__dm-meta">
+        {unreadCount > 0 ? (
+          <span className="friends-sidebar__dm-unread" aria-label={`${unreadCount} mensagens n?o lidas`}>
+            {unreadCount > 99 ? "99+" : unreadCount}
+          </span>
+        ) : null}
+
         {dm.isFavorite ? (
           <Tooltip text="Favoritado" position="top" delay={90}>
             <span className="friends-sidebar__dm-favorite" aria-label="Favoritado">
               <FavoriteStarIcon className="friends-sidebar__dm-favorite-icon" />
             </span>
           </Tooltip>
-        ) : null}
-
-        {unreadCount > 0 ? (
-          <span className="friends-sidebar__dm-unread" aria-label={`${unreadCount} mensagens não lidas`}>
-            {unreadCount > 99 ? "99+" : unreadCount}
-          </span>
-        ) : null}
-
-        <button
-          className="friends-sidebar__dm-close"
-          type="button"
-          aria-label={`Fechar DM de ${resolvedDisplayName}`}
-          onClick={(event) => {
-            event.stopPropagation();
-            onHide(dm.conversationId);
-          }}
-        >
-          <MaterialSymbolIcon name="close" size={14} />
-        </button>
+        ) : (
+          <button
+            className="friends-sidebar__dm-close"
+            type="button"
+            aria-label={`Fechar DM de ${resolvedDisplayName}`}
+            onClick={(event) => {
+              event.stopPropagation();
+              onHide(dm.conversationId);
+            }}
+          >
+            <MaterialSymbolIcon name="close" size={14} />
+          </button>
+        )}
       </div>
     </div>
   );
@@ -3417,11 +3415,10 @@ export default function DirectMessagesSidebar({
                 toggleFavoriteDirectMessage(dmContextMenu.conversationId);
               }}
             >
-              <FavoriteStarIcon className="friends-sidebar__dm-context-menu-icon" />
               <span>
                 {directMessagesRef.current.find((item) => item.conversationId === dmContextMenu.conversationId)?.isFavorite
-                  ? "Desfavoritar usuário"
-                  : "Favoritar usuário"}
+                  ? "Desfavoritar usu?rio"
+                  : "Favoritar usu?rio"}
               </span>
             </button>
           </div>
