@@ -255,8 +255,8 @@ export default function CreateGroupDmModal({
   return (
     <Modal
       isOpen={isOpen}
-      title="Nova mensagem"
-      ariaLabel="Nova mensagem"
+      title="Criar novo grupo privado"
+      ariaLabel="Criar novo grupo privado"
       onClose={handleRequestClose}
       panelClassName="create-group-dm-modal"
       bodyClassName="create-group-dm-modal__body"
@@ -278,7 +278,7 @@ export default function CreateGroupDmModal({
             }}
             disabled={selectedUserIds.length === 0 || isCreatingGroup}
           >
-            {isCreatingGroup ? "Criando..." : "Criar mensagem"}
+            {isCreatingGroup ? "Criando..." : "Criar grupo privado"}
           </button>
         </div>
       )}
