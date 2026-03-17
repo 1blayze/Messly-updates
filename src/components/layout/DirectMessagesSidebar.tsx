@@ -3010,6 +3010,21 @@ export default function DirectMessagesSidebar({
     });
   }, [canPreloadMessages, cancelConversationPreload, onSelectDirectMessage]);
 
+  const handleOpenDirectMessageProfile = useCallback((conversationId: string): void => {
+    const normalizedConversationId = String(conversationId ?? "").trim();
+    if (!normalizedConversationId) {
+      return;
+    }
+
+    const dm = directMessagesRef.current.find((item) => item.conversationId === normalizedConversationId);
+    if (!dm) {
+      return;
+    }
+
+    handleDirectMessageActivate(dm);
+    setDmContextMenu(null);
+  }, [handleDirectMessageActivate]);
+
   const toggleFavoriteDirectMessage = useCallback((conversationId: string): void => {
     const normalizedConversationId = String(conversationId ?? "").trim();
     if (!normalizedConversationId) {
@@ -3398,7 +3413,7 @@ export default function DirectMessagesSidebar({
           <div
             className="friends-sidebar__dm-context-menu"
             role="menu"
-            aria-label={`Ações para ${dmContextMenu.displayName}`}
+            aria-label={`Acoes para ${dmContextMenu.displayName}`}
             style={{
               left: Math.max(12, dmContextMenu.x),
               top: Math.max(12, dmContextMenu.y),
@@ -3407,20 +3422,48 @@ export default function DirectMessagesSidebar({
               event.stopPropagation();
             }}
           >
-            <button
-              className="friends-sidebar__dm-context-menu-item"
-              type="button"
-              role="menuitem"
-              onClick={() => {
-                toggleFavoriteDirectMessage(dmContextMenu.conversationId);
-              }}
-            >
-              <span>
-                {directMessagesRef.current.find((item) => item.conversationId === dmContextMenu.conversationId)?.isFavorite
-                  ? "Desfavoritar usu?rio"
-                  : "Favoritar usu?rio"}
-              </span>
-            </button>
+            <div className="friends-sidebar__dm-context-menu-group" role="none">
+              <button
+                className="friends-sidebar__dm-context-menu-item"
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  handleOpenDirectMessageProfile(dmContextMenu.conversationId);
+                }}
+              >
+                <span>Perfil</span>
+              </button>
+
+              <button
+                className="friends-sidebar__dm-context-menu-item"
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  toggleFavoriteDirectMessage(dmContextMenu.conversationId);
+                }}
+              >
+                <span>
+                  {directMessagesRef.current.find((item) => item.conversationId === dmContextMenu.conversationId)?.isFavorite
+                    ? "Desfavoritar usuario"
+                    : "Favoritar usuario"}
+                </span>
+              </button>
+            </div>
+
+            <div className="friends-sidebar__dm-context-menu-divider" role="separator" />
+
+            <div className="friends-sidebar__dm-context-menu-group" role="none">
+              <button
+                className="friends-sidebar__dm-context-menu-item"
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  handleHideDirectMessage(dmContextMenu.conversationId);
+                }}
+              >
+                <span>Fechar mensagem direta</span>
+              </button>
+            </div>
           </div>
         ) : null}
 
