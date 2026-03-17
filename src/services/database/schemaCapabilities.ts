@@ -49,14 +49,19 @@ export function getSchemaCapability(key: SchemaCapabilityKey): boolean | null {
   }
 
   const storedValue = readCapabilityFromStorage(key);
+  const defaultValue = DEFAULT_SCHEMA_CAPABILITIES[key];
   if (storedValue === null) {
-    const defaultValue = DEFAULT_SCHEMA_CAPABILITIES[key];
     schemaCapabilityCache.set(key, defaultValue);
     return defaultValue;
   }
 
-  schemaCapabilityCache.set(key, storedValue);
-  return storedValue;
+  // Do not trust stale "true" values for capabilities disabled by default in legacy schema.
+  const normalizedValue = storedValue && !defaultValue ? false : storedValue;
+  schemaCapabilityCache.set(key, normalizedValue);
+  if (normalizedValue !== storedValue) {
+    writeCapabilityToStorage(key, normalizedValue);
+  }
+  return normalizedValue;
 }
 
 export function setSchemaCapability(key: SchemaCapabilityKey, value: boolean): void {
