@@ -10,6 +10,7 @@ export interface ConversationRealtimeRow {
   user1_id: string;
   user2_id: string;
   created_at: string | null;
+  last_activity_at: string | null;
 }
 
 interface ConversationRecord {
@@ -44,7 +45,10 @@ interface UseConversationsRealtimeOptions {
   onMessageInsert?: ((event: ConversationMessageInsertEvent) => void) | null;
 }
 
-function normalizeConversation(record: ConversationRecord | null | undefined): ConversationRealtimeRow | null {
+function normalizeConversation(
+  record: ConversationRecord | null | undefined,
+  lastActivityAtOverride?: string | null,
+): ConversationRealtimeRow | null {
   const id = String(record?.id ?? "").trim();
   const user1Id = String(record?.user1_id ?? "").trim();
   const user2Id = String(record?.user2_id ?? "").trim();
@@ -57,6 +61,8 @@ function normalizeConversation(record: ConversationRecord | null | undefined): C
     user1_id: user1Id,
     user2_id: user2Id,
     created_at: record?.created_at ? String(record.created_at) : null,
+    last_activity_at:
+      String(lastActivityAtOverride ?? record?.created_at ?? "").trim() || null,
   };
 }
 
@@ -71,6 +77,15 @@ function removeConversationById(current: ConversationRealtimeRow[], id: string):
 function upsertConversation(current: ConversationRealtimeRow[], nextItem: ConversationRealtimeRow): ConversationRealtimeRow[] {
   const without = current.filter((item) => item.id !== nextItem.id);
   return [nextItem, ...without];
+}
+
+function compareConversationsByActivity(left: ConversationRealtimeRow, right: ConversationRealtimeRow): number {
+  const leftActivity = String(left.last_activity_at ?? left.created_at ?? "").trim();
+  const rightActivity = String(right.last_activity_at ?? right.created_at ?? "").trim();
+  if (leftActivity !== rightActivity) {
+    return leftActivity < rightActivity ? 1 : -1;
+  }
+  return left.id.localeCompare(right.id);
 }
 
 function normalizeMessageConversationId(record: MessageRecord | null | undefined): string | null {
@@ -143,9 +158,32 @@ async function fetchConversations(currentUserId: string): Promise<ConversationRe
   }
 
   const rows = Array.isArray(data) ? (data as ConversationRecord[]) : [];
+  const conversationIds = rows
+    .map((row) => String(row.id ?? "").trim())
+    .filter((conversationId) => Boolean(conversationId));
+  const lastActivityByConversationId = new Map<string, string>();
+
+  if (conversationIds.length > 0) {
+    const { data: latestMessages } = await supabase
+      .from("messages")
+      .select("conversation_id,created_at")
+      .in("conversation_id", conversationIds)
+      .order("created_at", { ascending: false });
+
+    (Array.isArray(latestMessages) ? latestMessages : []).forEach((row) => {
+      const conversationId = String((row as { conversation_id?: string | null }).conversation_id ?? "").trim();
+      const createdAt = String((row as { created_at?: string | null }).created_at ?? "").trim();
+      if (!conversationId || !createdAt || lastActivityByConversationId.has(conversationId)) {
+        return;
+      }
+      lastActivityByConversationId.set(conversationId, createdAt);
+    });
+  }
+
   return rows
-    .map((row) => normalizeConversation(row))
-    .filter((row): row is ConversationRealtimeRow => row !== null);
+    .map((row) => normalizeConversation(row, lastActivityByConversationId.get(String(row.id ?? "").trim()) ?? null))
+    .filter((row): row is ConversationRealtimeRow => row !== null)
+    .sort(compareConversationsByActivity);
 }
 
 export function useConversationsRealtime(
@@ -216,6 +254,7 @@ export function useConversationsRealtime(
     };
 
     const applyMessageChange = (payload: RealtimePostgresChangesPayload<MessageRecord>): void => {
+      const normalizedEvent = normalizeMessageInsertEvent(payload.new as MessageRecord | null);
       const conversationId =
         normalizeMessageConversationId(payload.new as MessageRecord | null) ??
         normalizeMessageConversationId(payload.old as MessageRecord | null);
@@ -231,7 +270,13 @@ export function useConversationsRealtime(
           return safeCurrent;
         }
         isRelevantConversation = true;
-        return upsertConversation(safeCurrent, existingConversation);
+        return upsertConversation(safeCurrent, {
+          ...existingConversation,
+          last_activity_at:
+            normalizedEvent?.createdAt ??
+            existingConversation.last_activity_at ??
+            existingConversation.created_at,
+        });
       });
 
       if (!isRelevantConversation) {
@@ -243,7 +288,6 @@ export function useConversationsRealtime(
         return;
       }
 
-      const normalizedEvent = normalizeMessageInsertEvent(payload.new as MessageRecord | null);
       if (!normalizedEvent) {
         return;
       }
