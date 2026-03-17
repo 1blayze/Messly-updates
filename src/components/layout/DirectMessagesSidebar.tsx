@@ -104,6 +104,7 @@ interface DirectMessagesSidebarProps {
   onOpenFriends?: () => void;
   onDirectMessagesChange?: (items: SidebarDirectMessageSelection[]) => void;
   onBlockDirectMessageUser?: (userId: string) => Promise<void> | void;
+  onUnfriendDirectMessageUser?: (userId: string) => Promise<void> | void;
 }
 
 interface AddFriendFeedbackState {
@@ -250,6 +251,8 @@ const DM_PRELOAD_LIST_WARMUP_ENABLED = import.meta.env.PROD;
 const DM_REORDER_FLIP_DURATION_MS = 220;
 const DM_OPEN_FULL_PROFILE_EVENT = "messly:dm-open-full-profile";
 const DM_OPEN_FULL_PROFILE_PENDING_CONVERSATION_KEY = "messly:dm-open-full-profile:conversation-id";
+const DM_START_VOICE_CALL_EVENT = "messly:dm-start-voice-call";
+const DM_START_VOICE_CALL_PENDING_CONVERSATION_KEY = "messly:dm-start-voice-call:conversation-id";
 
 function areHiddenDmConversationIdsEqual(current: string[], next: string[]): boolean {
   if (current.length !== next.length) {
@@ -925,20 +928,13 @@ function normalizePresenceState(value: unknown): PresenceState {
 
 function FavoriteStarIcon({ className }: { className?: string }) {
   return (
-    <span
+    <img
       className={className}
-      style={{
-        backgroundColor: "currentColor",
-        WebkitMaskImage: `url(${starIcon})`,
-        maskImage: `url(${starIcon})`,
-        WebkitMaskRepeat: "no-repeat",
-        maskRepeat: "no-repeat",
-        WebkitMaskPosition: "center",
-        maskPosition: "center",
-        WebkitMaskSize: "contain",
-        maskSize: "contain",
-      }}
+      src={starIcon}
+      alt=""
       aria-hidden="true"
+      loading="lazy"
+      decoding="async"
     />
   );
 }
@@ -1424,6 +1420,7 @@ export default function DirectMessagesSidebar({
   onOpenFriends,
   onDirectMessagesChange,
   onBlockDirectMessageUser,
+  onUnfriendDirectMessageUser,
 }: DirectMessagesSidebarProps) {
   const dispatch = useAppDispatch();
   const { user, authReady, session } = useAuthSession();
@@ -3056,6 +3053,41 @@ export default function DirectMessagesSidebar({
     setDmContextMenu(null);
   }, [onBlockDirectMessageUser]);
 
+  const handleUnfriendDirectMessageUser = useCallback(async (userId: string): Promise<void> => {
+    const normalizedUserId = String(userId ?? "").trim();
+    if (!normalizedUserId || !onUnfriendDirectMessageUser) {
+      return;
+    }
+
+    await onUnfriendDirectMessageUser(normalizedUserId);
+    setDmContextMenu(null);
+  }, [onUnfriendDirectMessageUser]);
+
+  const handleStartDirectMessageCall = useCallback((conversationId: string): void => {
+    const normalizedConversationId = String(conversationId ?? "").trim();
+    if (!normalizedConversationId) {
+      return;
+    }
+
+    const dm = directMessagesRef.current.find((item) => item.conversationId === normalizedConversationId);
+    if (!dm) {
+      return;
+    }
+
+    handleDirectMessageActivate(dm);
+    setDmContextMenu(null);
+    if (typeof window !== "undefined") {
+      window.sessionStorage.setItem(DM_START_VOICE_CALL_PENDING_CONVERSATION_KEY, normalizedConversationId);
+      window.setTimeout(() => {
+        window.dispatchEvent(new CustomEvent<{ conversationId: string }>(DM_START_VOICE_CALL_EVENT, {
+          detail: {
+            conversationId: normalizedConversationId,
+          },
+        }));
+      }, 120);
+    }
+  }, [handleDirectMessageActivate]);
+
   const toggleFavoriteDirectMessage = useCallback((conversationId: string): void => {
     const normalizedConversationId = String(conversationId ?? "").trim();
     if (!normalizedConversationId) {
@@ -3470,6 +3502,17 @@ export default function DirectMessagesSidebar({
                 type="button"
                 role="menuitem"
                 onClick={() => {
+                  handleStartDirectMessageCall(dmContextMenu.conversationId);
+                }}
+              >
+                <span>Iniciar chamada</span>
+              </button>
+
+              <button
+                className="friends-sidebar__dm-context-menu-item"
+                type="button"
+                role="menuitem"
+                onClick={() => {
                   toggleFavoriteDirectMessage(dmContextMenu.conversationId);
                 }}
               >
@@ -3484,6 +3527,17 @@ export default function DirectMessagesSidebar({
             <div className="friends-sidebar__dm-context-menu-divider" role="separator" />
 
             <div className="friends-sidebar__dm-context-menu-group" role="none">
+              <button
+                className="friends-sidebar__dm-context-menu-item"
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  void handleUnfriendDirectMessageUser(dmContextMenu.userId);
+                }}
+              >
+                <span>Desfazer amizade</span>
+              </button>
+
               <button
                 className="friends-sidebar__dm-context-menu-item"
                 type="button"

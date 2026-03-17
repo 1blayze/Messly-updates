@@ -3529,6 +3529,13 @@ export default function AppShell() {
             setActiveDirectMessage(dm);
           }}
           onBlockDirectMessageUser={handleBlockTargetUser}
+          onUnfriendDirectMessageUser={async (targetUserId) => {
+            const matchingFriend = friends.find((friend) => friend.userId === targetUserId) ?? null;
+            if (!matchingFriend) {
+              return;
+            }
+            await handleUnfriend(matchingFriend);
+          }}
           onOpenFriends={() => {
             setActiveDirectMessage(null);
           }}

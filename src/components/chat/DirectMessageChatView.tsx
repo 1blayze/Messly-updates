@@ -86,6 +86,8 @@ const VOICE_GLOBAL_REJOIN_EVENT = "messly:voice-rejoin-request";
 const VOICE_GLOBAL_REJOIN_PENDING_ROOM_ID_KEY = "messly:voice-rejoin:pending-room-id";
 const DM_OPEN_FULL_PROFILE_EVENT = "messly:dm-open-full-profile";
 const DM_OPEN_FULL_PROFILE_PENDING_CONVERSATION_KEY = "messly:dm-open-full-profile:conversation-id";
+const DM_START_VOICE_CALL_EVENT = "messly:dm-start-voice-call";
+const DM_START_VOICE_CALL_PENDING_CONVERSATION_KEY = "messly:dm-start-voice-call:conversation-id";
 
 const GROUP_BREAK_MS = 5 * 60 * 1000;
 const AUTO_SCROLL_THRESHOLD_PX = 120;
@@ -6442,6 +6444,19 @@ export default function DirectMessageChatView({
     };
 
     window.addEventListener(VOICE_GLOBAL_REJOIN_EVENT, handleVoiceRejoinRequest as EventListener);
+    const handleStartVoiceCallRequest = (event: Event): void => {
+      const customEvent = event as CustomEvent<{ conversationId?: string | null }>;
+      const requestedConversationId = String(customEvent.detail?.conversationId ?? "").trim();
+      if (!requestedConversationId || requestedConversationId !== conversationId) {
+        return;
+      }
+      if (isVoiceCallActiveRef.current || isVoiceCallConnectingRef.current) {
+        return;
+      }
+      startVoiceCallWithRoomId(null, { origin: "outgoing" });
+    };
+
+    window.addEventListener(DM_START_VOICE_CALL_EVENT, handleStartVoiceCallRequest as EventListener);
 
     const pendingRoomId = sessionStorage.getItem(VOICE_GLOBAL_REJOIN_PENDING_ROOM_ID_KEY);
     if (pendingRoomId) {
@@ -6453,10 +6468,21 @@ export default function DirectMessageChatView({
       );
     }
 
+    const pendingConversationId = sessionStorage.getItem(DM_START_VOICE_CALL_PENDING_CONVERSATION_KEY);
+    if (pendingConversationId && pendingConversationId === conversationId) {
+      sessionStorage.removeItem(DM_START_VOICE_CALL_PENDING_CONVERSATION_KEY);
+      handleStartVoiceCallRequest(
+        new CustomEvent<{ conversationId: string }>(DM_START_VOICE_CALL_EVENT, {
+          detail: { conversationId: pendingConversationId },
+        }),
+      );
+    }
+
     return () => {
       window.removeEventListener(VOICE_GLOBAL_REJOIN_EVENT, handleVoiceRejoinRequest as EventListener);
+      window.removeEventListener(DM_START_VOICE_CALL_EVENT, handleStartVoiceCallRequest as EventListener);
     };
-  }, [startVoiceCallWithRoomId, voiceRoomId]);
+  }, [conversationId, startVoiceCallWithRoomId, voiceRoomId]);
 
   const handleToggleVoiceCall = useCallback(() => {
     if (isVoiceCallActive || isVoiceCallConnecting) {

@@ -357,13 +357,13 @@
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  color: var(--button-ghost-text-hover);
 }
 
 .friends-sidebar__dm-favorite-icon {
   width: 18px;
   height: 18px;
   display: block;
+  opacity: 0.86;
 }
 
 .friends-sidebar__dm-unread {
@@ -420,8 +420,8 @@
 .friends-sidebar__dm-context-menu {
   position: fixed;
   z-index: 35;
-  min-width: 188px;
-  max-width: 196px;
+  min-width: 214px;
+  max-width: 214px;
   padding: 8px;
   border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: 8px;
@@ -455,6 +455,14 @@
   font-weight: 500;
   text-align: left;
   cursor: pointer;
+}
+
+.friends-sidebar__dm-context-menu-item > span {
+  width: 100%;
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .friends-sidebar__dm-context-menu-item:hover,
