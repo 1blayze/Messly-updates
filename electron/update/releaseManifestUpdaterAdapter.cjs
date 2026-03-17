@@ -72,12 +72,30 @@ function toSafeFileName(fileNameRaw, fallback) {
   return fileName.replace(/[<>:"/\\|?*\u0000-\u001F]+/g, "_");
 }
 
+function resolveLocalAppDataPath(app) {
+  const envLocalAppData = safeString(process.env.LOCALAPPDATA);
+  if (envLocalAppData) {
+    return envLocalAppData;
+  }
+  try {
+    const appDataPath = safeString(app?.getPath?.("appData"));
+    if (!appDataPath) {
+      return null;
+    }
+    // appData on Windows points to Roaming; launcher lives in LocalAppData.
+    return path.resolve(appDataPath, "..", "Local");
+  } catch {
+    return null;
+  }
+}
+
 function resolveLauncherExecutablePath(app) {
+  const localAppDataPath = resolveLocalAppDataPath(app);
   const envLauncherPath = safeString(process.env.MESSLY_LAUNCHER_PATH);
   const candidates = [
     envLauncherPath,
     path.resolve(path.dirname(process.execPath), "..", "MesslyLauncher.exe"),
-    path.join(app.getPath("localAppData"), "Messly", "MesslyLauncher.exe"),
+    localAppDataPath ? path.join(localAppDataPath, "Messly", "MesslyLauncher.exe") : null,
   ].filter(Boolean);
 
   for (const candidate of candidates) {
@@ -406,6 +424,10 @@ async function downloadFileWithProgress(url, outputPath, timeoutMs, onProgress) 
   } finally {
     clearTimeout(timer);
   }
+}
+
+function escapePowerShellSingleQuoted(value) {
+  return String(value ?? "").replace(/'/g, "''");
 }
 
 function createReleaseManifestUpdaterAdapter({ app, shell, managedByExternalLauncher = false }) {
@@ -758,17 +780,48 @@ function createReleaseManifestUpdaterAdapter({ app, shell, managedByExternalLaun
       args: ["--launcher"],
     });
 
-    const child = spawn(launcherPath, ["--launcher"], {
-      cwd: path.dirname(launcherPath),
-      detached: true,
-      stdio: "ignore",
-      windowsHide: false,
-      env: {
-        ...process.env,
-        ELECTRON_RUN_AS_NODE: "",
-      },
-    });
-    child.unref();
+    if (process.platform === "win32") {
+      const currentPid = process.pid;
+      const launcherPathPs = escapePowerShellSingleQuoted(launcherPath);
+      const command = [
+        `while (Get-Process -Id ${currentPid} -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 250 }`,
+        `Start-Process -FilePath '${launcherPathPs}' -ArgumentList '--launcher'`,
+      ].join("; ");
+      const child = spawn("powershell.exe", [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-WindowStyle",
+        "Hidden",
+        "-Command",
+        command,
+      ], {
+        cwd: path.dirname(launcherPath),
+        detached: true,
+        stdio: "ignore",
+        windowsHide: true,
+        env: {
+          ...process.env,
+          ELECTRON_RUN_AS_NODE: "",
+        },
+      });
+      child.unref();
+      appendUpdateLog("Scheduled launcher start after runtime process exit", {
+        pid: currentPid,
+      });
+    } else {
+      const child = spawn(launcherPath, ["--launcher"], {
+        cwd: path.dirname(launcherPath),
+        detached: true,
+        stdio: "ignore",
+        windowsHide: false,
+        env: {
+          ...process.env,
+          ELECTRON_RUN_AS_NODE: "",
+        },
+      });
+      child.unref();
+    }
 
     setState({
       status: "relaunching",

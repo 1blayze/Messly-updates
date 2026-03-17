@@ -47,13 +47,18 @@ function isUpdateActionVisible(status: AppUpdaterStatus): boolean {
     status === "ready" ||
     status === "installing" ||
     status === "applying" ||
-    status === "relaunching"
+    status === "relaunching" ||
+    status === "error" ||
+    status === "failed"
   );
 }
 
 function getUpdaterTooltip(state: AppUpdaterState | null, isActionPending: boolean, localError: string | null): string {
   if (localError) {
     return localError;
+  }
+  if (state?.errorMessage) {
+    return state.errorMessage;
   }
   if (isActionPending) {
     return "Preparando atualização...";
