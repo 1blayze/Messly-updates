@@ -739,6 +739,42 @@ export async function endLoginSessionById(sessionId: string): Promise<void> {
   }
 }
 
+async function endAllOtherLoginSessionsFallback(currentSessionIdRaw: string | null): Promise<number> {
+  const currentSessionId = normalizeSessionUuid(currentSessionIdRaw);
+  const uid = getCurrentAuthUid();
+  const result = await listActiveLoginSessionsDetailed();
+  const currentSessionCandidates = new Set(
+    [currentSessionId, getCurrentAuthSessionId(), cachedAuthSessionId]
+      .map((value) => normalizeSessionUuid(value))
+      .filter((value): value is string => Boolean(value)),
+  );
+
+  const sessionsToEnd = result.sessions.filter((session) => {
+    const sessionId = normalizeSessionUuid(session.id);
+    const recordId = normalizeSessionUuid(session.recordId);
+    return !currentSessionCandidates.has(sessionId ?? "") && !currentSessionCandidates.has(recordId ?? "");
+  });
+
+  if (sessionsToEnd.length === 0) {
+    invalidateListSessionsCache(uid);
+    return 0;
+  }
+
+  let endedCount = 0;
+  for (const session of sessionsToEnd) {
+    const targetSessionId = normalizeSessionUuid(session.recordId) ?? normalizeSessionUuid(session.id);
+    if (!targetSessionId) {
+      continue;
+    }
+
+    await endLoginSessionById(targetSessionId);
+    endedCount += 1;
+  }
+
+  invalidateListSessionsCache(uid);
+  return endedCount;
+}
+
 export async function endAllOtherLoginSessions(): Promise<number> {
   if (isSessionsEdgeUnauthorizedCooldownActive()) {
     return 0;
@@ -806,6 +842,23 @@ export async function endAllOtherLoginSessions(): Promise<number> {
       || message.includes("payload");
   };
 
+  const shouldFallbackToEndById = (error: unknown): boolean => {
+    if (isInvalidPayloadError(error)) {
+      return true;
+    }
+
+    if (!(error instanceof EdgeFunctionError)) {
+      return false;
+    }
+
+    if (Number(error.status ?? 0) === 404) {
+      return true;
+    }
+
+    const code = String(error.code ?? "").trim().toUpperCase();
+    return code === "NOT_FOUND" || code === "HTTP_404";
+  };
+
   let lastError: unknown = null;
   for (let index = 0; index < payloadVariants.length; index += 1) {
     const payload = payloadVariants[index];
@@ -839,14 +892,18 @@ export async function endAllOtherLoginSessions(): Promise<number> {
         clearLocalSessionIfInvalid(error, uid);
         return 0;
       }
+
+      if (shouldFallbackToEndById(error)) {
+        return endAllOtherLoginSessionsFallback(currentSessionId);
+      }
+
       throw error;
     }
   }
 
   if (lastError) {
-    if (isInvalidPayloadError(lastError)) {
-      invalidateListSessionsCache(uid);
-      return 0;
+    if (shouldFallbackToEndById(lastError)) {
+      return endAllOtherLoginSessionsFallback(currentSessionId);
     }
     throw lastError;
   }

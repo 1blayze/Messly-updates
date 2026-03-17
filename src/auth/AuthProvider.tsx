@@ -794,15 +794,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       await applySessionAndProfile(nextSession);
       setHasSessionHint(true);
       setSessionHintResolved(true);
-      const ensuredProfile = await withTimeout(
-        fetchProfileById(signedUser.uid).catch(() => null),
-        AUTH_PROFILE_FETCH_TIMEOUT_MS,
-        "Tempo limite ao buscar perfil autenticado.",
-      ).catch(() => null);
       syncKnownAccount(signedUser);
       setError(null);
       dispatch(authActions.authErrorChanged(null));
-      return { user: signedUser, profile: ensuredProfile };
+      return { user: signedUser, profile: null };
     },
     [applySessionAndProfile, dispatch, syncKnownAccount],
   );

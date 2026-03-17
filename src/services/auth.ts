@@ -215,10 +215,26 @@ function clearSupabaseLocalSessionStorage(): void {
 }
 
 async function clearSessionState(): Promise<void> {
+  let shouldSignOutLocal = false;
+  const inMemorySession = getInMemorySession();
+  if (inMemorySession?.access_token || inMemorySession?.refresh_token) {
+    shouldSignOutLocal = true;
+  } else {
+    try {
+      const currentClientSession = await supabase.auth.getSession();
+      shouldSignOutLocal = Boolean(
+        currentClientSession.data.session?.access_token || currentClientSession.data.session?.refresh_token,
+      );
+    } catch {
+      shouldSignOutLocal = false;
+    }
+  }
+
   clearAccessToken();
   lastValidatedEdgeAccessToken = null;
-  clearSupabaseLocalSessionStorage();
-  await supabase.auth.signOut({ scope: "local" }).catch(() => undefined);
+  if (shouldSignOutLocal) {
+    await supabase.auth.signOut({ scope: "local" }).catch(() => undefined);
+  }
   clearSupabaseLocalSessionStorage();
   await removeSecureItem(LEGACY_SESSION_STORAGE_KEY).catch(() => undefined);
   await clearRefreshToken();
@@ -664,15 +680,8 @@ class AuthService {
         session = await signInWithDirectSupabase(email, password);
       }
     } catch (error) {
-      // Se a API própria negar (401-403), tentamos Supabase direto antes de desistir.
       if (error instanceof AuthApiError && error.status >= 400 && error.status <= 403) {
-        try {
-          const direct = await signInWithDirectSupabase(email, password);
-          await setPendingVerificationState(null);
-          return direct;
-        } catch {
-          // segue para fallback padrão
-        }
+        throw error;
       }
 
       const canFallbackToDirectSupabase =

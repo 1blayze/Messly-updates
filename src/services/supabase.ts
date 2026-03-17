@@ -42,15 +42,11 @@ export async function getSupabaseFunctionHeaders(
 
   if (options.requireAuth) {
     const validatedAccessToken = String(await authService.getValidatedEdgeAccessToken() ?? "").trim();
-    if (!validatedAccessToken) {
-      return {
-        apikey: supabaseAnonKey,
-      };
-    }
+    const currentAccessToken = validatedAccessToken || String(await authService.getCurrentAccessToken() ?? "").trim();
 
     return {
       apikey: supabaseAnonKey,
-      authorization: `Bearer ${validatedAccessToken}`,
+      ...(currentAccessToken ? { authorization: `Bearer ${currentAccessToken}` } : {}),
     };
   }
 

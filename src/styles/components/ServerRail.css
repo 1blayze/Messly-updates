@@ -133,8 +133,9 @@
 }
 
 .server-rail__item-button:focus-visible {
-  outline: 2px solid rgba(217, 232, 255, 0.48);
-  outline-offset: 2px;
+  outline: none !important;
+  border-color: rgba(217, 232, 255, 0.58);
+  box-shadow: inset 0 0 0 2px rgba(217, 232, 255, 0.42) !important;
 }
 
 .server-rail__item-icon {

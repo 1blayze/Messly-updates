@@ -79,6 +79,34 @@ async function updatePassword(_user: unknown, password: string): Promise<void> {
 async function verifyBeforeUpdateEmail(_user: unknown, email: string): Promise<void> {
   await supabase.auth.updateUser({ email });
 }
+async function syncCurrentAuthIdentityMetadata(params: {
+  displayName?: string | null;
+  username?: string | null;
+}): Promise<void> {
+  const displayName = String(params.displayName ?? "").trim();
+  const username = String(params.username ?? "")
+    .trim()
+    .toLowerCase();
+
+  const data: Record<string, string> = {};
+  if (displayName) {
+    data.display_name = displayName;
+    data.displayName = displayName;
+    data.name = displayName;
+  }
+  if (username) {
+    data.username = username;
+  }
+
+  if (Object.keys(data).length === 0) {
+    return;
+  }
+
+  const { error } = await supabase.auth.updateUser({ data });
+  if (error) {
+    throw error;
+  }
+}
 async function deleteUser(_user: { id?: string } | null): Promise<void> {
   const uid = _user?.id;
   if (uid) {
@@ -4141,6 +4169,14 @@ export default function AppSettingsView({
         writableUserId = refreshedUserId;
         persistedUpdates = await updateUserProfileWithSchemaFallback(writableUserId, savePayload);
       }
+      await syncCurrentAuthIdentityMetadata({
+        displayName: nextDisplayName,
+        username: safeUsername,
+      }).catch((error) => {
+        if (import.meta.env.DEV) {
+          console.warn("[profile:sync-auth-metadata]", error);
+        }
+      });
       const didPersistBannerColor = Object.prototype.hasOwnProperty.call(persistedUpdates, "banner_color");
       const didPersistProfileThemePrimaryColor = Object.prototype.hasOwnProperty.call(
         persistedUpdates,
@@ -4930,6 +4966,14 @@ export default function AppSettingsView({
       const persistedUpdates = await updateUserProfileWithSchemaFallback(writableUserId, {
         username: nextUsername,
         username_changed_at: changedAt,
+      });
+      await syncCurrentAuthIdentityMetadata({
+        displayName: safeDisplayName,
+        username: nextUsername,
+      }).catch((error) => {
+        if (import.meta.env.DEV) {
+          console.warn("[profile:sync-auth-metadata]", error);
+        }
       });
       const didPersistUsernameChangedAt = Object.prototype.hasOwnProperty.call(persistedUpdates, "username_changed_at");
       const effectiveUsernameChangedAt = changedAt;
