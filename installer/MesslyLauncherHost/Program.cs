@@ -166,10 +166,8 @@ static async Task RunBootstrapModeAsync(
   {
     progressSink?.Report(new InstallerProgressState("Starting Messly", 1, false));
     await Task.Delay(300);
-    logger.Info("Starting launcher after bootstrap install.");
-    var launcherArgs = new List<string> { HostModeArg };
-    launcherArgs.AddRange(options.ForwardArguments);
-    StartProcess(paths.LauncherExecutablePath, launcherArgs, paths.RootDir, env: null);
+    logger.Info("Starting runtime directly after bootstrap install.");
+    LaunchInstalledRuntime(paths, options.ForwardArguments, logger);
   }
 }
 
@@ -210,17 +208,7 @@ static async Task RunLauncherModeAsync(
 
   runtimeExecutablePath ??= ResolveRuntimeExecutable(paths);
   appEntryPath ??= ResolveAppEntry(paths);
-  var runtimeArgs = new List<string> { appEntryPath };
-  runtimeArgs.AddRange(options.ForwardArguments);
-
-  var launchEnv = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-  {
-    ["MESSLY_EXTERNAL_LAUNCHER"] = "1",
-    ["AUTO_UPDATE_BLOCK_STARTUP"] = "0",
-    ["AUTO_UPDATE_INSTALL_ON_STARTUP"] = "0",
-  };
-  logger.Info($"Launching runtime: {runtimeExecutablePath} {appEntryPath}");
-  StartProcess(runtimeExecutablePath, runtimeArgs, paths.RootDir, launchEnv);
+  LaunchInstalledRuntime(paths, options.ForwardArguments, logger, runtimeExecutablePath, appEntryPath);
 }
 
 static void SelfInstallLauncher(InstallPaths paths, LineLogger logger)
@@ -392,6 +380,29 @@ static string? TryResolveAppEntry(InstallPaths paths)
   {
     return null;
   }
+}
+
+static void LaunchInstalledRuntime(
+  InstallPaths paths,
+  IReadOnlyList<string> forwardArguments,
+  LineLogger logger,
+  string? resolvedRuntimeExecutablePath = null,
+  string? resolvedAppEntryPath = null
+)
+{
+  var runtimeExecutablePath = resolvedRuntimeExecutablePath ?? ResolveRuntimeExecutable(paths);
+  var appEntryPath = resolvedAppEntryPath ?? ResolveAppEntry(paths);
+  var runtimeArgs = new List<string> { appEntryPath };
+  runtimeArgs.AddRange(forwardArguments);
+
+  var launchEnv = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+  {
+    ["MESSLY_EXTERNAL_LAUNCHER"] = "1",
+    ["AUTO_UPDATE_BLOCK_STARTUP"] = "0",
+    ["AUTO_UPDATE_INSTALL_ON_STARTUP"] = "0",
+  };
+  logger.Info($"Launching runtime: {runtimeExecutablePath} {appEntryPath}");
+  StartProcess(runtimeExecutablePath, runtimeArgs, paths.RootDir, launchEnv);
 }
 
 static void StartProcess(string fileName, IEnumerable<string> arguments, string workingDirectory, IReadOnlyDictionary<string, string>? env)
