@@ -2,14 +2,15 @@ import { useEffect, useMemo, useState } from "react";
 import AvatarImage from "../ui/AvatarImage";
 import Modal from "../ui/Modal";
 import { getAvatarUrl, getNameAvatarUrl, isDefaultAvatarUrl } from "../../services/cdn/mediaUrls";
-import { listFriendRequests } from "../../services/friends/friendRequestsApi";
 import { supabase } from "../../services/supabase";
 import { buildGroupDmName } from "../../services/chat/groupDm";
+import { useAppSelector } from "../../stores/store";
 import "../../styles/components/CreateGroupDmModal.css";
 
 const MAX_GROUP_DM_MEMBERS = 10;
 const MAX_GROUP_DM_OTHER_PARTICIPANTS = MAX_GROUP_DM_MEMBERS - 1;
 const PROFILE_SELECT_COLUMNS = "id,username,display_name,avatar_url,avatar_key,avatar_hash";
+const FRIEND_CANDIDATES_LOAD_TIMEOUT_MS = 7_000;
 
 interface GroupDmCandidate {
   userId: string;
@@ -25,6 +26,11 @@ interface ProfileRow {
   avatar_url?: string | null;
   avatar_key?: string | null;
   avatar_hash?: string | null;
+}
+
+interface ConversationFriendLookupRow {
+  user1_id?: string | null;
+  user2_id?: string | null;
 }
 
 interface CreateGroupDmModalProps {
@@ -68,6 +74,24 @@ async function resolveCandidateAvatar(profile: ProfileRow, fallbackName: string)
   }
 }
 
+async function withTimeout<T>(promise: PromiseLike<T>, timeoutMs: number, message: string): Promise<T> {
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timeoutHandle = setTimeout(() => {
+          reject(new Error(message));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+  }
+}
+
 export default function CreateGroupDmModal({
   isOpen,
   currentUserId,
@@ -80,6 +104,13 @@ export default function CreateGroupDmModal({
   const [isLoadingCandidates, setIsLoadingCandidates] = useState(false);
   const [isCreatingGroup, setIsCreatingGroup] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const cachedAcceptedFriendIds = useAppSelector((state) =>
+    Object.keys(state.friends.relationships)
+      .map((userId) => String(userId ?? "").trim())
+      .filter((userId) => Boolean(userId))
+      .sort(),
+  );
+  const cachedProfileEntities = useAppSelector((state) => state.profiles.entities);
 
   useEffect(() => {
     if (!isOpen) {
@@ -105,24 +136,42 @@ export default function CreateGroupDmModal({
 
     void (async () => {
       try {
-        const acceptedRequests = await listFriendRequests("accepted", normalizedCurrentUserId);
-        const friendIds = Array.from(
-          new Set(
-            acceptedRequests
-              .map((request) => {
-                const requesterId = String(request.requester_id ?? "").trim();
-                const addresseeId = String(request.addressee_id ?? "").trim();
-                if (requesterId === normalizedCurrentUserId) {
-                  return addresseeId;
-                }
-                if (addresseeId === normalizedCurrentUserId) {
-                  return requesterId;
-                }
-                return "";
-              })
-              .filter((userId) => Boolean(userId) && userId !== normalizedCurrentUserId),
-          ),
+        const friendIdsSet = new Set(
+          cachedAcceptedFriendIds.filter((userId) => userId !== normalizedCurrentUserId),
         );
+
+        if (friendIdsSet.size === 0) {
+          const conversationsResponse = await withTimeout<{
+            data: ConversationFriendLookupRow[] | null;
+            error: { message?: string } | null;
+          }>(
+            supabase
+              .from("conversations")
+              .select("user1_id,user2_id")
+              .or(`user1_id.eq.${normalizedCurrentUserId},user2_id.eq.${normalizedCurrentUserId}`),
+            FRIEND_CANDIDATES_LOAD_TIMEOUT_MS,
+            "Tempo limite ao carregar conversas para montar a lista de amigos.",
+          );
+          if (conversationsResponse.error) {
+            throw conversationsResponse.error;
+          }
+
+          (Array.isArray(conversationsResponse.data)
+            ? (conversationsResponse.data as ConversationFriendLookupRow[])
+            : []
+          ).forEach((conversation) => {
+            const user1Id = String(conversation.user1_id ?? "").trim();
+            const user2Id = String(conversation.user2_id ?? "").trim();
+            if (user1Id && user1Id !== normalizedCurrentUserId) {
+              friendIdsSet.add(user1Id);
+            }
+            if (user2Id && user2Id !== normalizedCurrentUserId) {
+              friendIdsSet.add(user2Id);
+            }
+          });
+        }
+
+        const friendIds = Array.from(friendIdsSet);
 
         if (friendIds.length === 0) {
           if (!isDisposed) {
@@ -131,35 +180,57 @@ export default function CreateGroupDmModal({
           return;
         }
 
-        const { data, error } = await supabase
-          .from("profiles")
-          .select(PROFILE_SELECT_COLUMNS)
-          .in("id", friendIds);
-
-        if (error) {
-          throw error;
-        }
-
-        const profiles = (Array.isArray(data) ? data : []) as ProfileRow[];
         const profilesByUserId = new Map<string, ProfileRow>();
-        profiles.forEach((profile) => {
-          profilesByUserId.set(profile.id, profile);
+        friendIds.forEach((friendId) => {
+          const cachedProfile = cachedProfileEntities[friendId];
+          if (!cachedProfile) {
+            return;
+          }
+          profilesByUserId.set(friendId, {
+            id: cachedProfile.id,
+            username: cachedProfile.username,
+            display_name: cachedProfile.displayName,
+            avatar_url: cachedProfile.avatarUrl,
+            avatar_key: null,
+            avatar_hash: null,
+          });
         });
+
+        const missingProfileIds = friendIds.filter((friendId) => !profilesByUserId.has(friendId));
+        if (missingProfileIds.length > 0) {
+          const profilesResponse = await withTimeout<{
+            data: ProfileRow[] | null;
+            error: { message?: string } | null;
+          }>(
+            supabase
+              .from("profiles")
+              .select(PROFILE_SELECT_COLUMNS)
+              .in("id", missingProfileIds),
+            FRIEND_CANDIDATES_LOAD_TIMEOUT_MS,
+            "Tempo limite ao carregar perfis dos amigos.",
+          );
+          if (profilesResponse.error) {
+            throw profilesResponse.error;
+          }
+
+          (Array.isArray(profilesResponse.data) ? profilesResponse.data : []).forEach((profile) => {
+            profilesByUserId.set(profile.id, profile);
+          });
+        }
 
         const resolvedCandidates = await Promise.all(
           friendIds.map(async (friendId) => {
             const profile = profilesByUserId.get(friendId);
-            if (!profile) {
-              return null;
-            }
-
-            const username = String(profile.username ?? "").trim() || "usuario";
-            const displayName = normalizeCandidateName(profile.display_name, username);
+            const username = String(profile?.username ?? "").trim() || `usuario_${friendId.slice(0, 4)}`;
+            const displayName = normalizeCandidateName(profile?.display_name, username);
+            const fallbackAvatar = getNameAvatarUrl(displayName || username);
             return {
               userId: friendId,
               username,
               displayName,
-              avatarSrc: await resolveCandidateAvatar(profile, displayName || username),
+              avatarSrc: profile
+                ? await resolveCandidateAvatar(profile, displayName || username)
+                : fallbackAvatar,
             } satisfies GroupDmCandidate;
           }),
         );
@@ -189,7 +260,7 @@ export default function CreateGroupDmModal({
     return () => {
       isDisposed = true;
     };
-  }, [currentUserId, isOpen]);
+  }, [cachedAcceptedFriendIds, cachedProfileEntities, currentUserId, isOpen]);
 
   const normalizedSearchTerm = searchTerm.trim().toLowerCase();
   const selectedCandidates = useMemo(
