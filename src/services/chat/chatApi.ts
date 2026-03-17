@@ -444,6 +444,23 @@ function isFallbackEligibleChatMessagesError(error: unknown): boolean {
   );
 }
 
+function isForbiddenListChatMessagesError(error: unknown): boolean {
+  if (!(error instanceof EdgeFunctionError) || error.status !== 403) {
+    return false;
+  }
+
+  const code = String(error.code ?? "").trim().toUpperCase();
+  const message = String(error.message ?? "").trim().toLowerCase();
+  return (
+    code === "FORBIDDEN" ||
+    code === "CONVERSATION_FORBIDDEN" ||
+    message.includes("forbidden") ||
+    message.includes("sem permiss") ||
+    message.includes("sem autoriz") ||
+    message.includes("permission")
+  );
+}
+
 function createUnauthenticatedChatMessagesError(): EdgeFunctionError {
   return new EdgeFunctionError("Sessao invalida ou expirada.", 401, "UNAUTHENTICATED");
 }
@@ -1407,8 +1424,11 @@ export async function listChatMessages(params: {
       retries: 1,
       timeoutMs: 20_000,
     });
+    clearEdgeListMessagesUnauthorizedBypass();
   } catch (error) {
-    if (isUnauthorizedChatMessagesError(error)) {
+    const unauthorized = isUnauthorizedChatMessagesError(error);
+    const forbidden = isForbiddenListChatMessagesError(error);
+    if (unauthorized || forbidden) {
       activateEdgeListMessagesUnauthorizedBypass();
       try {
         response = await listChatMessagesDirect(params);
@@ -1434,7 +1454,6 @@ export async function listChatMessages(params: {
     }
   }
 
-  clearEdgeListMessagesUnauthorizedBypass();
   clearInitialMessagesUnauthorizedCooldown(params.conversationId);
 
   if (!params.cursor) {

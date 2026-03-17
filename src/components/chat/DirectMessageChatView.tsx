@@ -4330,6 +4330,12 @@ export default function DirectMessageChatView({
     }
   }, [consumeVoiceSignalMessage, conversationId, isConversationContextActive, markConversationAsRead]);
 
+  const loadConversationMessagesRef = useRef(loadConversationMessages);
+
+  useEffect(() => {
+    loadConversationMessagesRef.current = loadConversationMessages;
+  }, [loadConversationMessages]);
+
   const loadOlderMessages = useCallback(async (): Promise<void> => {
     if (!nextCursor || isLoadingOlderRef.current || !hasMoreBefore) {
       return;
@@ -4563,7 +4569,7 @@ export default function DirectMessageChatView({
       try {
         do {
           queued = false;
-          await loadConversationMessages(reason);
+          await loadConversationMessagesRef.current(reason);
         } while (queued && isMounted);
       } finally {
         inFlight = false;
@@ -4604,7 +4610,7 @@ export default function DirectMessageChatView({
       window.removeEventListener("focus", handleFocus);
       document.removeEventListener("visibilitychange", handleVisibility);
     };
-  }, [conversationId, loadConversationMessages]);
+  }, [conversationId]);
 
   useEffect(() => {
     let disposed = false;
