@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { RealtimeChannel, RealtimePostgresChangesPayload } from "@supabase/supabase-js";
 import { supabase } from "../services/supabase";
 import type { ChatMessageType } from "../services/chat/chatApi";
+import { getSchemaCapability, setSchemaCapability } from "../services/database/schemaCapabilities";
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CONVERSATIONS_QUERY_VERSION = "v2";
 const CONVERSATION_SELECT_COLUMNS = "id,type,created_by,name,avatar_url,user1_id,user2_id,created_at";
@@ -192,14 +193,33 @@ function normalizeMessageInsertEvent(record: MessageRecord | null | undefined): 
 
 async function fetchConversations(_currentUserId: string): Promise<ConversationRealtimeRow[]> {
   let rows: ConversationRecord[] = [];
-  const primary = await supabase
-    .from("conversations")
-    .select(CONVERSATION_SELECT_COLUMNS)
-    .order("created_at", { ascending: false });
-  if (primary.error) {
-    if (!isConversationSchemaCompatibilityError(primary.error)) {
-      throw primary.error;
+  let shouldUseLegacyColumns = false;
+
+  const conversationsExtendedColumnsSupported = getSchemaCapability("conversations_extended_columns");
+  if (conversationsExtendedColumnsSupported !== false) {
+    // Optimistically mark as unsupported while probing to avoid concurrent duplicate probes.
+    if (conversationsExtendedColumnsSupported === null) {
+      setSchemaCapability("conversations_extended_columns", false);
     }
+    const primary = await supabase
+      .from("conversations")
+      .select(CONVERSATION_SELECT_COLUMNS)
+      .order("created_at", { ascending: false });
+    if (primary.error) {
+      if (!isConversationSchemaCompatibilityError(primary.error)) {
+        throw primary.error;
+      }
+      setSchemaCapability("conversations_extended_columns", false);
+      shouldUseLegacyColumns = true;
+    } else {
+      setSchemaCapability("conversations_extended_columns", true);
+      rows = Array.isArray(primary.data) ? (primary.data as ConversationRecord[]) : [];
+    }
+  } else {
+    shouldUseLegacyColumns = true;
+  }
+
+  if (shouldUseLegacyColumns) {
     const legacy = await supabase
       .from("conversations")
       .select(LEGACY_CONVERSATION_SELECT_COLUMNS)
@@ -208,9 +228,8 @@ async function fetchConversations(_currentUserId: string): Promise<ConversationR
       throw legacy.error;
     }
     rows = Array.isArray(legacy.data) ? (legacy.data as ConversationRecord[]) : [];
-  } else {
-    rows = Array.isArray(primary.data) ? (primary.data as ConversationRecord[]) : [];
   }
+
   const conversationIds = rows
     .map((row) => String(row.id ?? "").trim())
     .filter((conversationId) => Boolean(conversationId));

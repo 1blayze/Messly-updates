@@ -26,6 +26,7 @@ import { supabase } from "../../services/supabase";
 import { friendRequestsEnabled } from "../../services/friends/friendRequests";
 import { listFriendRequests } from "../../services/friends/friendRequestsApi";
 import { useConversationsRealtime, type ConversationMessageInsertEvent } from "../../hooks/useConversationsRealtime";
+import { getSchemaCapability, setSchemaCapability } from "../../services/database/schemaCapabilities";
 import {
   FRIEND_REQUEST_BLOCKED_EVENT,
   buildFriendRequestBlockedNotice,
@@ -1471,6 +1472,15 @@ async function loadConversationMemberMap(conversationIds: string[]): Promise<Map
     return new Map<string, string[]>();
   }
 
+  const conversationMembersTableSupported = getSchemaCapability("conversation_members_table");
+  if (conversationMembersTableSupported === false) {
+    return new Map<string, string[]>();
+  }
+  if (conversationMembersTableSupported === null) {
+    // Optimistically mark as unsupported while probing to avoid concurrent duplicate probes.
+    setSchemaCapability("conversation_members_table", false);
+  }
+
   const { data, error } = await supabase
     .from("conversation_members")
     .select("conversation_id,user_id")
@@ -1486,10 +1496,12 @@ async function loadConversationMemberMap(conversationIds: string[]): Promise<Map
       message.includes("conversation_members") ||
       details.includes("conversation_members")
     ) {
+      setSchemaCapability("conversation_members_table", false);
       return new Map<string, string[]>();
     }
     throw error;
   }
+  setSchemaCapability("conversation_members_table", true);
 
   const membersByConversationId = new Map<string, string[]>();
   (Array.isArray(data) ? (data as ConversationMemberRow[]) : []).forEach((row) => {
