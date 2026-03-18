@@ -569,6 +569,35 @@ class AuthService {
     };
   }
 
+  private async getAcceptedSessionCandidate(session: Session | null): Promise<Session | null> {
+    const accessToken = String(session?.access_token ?? "").trim();
+    if (!session || !isLikelyJwt(accessToken) || isSessionExpiringSoon(session)) {
+      return null;
+    }
+
+    if (this.canReuseValidatedEdgeAccessToken(accessToken)) {
+      return session;
+    }
+
+    try {
+      if (await this.isAccessTokenAcceptedBySupabase(accessToken)) {
+        return session;
+      }
+      return null;
+    } catch (error) {
+      if (isTransientNetworkFetchError(error)) {
+        edgeAccessTokenValidationCooldownUntilMs = Date.now() + EDGE_ACCESS_TOKEN_VALIDATION_FAILURE_COOLDOWN_MS;
+        return session;
+      }
+
+      if (isSupabaseSessionCorruptedError(error)) {
+        return null;
+      }
+
+      throw error;
+    }
+  }
+
   private async isAccessTokenAcceptedBySupabase(accessTokenRaw: string | null | undefined): Promise<boolean> {
     const accessToken = String(accessTokenRaw ?? "").trim();
     if (!isLikelyJwt(accessToken)) {
@@ -695,6 +724,23 @@ class AuthService {
       code,
       client: resolveClientDescriptor(),
     });
+
+    let remoteAccessTokenAccepted = false;
+    try {
+      remoteAccessTokenAccepted = await this.isAccessTokenAcceptedBySupabase(response.access_token);
+    } catch (validationError) {
+      if (isTransientNetworkFetchError(validationError)) {
+        remoteAccessTokenAccepted = true;
+      } else {
+        throw validationError;
+      }
+    }
+
+    if (!remoteAccessTokenAccepted) {
+      await clearSessionState().catch(() => undefined);
+      throw new Error("Nao foi possivel validar a sessao confirmada. Faca login novamente.");
+    }
+
     const session = await applyRemoteSession(response.access_token, response.refresh_token);
     await setPendingVerificationState(null);
     return session;
@@ -714,20 +760,22 @@ class AuthService {
         password,
         client: resolveClientDescriptor(),
       });
-      session = await applyRemoteSession(response.access_token, response.refresh_token);
 
       let remoteAccessTokenAccepted = true;
       try {
-        remoteAccessTokenAccepted = await this.isAccessTokenAcceptedBySupabase(session.access_token);
+        remoteAccessTokenAccepted = await this.isAccessTokenAcceptedBySupabase(response.access_token);
       } catch (validationError) {
         if (import.meta.env.DEV) {
           console.warn("[auth:login] validacao de token remota indisponivel", validationError);
         }
-        remoteAccessTokenAccepted = false;
+        remoteAccessTokenAccepted = isTransientNetworkFetchError(validationError);
       }
+
       if (!remoteAccessTokenAccepted) {
-        await clearSessionState();
+        await clearSessionState().catch(() => undefined);
         session = await signInWithDirectSupabase(email, password);
+      } else {
+        session = await applyRemoteSession(response.access_token, response.refresh_token);
       }
     } catch (error) {
       if (error instanceof AuthApiError && error.status >= 400 && error.status <= 403) {
@@ -803,13 +851,15 @@ class AuthService {
 
   async getCurrentSession(): Promise<Session | null> {
     const currentSession = getInMemorySession();
-    if (currentSession && isLikelyJwt(currentSession.access_token) && !isSessionExpiringSoon(currentSession)) {
-      return currentSession;
+    const acceptedInMemorySession = await this.getAcceptedSessionCandidate(currentSession);
+    if (acceptedInMemorySession) {
+      return acceptedInMemorySession;
     }
 
     const supabaseSession = await readSupabaseClientSession();
-    if (supabaseSession && isLikelyJwt(supabaseSession.access_token) && !isSessionExpiringSoon(supabaseSession)) {
-      return supabaseSession;
+    const acceptedClientSession = await this.getAcceptedSessionCandidate(supabaseSession);
+    if (acceptedClientSession) {
+      return acceptedClientSession;
     }
 
     const refreshToken =
@@ -824,12 +874,6 @@ class AuthService {
   }
 
   async getCurrentAccessToken(): Promise<string | null> {
-    const currentSession = getInMemorySession();
-    const currentAccessToken = String(currentSession?.access_token ?? "").trim();
-    if (currentAccessToken && isLikelyJwt(currentAccessToken) && !isSessionExpiringSoon(currentSession)) {
-      return currentAccessToken;
-    }
-
     const session = await this.getCurrentSession();
     const accessToken = String(session?.access_token ?? "").trim();
     return isLikelyJwt(accessToken) ? accessToken : null;

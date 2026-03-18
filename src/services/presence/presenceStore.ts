@@ -160,11 +160,23 @@ function ensureAuthStateSubscription(): void {
   }
 
   const authState = supabase.auth.onAuthStateChange((_event, session) => {
-    void syncRealtimeAuth(session?.access_token ?? null).catch((error) => {
-      logPresenceDebug("realtime_auth_refresh_failed", {
-        reason: error instanceof Error ? error.message : String(error),
+    if (!session?.access_token) {
+      void syncRealtimeAuth(null).catch((error) => {
+        logPresenceDebug("realtime_auth_refresh_failed", {
+          reason: error instanceof Error ? error.message : String(error),
+        });
       });
-    });
+      return;
+    }
+
+    void authService
+      .getValidatedEdgeAccessToken()
+      .then((token) => syncRealtimeAuth(token))
+      .catch((error) => {
+        logPresenceDebug("realtime_auth_refresh_failed", {
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      });
   });
   authStateSubscription = authState.data.subscription;
 }

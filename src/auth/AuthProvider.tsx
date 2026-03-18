@@ -610,8 +610,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       void (async () => {
+        const canonicalSession = nextSession?.access_token ? await authService.getCurrentSession() : null;
         await withTimeout(
-          applySessionAndProfile(nextSession),
+          applySessionAndProfile(canonicalSession),
           AUTH_APPLY_SESSION_TIMEOUT_MS,
           "Tempo limite ao atualizar sessao de autenticacao.",
         );
