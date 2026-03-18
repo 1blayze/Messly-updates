@@ -1,8 +1,9 @@
 import { HttpError } from "./http.ts";
 import { getSupabaseAdminClient } from "./supabaseAdmin.ts";
 
-interface ConversationMemberRow {
-  user_id?: string | null;
+interface ConversationRow {
+  user1_id?: string | null;
+  user2_id?: string | null;
 }
 
 interface ConversationParticipants {
@@ -33,12 +34,13 @@ function setCachedValue<T>(map: Map<string, CachedValue<T>>, key: string, value:
   map.set(key, { value, expiresAtMs: Date.now() + ttlMs });
 }
 
-function normalizeConversationParticipants(rows: ConversationMemberRow[] | null | undefined): ConversationParticipants | null {
+function normalizeConversationParticipants(row: ConversationRow | null | undefined): ConversationParticipants | null {
   const userIds = Array.from(
     new Set(
-      (Array.isArray(rows) ? rows : [])
-        .map((row) => String(row?.user_id ?? "").trim())
-        .filter((userId) => Boolean(userId)),
+      [
+        String(row?.user1_id ?? "").trim(),
+        String(row?.user2_id ?? "").trim(),
+      ].filter((userId) => Boolean(userId)),
     ),
   );
 
@@ -52,7 +54,7 @@ function normalizeConversationParticipants(rows: ConversationMemberRow[] | null 
 export async function resolveUserId(authUid: string | null | undefined): Promise<string> {
   const userId = String(authUid ?? "").trim();
   if (!userId) {
-    throw new HttpError(401, "UNAUTHENTICATED", "SessÃ£o nÃ£o identificada.");
+    throw new HttpError(401, "UNAUTHENTICATED", "SessÃƒÂ£o nÃƒÂ£o identificada.");
   }
   return userId;
 }
@@ -70,17 +72,18 @@ async function loadConversationParticipantsForMember(
 
   const supabase = getSupabaseAdminClient();
   const { data, error } = await supabase
-    .from("conversation_members")
-    .select("user_id")
-    .eq("conversation_id", conversationId);
+    .from("conversations")
+    .select("user1_id,user2_id")
+    .eq("id", conversationId)
+    .maybeSingle();
 
   if (error) {
-    throw new HttpError(500, "CONVERSATION_AUTH_FAILED", "Falha ao validar permissÃ£o da conversa.");
+    throw new HttpError(500, "CONVERSATION_AUTH_FAILED", "Falha ao validar permissÃƒÂ£o da conversa.");
   }
 
-  const participants = normalizeConversationParticipants(data as ConversationMemberRow[] | null | undefined);
+  const participants = normalizeConversationParticipants(data as ConversationRow | null | undefined);
   if (!participants || !participants.userIds.includes(userId)) {
-    throw new HttpError(403, "FORBIDDEN", "UsuÃ¡rio sem permissÃ£o para esta conversa.");
+    throw new HttpError(403, "FORBIDDEN", "UsuÃƒÂ¡rio sem permissÃƒÂ£o para esta conversa.");
   }
 
   setCachedValue(conversationMembershipCache, membershipCacheKey, true, MEMBERSHIP_CACHE_TTL_MS);
@@ -142,7 +145,7 @@ export async function assertConversationCanSendMessages(conversationId: string, 
 
   const [user1Id, user2Id] = participants.userIds;
   if (await areUserIdsBlocked(user1Id, user2Id)) {
-    throw new HttpError(403, "CONVERSATION_BLOCKED", "NÃ£o Ã© possÃ­vel enviar mensagem para este usuÃ¡rio.");
+    throw new HttpError(403, "CONVERSATION_BLOCKED", "NÃƒÂ£o ÃƒÂ© possÃƒÂ­vel enviar mensagem para este usuÃƒÂ¡rio.");
   }
 }
 

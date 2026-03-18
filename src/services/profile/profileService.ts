@@ -8,6 +8,7 @@ import {
   isUsernameAvailable,
 } from "../../shared/username";
 import { normalizeEmail } from "../usernameAvailability";
+import { getProfileById, getProfileByUsername } from "./profileReadApi";
 
 export interface ProfileRow {
   id: string;
@@ -42,12 +43,7 @@ export async function fetchProfileById(profileId: string): Promise<ProfileRow | 
     return null;
   }
 
-  const { data, error } = await supabase.from("profiles").select("*").eq("id", id).limit(1).maybeSingle();
-  if (error) {
-    throw error;
-  }
-
-  return (data as ProfileRow | null) ?? null;
+  return (await getProfileById(id)) as ProfileRow | null;
 }
 
 export async function fetchProfileByUsername(usernameRaw: string): Promise<ProfileRow | null> {
@@ -56,12 +52,7 @@ export async function fetchProfileByUsername(usernameRaw: string): Promise<Profi
     return null;
   }
 
-  const { data, error } = await supabase.from("profiles").select("*").eq("username", username).limit(1).maybeSingle();
-  if (error) {
-    throw error;
-  }
-
-  return (data as ProfileRow | null) ?? null;
+  return (await getProfileByUsername(username)) as ProfileRow | null;
 }
 
 async function insertProfile(payload: Partial<ProfileRow> & { id: string; username: string }): Promise<ProfileRow> {

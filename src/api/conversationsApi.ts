@@ -1,8 +1,9 @@
 import { supabase } from "./client";
+import { queryProfilesByIds } from "../services/profile/profileReadApi";
 import type { ConversationEntity } from "../stores/entities";
 import { getSchemaCapability, setSchemaCapability } from "../services/database/schemaCapabilities";
 
-export type ConversationType = "dm" | "group_dm";
+export type ConversationType = "dm";
 
 export interface ConversationParticipantProfile {
   id: string;
@@ -24,9 +25,6 @@ export interface ConversationParticipantProfile {
 export interface ConversationDetails {
   id: string;
   type: ConversationType;
-  createdBy: string | null;
-  name: string | null;
-  avatarUrl: string | null;
   user1Id: string | null;
   user2Id: string | null;
   createdAt: string | null;
@@ -37,17 +35,9 @@ export interface ConversationDetails {
 interface ConversationRow {
   id: string;
   type?: string | null;
-  created_by?: string | null;
-  name?: string | null;
-  avatar_url?: string | null;
   user1_id?: string | null;
   user2_id?: string | null;
   created_at: string | null;
-}
-
-interface ConversationMemberRow {
-  conversation_id?: string | null;
-  user_id?: string | null;
 }
 
 interface ConversationProfileRow {
@@ -67,11 +57,8 @@ interface ConversationProfileRow {
   created_at?: string | null;
 }
 
-const CONVERSATION_SELECT_COLUMNS =
-  "id,type,created_by,name,avatar_url,user1_id,user2_id,created_at";
+const CONVERSATION_SELECT_COLUMNS = "id,type,user1_id,user2_id,created_at";
 const LEGACY_CONVERSATION_SELECT_COLUMNS = "id,user1_id,user2_id,created_at";
-const CONVERSATION_PROFILE_SELECT_COLUMNS =
-  "id,username,display_name,avatar_url,avatar_key,avatar_hash,firebase_uid:id,about:bio,banner_color,profile_theme_primary_color,profile_theme_accent_color,banner_key,banner_hash,created_at";
 
 function isConversationSchemaCompatibilityError(error: unknown): boolean {
   if (!error || typeof error !== "object") {
@@ -88,168 +75,13 @@ function isConversationSchemaCompatibilityError(error: unknown): boolean {
   return (
     message.includes("conversations") &&
     (message.includes("column") || details.includes("column") || hint.includes("column")) &&
-    (
-      message.includes("type")
-      || message.includes("created_by")
-      || message.includes("avatar_url")
-      || message.includes("name")
-      || details.includes("type")
-      || details.includes("created_by")
-      || details.includes("avatar_url")
-      || details.includes("name")
-    )
-  );
-}
-
-function isMissingConversationMembersTableError(error: unknown): boolean {
-  if (!error || typeof error !== "object") {
-    return false;
-  }
-  const candidate = error as { code?: string; message?: string; details?: string };
-  const code = String(candidate.code ?? "").trim().toUpperCase();
-  const message = String(candidate.message ?? "").toLowerCase();
-  const details = String(candidate.details ?? "").toLowerCase();
-  return (
-    code === "42P01" ||
-    code === "PGRST205" ||
-    message.includes("conversation_members") ||
-    details.includes("conversation_members")
-  );
-}
-
-function isMissingCreateGroupDmRpcError(error: unknown): boolean {
-  if (!error || typeof error !== "object") {
-    return false;
-  }
-  const candidate = error as { code?: string; message?: string; details?: string; hint?: string };
-  const code = String(candidate.code ?? "").trim().toUpperCase();
-  const message = String(candidate.message ?? "").toLowerCase();
-  const details = String(candidate.details ?? "").toLowerCase();
-  const hint = String(candidate.hint ?? "").toLowerCase();
-  return (
-    code === "404" ||
-    code === "PGRST202" ||
-    code === "42883" ||
-    message.includes("create_group_dm") ||
-    details.includes("create_group_dm") ||
-    hint.includes("create_group_dm") ||
-    message.includes("function was not found") ||
-    details.includes("function was not found")
-  );
-}
-
-function isMissingUpdateGroupDmRpcError(error: unknown): boolean {
-  if (!error || typeof error !== "object") {
-    return false;
-  }
-  const candidate = error as { code?: string; message?: string; details?: string; hint?: string };
-  const code = String(candidate.code ?? "").trim().toUpperCase();
-  const message = String(candidate.message ?? "").toLowerCase();
-  const details = String(candidate.details ?? "").toLowerCase();
-  const hint = String(candidate.hint ?? "").toLowerCase();
-  return (
-    code === "404" ||
-    code === "PGRST202" ||
-    code === "42883" ||
-    message.includes("update_group_dm") ||
-    details.includes("update_group_dm") ||
-    hint.includes("update_group_dm") ||
-    message.includes("function was not found") ||
-    details.includes("function was not found")
-  );
-}
-
-function isMissingLeaveGroupDmRpcError(error: unknown): boolean {
-  if (!error || typeof error !== "object") {
-    return false;
-  }
-  const candidate = error as { code?: string; message?: string; details?: string; hint?: string };
-  const code = String(candidate.code ?? "").trim().toUpperCase();
-  const message = String(candidate.message ?? "").toLowerCase();
-  const details = String(candidate.details ?? "").toLowerCase();
-  const hint = String(candidate.hint ?? "").toLowerCase();
-  return (
-    code === "404" ||
-    code === "PGRST202" ||
-    code === "42883" ||
-    message.includes("leave_group_dm") ||
-    details.includes("leave_group_dm") ||
-    hint.includes("leave_group_dm") ||
-    message.includes("function was not found") ||
-    details.includes("function was not found")
-  );
-}
-
-function isMissingAddGroupDmMembersRpcError(error: unknown): boolean {
-  if (!error || typeof error !== "object") {
-    return false;
-  }
-  const candidate = error as { code?: string; message?: string; details?: string; hint?: string };
-  const code = String(candidate.code ?? "").trim().toUpperCase();
-  const message = String(candidate.message ?? "").toLowerCase();
-  const details = String(candidate.details ?? "").toLowerCase();
-  const hint = String(candidate.hint ?? "").toLowerCase();
-  return (
-    code === "404" ||
-    code === "PGRST202" ||
-    code === "42883" ||
-    message.includes("add_group_dm_members") ||
-    details.includes("add_group_dm_members") ||
-    hint.includes("add_group_dm_members") ||
-    message.includes("function was not found") ||
-    details.includes("function was not found")
-  );
-}
-
-function isMissingRemoveGroupDmMemberRpcError(error: unknown): boolean {
-  if (!error || typeof error !== "object") {
-    return false;
-  }
-  const candidate = error as { code?: string; message?: string; details?: string; hint?: string };
-  const code = String(candidate.code ?? "").trim().toUpperCase();
-  const message = String(candidate.message ?? "").toLowerCase();
-  const details = String(candidate.details ?? "").toLowerCase();
-  const hint = String(candidate.hint ?? "").toLowerCase();
-  return (
-    code === "404" ||
-    code === "PGRST202" ||
-    code === "42883" ||
-    message.includes("remove_group_dm_member") ||
-    details.includes("remove_group_dm_member") ||
-    hint.includes("remove_group_dm_member") ||
-    message.includes("function was not found") ||
-    details.includes("function was not found")
-  );
-}
-
-function isMissingTransferGroupDmOwnerRpcError(error: unknown): boolean {
-  if (!error || typeof error !== "object") {
-    return false;
-  }
-  const candidate = error as { code?: string; message?: string; details?: string; hint?: string };
-  const code = String(candidate.code ?? "").trim().toUpperCase();
-  const message = String(candidate.message ?? "").toLowerCase();
-  const details = String(candidate.details ?? "").toLowerCase();
-  const hint = String(candidate.hint ?? "").toLowerCase();
-  return (
-    code === "404" ||
-    code === "PGRST202" ||
-    code === "42883" ||
-    message.includes("transfer_group_dm_owner") ||
-    details.includes("transfer_group_dm_owner") ||
-    hint.includes("transfer_group_dm_owner") ||
-    message.includes("function was not found") ||
-    details.includes("function was not found")
+    (message.includes("type") || details.includes("type") || hint.includes("type"))
   );
 }
 
 function toNullableTrimmedString(value: unknown): string | null {
   const normalized = String(value ?? "").trim();
   return normalized || null;
-}
-
-function normalizeConversationType(value: unknown): ConversationType {
-  return String(value ?? "").trim().toLowerCase() === "group_dm" ? "group_dm" : "dm";
 }
 
 function uniqueParticipantIds(ids: Array<string | null | undefined>): string[] {
@@ -262,19 +94,39 @@ function uniqueParticipantIds(ids: Array<string | null | undefined>): string[] {
   );
 }
 
-function mapConversationRow(
-  row: ConversationRow,
-  participantIds: string[],
-): ConversationEntity {
-  const normalizedType = normalizeConversationType(row.type);
+function normalizeConversationRow(row: ConversationRow | null | undefined): ConversationRow | null {
+  const id = String(row?.id ?? "").trim();
+  const user1Id = String(row?.user1_id ?? "").trim() || null;
+  const user2Id = String(row?.user2_id ?? "").trim() || null;
+  if (!id || !user1Id || !user2Id) {
+    return null;
+  }
+  return {
+    id,
+    type: "dm",
+    user1_id: user1Id,
+    user2_id: user2Id,
+    created_at: toNullableTrimmedString(row?.created_at),
+  };
+}
+
+function isConversationForUser(row: ConversationRow | null | undefined, currentUserId: string): boolean {
+  const normalizedCurrentUserId = String(currentUserId ?? "").trim();
+  if (!normalizedCurrentUserId) {
+    return false;
+  }
+  return row?.user1_id === normalizedCurrentUserId || row?.user2_id === normalizedCurrentUserId;
+}
+
+function mapConversationRow(row: ConversationRow): ConversationEntity {
   return {
     id: row.id,
-    scopeType: normalizedType,
+    scopeType: "dm",
     scopeId: row.id,
-    participantIds,
-    name: toNullableTrimmedString(row.name),
-    avatarUrl: toNullableTrimmedString(row.avatar_url),
-    createdBy: toNullableTrimmedString(row.created_by),
+    participantIds: uniqueParticipantIds([row.user1_id, row.user2_id]),
+    name: null,
+    avatarUrl: null,
+    createdBy: null,
     lastMessageId: null,
     lastMessageAt: row.created_at,
     unreadCount: 0,
@@ -302,63 +154,6 @@ function mapConversationProfileRow(row: ConversationProfileRow): ConversationPar
   };
 }
 
-async function loadConversationMembers(conversationIds: string[]): Promise<Map<string, string[]>> {
-  const normalizedConversationIds = Array.from(
-    new Set(
-      conversationIds
-        .map((conversationId) => String(conversationId ?? "").trim())
-        .filter((conversationId) => Boolean(conversationId)),
-    ),
-  );
-  if (normalizedConversationIds.length === 0) {
-    return new Map<string, string[]>();
-  }
-
-  const conversationMembersTableSupported = getSchemaCapability("conversation_members_table");
-  if (conversationMembersTableSupported === false) {
-    return new Map<string, string[]>();
-  }
-  if (conversationMembersTableSupported === null) {
-    // Optimistically mark as unsupported while probing to avoid concurrent duplicate probes.
-    setSchemaCapability("conversation_members_table", false);
-  }
-
-  const { data, error } = await supabase
-    .from("conversation_members")
-    .select("conversation_id,user_id")
-    .in("conversation_id", normalizedConversationIds);
-
-  if (error) {
-    if (isMissingConversationMembersTableError(error)) {
-      setSchemaCapability("conversation_members_table", false);
-      return new Map<string, string[]>();
-    }
-    throw error;
-  }
-  setSchemaCapability("conversation_members_table", true);
-
-  const membersByConversationId = new Map<string, string[]>();
-  (Array.isArray(data) ? (data as ConversationMemberRow[]) : []).forEach((row) => {
-    const conversationId = String(row.conversation_id ?? "").trim();
-    const userId = String(row.user_id ?? "").trim();
-    if (!conversationId || !userId) {
-      return;
-    }
-
-    const current = membersByConversationId.get(conversationId);
-    if (current) {
-      if (!current.includes(userId)) {
-        current.push(userId);
-      }
-      return;
-    }
-
-    membersByConversationId.set(conversationId, [userId]);
-  });
-
-  return membersByConversationId;
-}
-
 async function loadConversationProfiles(userIds: string[]): Promise<Map<string, ConversationParticipantProfile>> {
   const normalizedUserIds = Array.from(
     new Set(
@@ -371,11 +166,7 @@ async function loadConversationProfiles(userIds: string[]): Promise<Map<string, 
     return new Map<string, ConversationParticipantProfile>();
   }
 
-  const { data, error } = await supabase
-    .from("profiles")
-    .select(CONVERSATION_PROFILE_SELECT_COLUMNS)
-    .in("id", normalizedUserIds);
-
+  const { data, error } = await queryProfilesByIds(normalizedUserIds);
   if (error) {
     throw error;
   }
@@ -387,29 +178,14 @@ async function loadConversationProfiles(userIds: string[]): Promise<Map<string, 
   return profilesByUserId;
 }
 
-function resolveConversationParticipantIds(
-  row: ConversationRow,
-  memberIdsByConversationId: Map<string, string[]>,
-): string[] {
-  const memberIds = memberIdsByConversationId.get(row.id);
-  if (Array.isArray(memberIds) && memberIds.length > 0) {
-    return memberIds;
-  }
-
-  return uniqueParticipantIds([row.user1_id, row.user2_id]);
-}
-
 function mapConversationDetails(
   row: ConversationRow,
-  participantIds: string[],
   profilesByUserId: Map<string, ConversationParticipantProfile>,
 ): ConversationDetails {
+  const participantIds = uniqueParticipantIds([row.user1_id, row.user2_id]);
   return {
     id: row.id,
-    type: normalizeConversationType(row.type),
-    createdBy: toNullableTrimmedString(row.created_by),
-    name: toNullableTrimmedString(row.name),
-    avatarUrl: toNullableTrimmedString(row.avatar_url),
+    type: "dm",
     user1Id: toNullableTrimmedString(row.user1_id),
     user2Id: toNullableTrimmedString(row.user2_id),
     createdAt: toNullableTrimmedString(row.created_at),
@@ -420,7 +196,7 @@ function mapConversationDetails(
   };
 }
 
-export async function listUserConversations(currentUserId: string): Promise<ConversationEntity[]> {
+async function listConversationRowsForUser(currentUserId: string): Promise<ConversationRow[]> {
   const normalizedCurrentUserId = String(currentUserId ?? "").trim();
   if (!normalizedCurrentUserId) {
     return [];
@@ -429,14 +205,17 @@ export async function listUserConversations(currentUserId: string): Promise<Conv
   let rows: ConversationRow[] = [];
   let shouldUseLegacyColumns = false;
   const conversationsExtendedColumnsSupported = getSchemaCapability("conversations_extended_columns");
+  const dmFilter = `user1_id.eq.${normalizedCurrentUserId},user2_id.eq.${normalizedCurrentUserId}`;
+
   if (conversationsExtendedColumnsSupported !== false) {
     if (conversationsExtendedColumnsSupported === null) {
-      // Optimistically mark as unsupported while probing to avoid concurrent duplicate probes.
       setSchemaCapability("conversations_extended_columns", false);
     }
     const primary = await supabase
       .from("conversations")
       .select(CONVERSATION_SELECT_COLUMNS)
+      .eq("type", "dm")
+      .or(dmFilter)
       .order("created_at", { ascending: false });
     if (primary.error) {
       if (!isConversationSchemaCompatibilityError(primary.error)) {
@@ -456,18 +235,23 @@ export async function listUserConversations(currentUserId: string): Promise<Conv
     const legacy = await supabase
       .from("conversations")
       .select(LEGACY_CONVERSATION_SELECT_COLUMNS)
+      .or(dmFilter)
       .order("created_at", { ascending: false });
     if (legacy.error) {
       throw legacy.error;
     }
     rows = (Array.isArray(legacy.data) ? legacy.data : []) as ConversationRow[];
   }
-  const membersByConversationId = await loadConversationMembers(rows.map((row) => row.id));
 
-  return rows.map((row) => {
-    const participantIds = resolveConversationParticipantIds(row, membersByConversationId);
-    return mapConversationRow(row, participantIds);
-  });
+  return rows
+    .map((row) => normalizeConversationRow(row))
+    .filter((row): row is ConversationRow => row !== null)
+    .filter((row) => isConversationForUser(row, normalizedCurrentUserId));
+}
+
+export async function listUserConversations(currentUserId: string): Promise<ConversationEntity[]> {
+  const rows = await listConversationRowsForUser(currentUserId);
+  return rows.map(mapConversationRow);
 }
 
 export async function ensureDirectConversation(userA: string, userB: string): Promise<ConversationEntity> {
@@ -480,9 +264,9 @@ export async function ensureDirectConversation(userA: string, userB: string): Pr
 
   let existingRow: ConversationRow | null = null;
   const conversationsExtendedColumnsSupported = getSchemaCapability("conversations_extended_columns");
+
   if (conversationsExtendedColumnsSupported !== false) {
     if (conversationsExtendedColumnsSupported === null) {
-      // Optimistically mark as unsupported while probing to avoid concurrent duplicate probes.
       setSchemaCapability("conversations_extended_columns", false);
     }
     const existingWithType = await supabase
@@ -498,22 +282,13 @@ export async function ensureDirectConversation(userA: string, userB: string): Pr
         throw existingWithType.error;
       }
       setSchemaCapability("conversations_extended_columns", false);
-      const existingLegacy = await supabase
-        .from("conversations")
-        .select(LEGACY_CONVERSATION_SELECT_COLUMNS)
-        .eq("user1_id", left)
-        .eq("user2_id", right)
-        .limit(1)
-        .maybeSingle();
-      if (existingLegacy.error) {
-        throw existingLegacy.error;
-      }
-      existingRow = (existingLegacy.data as ConversationRow | null) ?? null;
     } else {
       setSchemaCapability("conversations_extended_columns", true);
-      existingRow = (existingWithType.data as ConversationRow | null) ?? null;
+      existingRow = normalizeConversationRow(existingWithType.data as ConversationRow | null);
     }
-  } else {
+  }
+
+  if (!existingRow && getSchemaCapability("conversations_extended_columns") === false) {
     const existingLegacy = await supabase
       .from("conversations")
       .select(LEGACY_CONVERSATION_SELECT_COLUMNS)
@@ -524,26 +299,25 @@ export async function ensureDirectConversation(userA: string, userB: string): Pr
     if (existingLegacy.error) {
       throw existingLegacy.error;
     }
-    existingRow = (existingLegacy.data as ConversationRow | null) ?? null;
+    existingRow = normalizeConversationRow(existingLegacy.data as ConversationRow | null);
   }
 
   if (existingRow) {
-    return mapConversationRow(existingRow, [left, right]);
+    return mapConversationRow(existingRow);
   }
 
   let insertedRow: ConversationRow | null = null;
   let insertError: { code?: string } | null = null;
   const insertWithExtendedColumns = getSchemaCapability("conversations_extended_columns") !== false;
+
   if (insertWithExtendedColumns) {
     if (getSchemaCapability("conversations_extended_columns") === null) {
-      // Optimistically mark as unsupported while probing to avoid concurrent duplicate probes.
       setSchemaCapability("conversations_extended_columns", false);
     }
     const insertedWithType = await supabase
       .from("conversations")
       .insert({
         type: "dm",
-        created_by: currentUserId,
         user1_id: left,
         user2_id: right,
       })
@@ -555,26 +329,14 @@ export async function ensureDirectConversation(userA: string, userB: string): Pr
         insertError = insertedWithType.error;
       } else {
         setSchemaCapability("conversations_extended_columns", false);
-        const insertedLegacy = await supabase
-          .from("conversations")
-          .insert({
-            user1_id: left,
-            user2_id: right,
-          })
-          .select(LEGACY_CONVERSATION_SELECT_COLUMNS)
-          .limit(1)
-          .maybeSingle();
-        if (insertedLegacy.error) {
-          insertError = insertedLegacy.error;
-        } else {
-          insertedRow = (insertedLegacy.data as ConversationRow | null) ?? null;
-        }
       }
     } else {
       setSchemaCapability("conversations_extended_columns", true);
-      insertedRow = (insertedWithType.data as ConversationRow | null) ?? null;
+      insertedRow = normalizeConversationRow(insertedWithType.data as ConversationRow | null);
     }
-  } else {
+  }
+
+  if (!insertedRow && !insertError && getSchemaCapability("conversations_extended_columns") === false) {
     const insertedLegacy = await supabase
       .from("conversations")
       .insert({
@@ -587,7 +349,7 @@ export async function ensureDirectConversation(userA: string, userB: string): Pr
     if (insertedLegacy.error) {
       insertError = insertedLegacy.error;
     } else {
-      insertedRow = (insertedLegacy.data as ConversationRow | null) ?? null;
+      insertedRow = normalizeConversationRow(insertedLegacy.data as ConversationRow | null);
     }
   }
 
@@ -603,8 +365,9 @@ export async function ensureDirectConversation(userA: string, userB: string): Pr
       if (retry.error) {
         throw retry.error;
       }
-      if (retry.data) {
-        return mapConversationRow(retry.data as ConversationRow, [left, right]);
+      const retryRow = normalizeConversationRow(retry.data as ConversationRow | null);
+      if (retryRow) {
+        return mapConversationRow(retryRow);
       }
     }
     throw insertError;
@@ -614,7 +377,7 @@ export async function ensureDirectConversation(userA: string, userB: string): Pr
     throw new Error("Falha ao criar conversa direta.");
   }
 
-  return mapConversationRow(insertedRow, [left, right]);
+  return mapConversationRow(insertedRow);
 }
 
 export async function getConversationDetails(conversationId: string): Promise<ConversationDetails | null> {
@@ -625,15 +388,16 @@ export async function getConversationDetails(conversationId: string): Promise<Co
 
   let row: ConversationRow | null = null;
   const conversationsExtendedColumnsSupported = getSchemaCapability("conversations_extended_columns");
+
   if (conversationsExtendedColumnsSupported !== false) {
     if (conversationsExtendedColumnsSupported === null) {
-      // Optimistically mark as unsupported while probing to avoid concurrent duplicate probes.
       setSchemaCapability("conversations_extended_columns", false);
     }
     const primary = await supabase
       .from("conversations")
       .select(CONVERSATION_SELECT_COLUMNS)
       .eq("id", normalizedConversationId)
+      .eq("type", "dm")
       .limit(1)
       .maybeSingle();
     if (primary.error) {
@@ -641,21 +405,13 @@ export async function getConversationDetails(conversationId: string): Promise<Co
         throw primary.error;
       }
       setSchemaCapability("conversations_extended_columns", false);
-      const legacy = await supabase
-        .from("conversations")
-        .select(LEGACY_CONVERSATION_SELECT_COLUMNS)
-        .eq("id", normalizedConversationId)
-        .limit(1)
-        .maybeSingle();
-      if (legacy.error) {
-        throw legacy.error;
-      }
-      row = (legacy.data as ConversationRow | null) ?? null;
     } else {
       setSchemaCapability("conversations_extended_columns", true);
-      row = (primary.data as ConversationRow | null) ?? null;
+      row = normalizeConversationRow(primary.data as ConversationRow | null);
     }
-  } else {
+  }
+
+  if (!row && getSchemaCapability("conversations_extended_columns") === false) {
     const legacy = await supabase
       .from("conversations")
       .select(LEGACY_CONVERSATION_SELECT_COLUMNS)
@@ -665,252 +421,14 @@ export async function getConversationDetails(conversationId: string): Promise<Co
     if (legacy.error) {
       throw legacy.error;
     }
-    row = (legacy.data as ConversationRow | null) ?? null;
+    row = normalizeConversationRow(legacy.data as ConversationRow | null);
   }
 
   if (!row) {
     return null;
   }
 
-  const membersByConversationId = await loadConversationMembers([normalizedConversationId]);
-  const participantIds = resolveConversationParticipantIds(row, membersByConversationId);
+  const participantIds = uniqueParticipantIds([row.user1_id, row.user2_id]);
   const profilesByUserId = await loadConversationProfiles(participantIds);
-  return mapConversationDetails(row, participantIds, profilesByUserId);
-}
-
-export async function createGroupConversation(
-  currentUserId: string,
-  otherParticipantIds: string[],
-  name?: string | null,
-): Promise<ConversationDetails> {
-  const normalizedCurrentUserId = String(currentUserId ?? "").trim();
-  if (!normalizedCurrentUserId) {
-    throw new Error("Usuario atual invalido para criar grupo.");
-  }
-
-  const normalizedOtherParticipantIds = Array.from(
-    new Set(
-      otherParticipantIds
-        .map((participantId) => String(participantId ?? "").trim())
-        .filter((participantId) => Boolean(participantId) && participantId !== normalizedCurrentUserId),
-    ),
-  );
-
-  if (normalizedOtherParticipantIds.length === 0) {
-    throw new Error("Selecione pelo menos uma pessoa para criar o grupo.");
-  }
-
-  if (normalizedOtherParticipantIds.length > 9) {
-    throw new Error("O grupo privado suporta no maximo 10 pessoas contando com voce.");
-  }
-
-  const createGroupRpcSupported = getSchemaCapability("create_group_dm_rpc");
-  const isDirectOnlySelection = normalizedOtherParticipantIds.length === 1;
-  const shouldTryRpc = createGroupRpcSupported !== false || !isDirectOnlySelection;
-
-  if (!shouldTryRpc) {
-    const directConversation = await ensureDirectConversation(
-      normalizedCurrentUserId,
-      normalizedOtherParticipantIds[0],
-    );
-    const directDetails = await getConversationDetails(directConversation.id);
-    if (directDetails) {
-      return directDetails;
-    }
-    throw new Error("Falha ao criar conversa direta.");
-  }
-
-  if (createGroupRpcSupported === null) {
-    // Optimistically mark as unsupported while probing to avoid concurrent duplicate probes.
-    setSchemaCapability("create_group_dm_rpc", false);
-  }
-
-  const { data, error } = await supabase.rpc("create_group_dm", {
-    p_participant_ids: normalizedOtherParticipantIds,
-    p_name: toNullableTrimmedString(name),
-  });
-
-  if (error) {
-    if (isMissingCreateGroupDmRpcError(error)) {
-      setSchemaCapability("create_group_dm_rpc", false);
-      if (isDirectOnlySelection) {
-        const directConversation = await ensureDirectConversation(
-          normalizedCurrentUserId,
-          normalizedOtherParticipantIds[0],
-        );
-        const directDetails = await getConversationDetails(directConversation.id);
-        if (directDetails) {
-          return directDetails;
-        }
-      }
-      throw new Error("Grupo privado indisponivel neste ambiente.");
-    }
-    throw error;
-  }
-  setSchemaCapability("create_group_dm_rpc", true);
-
-  const createdRow = (Array.isArray(data) ? data[0] : data) as ConversationRow | null;
-  const createdConversationId = String(createdRow?.id ?? "").trim();
-  if (!createdConversationId) {
-    throw new Error("Falha ao criar grupo privado.");
-  }
-
-  const details = await getConversationDetails(createdConversationId);
-  if (!details) {
-    throw new Error("Falha ao carregar o grupo privado criado.");
-  }
-
-  return details;
-}
-
-export async function updateGroupConversation(
-  conversationId: string,
-  name?: string | null,
-  avatarUrl?: string | null,
-  options?: {
-    clearAvatar?: boolean;
-  },
-): Promise<ConversationDetails> {
-  const normalizedConversationId = String(conversationId ?? "").trim();
-  if (!normalizedConversationId) {
-    throw new Error("Grupo invalido para editar.");
-  }
-
-  const { data, error } = await supabase.rpc("update_group_dm", {
-    p_conversation_id: normalizedConversationId,
-    p_name: toNullableTrimmedString(name),
-    p_avatar_url: toNullableTrimmedString(avatarUrl),
-    p_clear_avatar: Boolean(options?.clearAvatar),
-  });
-
-  if (error) {
-    if (isMissingUpdateGroupDmRpcError(error)) {
-      throw new Error("Edicao de grupo indisponivel neste ambiente.");
-    }
-    throw error;
-  }
-
-  const updatedRow = (Array.isArray(data) ? data[0] : data) as ConversationRow | null;
-  const updatedConversationId = String(updatedRow?.id ?? "").trim() || normalizedConversationId;
-  const details = await getConversationDetails(updatedConversationId);
-  if (!details) {
-    throw new Error("Falha ao carregar o grupo atualizado.");
-  }
-
-  return details;
-}
-
-export async function leaveGroupConversation(conversationId: string): Promise<void> {
-  const normalizedConversationId = String(conversationId ?? "").trim();
-  if (!normalizedConversationId) {
-    throw new Error("Grupo invalido para sair.");
-  }
-
-  const { error } = await supabase.rpc("leave_group_dm", {
-    p_conversation_id: normalizedConversationId,
-  });
-
-  if (error) {
-    if (isMissingLeaveGroupDmRpcError(error)) {
-      throw new Error("Saida de grupo indisponivel neste ambiente.");
-    }
-    throw error;
-  }
-}
-
-export async function addGroupConversationMembers(
-  conversationId: string,
-  participantIds: string[],
-): Promise<ConversationDetails> {
-  const normalizedConversationId = String(conversationId ?? "").trim();
-  if (!normalizedConversationId) {
-    throw new Error("Grupo invalido para convidar membros.");
-  }
-
-  const normalizedParticipantIds = Array.from(
-    new Set(
-      participantIds
-        .map((participantId) => String(participantId ?? "").trim())
-        .filter((participantId) => Boolean(participantId)),
-    ),
-  );
-  if (normalizedParticipantIds.length === 0) {
-    throw new Error("Selecione pelo menos uma pessoa para convidar.");
-  }
-
-  const { data, error } = await supabase.rpc("add_group_dm_members", {
-    p_conversation_id: normalizedConversationId,
-    p_participant_ids: normalizedParticipantIds,
-  });
-
-  if (error) {
-    if (isMissingAddGroupDmMembersRpcError(error)) {
-      throw new Error("Convites de grupo indisponiveis neste ambiente.");
-    }
-    throw error;
-  }
-
-  const updatedRow = (Array.isArray(data) ? data[0] : data) as ConversationRow | null;
-  const updatedConversationId = String(updatedRow?.id ?? "").trim() || normalizedConversationId;
-  const details = await getConversationDetails(updatedConversationId);
-  if (!details) {
-    throw new Error("Falha ao carregar o grupo apos o convite.");
-  }
-
-  return details;
-}
-
-export async function removeGroupConversationMember(
-  conversationId: string,
-  participantId: string,
-): Promise<void> {
-  const normalizedConversationId = String(conversationId ?? "").trim();
-  const normalizedParticipantId = String(participantId ?? "").trim();
-  if (!normalizedConversationId || !normalizedParticipantId) {
-    throw new Error("Membro invalido para remover do grupo.");
-  }
-
-  const { error } = await supabase.rpc("remove_group_dm_member", {
-    p_conversation_id: normalizedConversationId,
-    p_user_id: normalizedParticipantId,
-  });
-
-  if (error) {
-    if (isMissingRemoveGroupDmMemberRpcError(error)) {
-      throw new Error("Remocao de membros indisponivel neste ambiente.");
-    }
-    throw error;
-  }
-}
-
-export async function transferGroupConversationOwner(
-  conversationId: string,
-  newOwnerId: string,
-): Promise<ConversationDetails> {
-  const normalizedConversationId = String(conversationId ?? "").trim();
-  const normalizedNewOwnerId = String(newOwnerId ?? "").trim();
-  if (!normalizedConversationId || !normalizedNewOwnerId) {
-    throw new Error("Novo dono invalido para o grupo.");
-  }
-
-  const { data, error } = await supabase.rpc("transfer_group_dm_owner", {
-    p_conversation_id: normalizedConversationId,
-    p_new_owner_id: normalizedNewOwnerId,
-  });
-
-  if (error) {
-    if (isMissingTransferGroupDmOwnerRpcError(error)) {
-      throw new Error("Transferencia de dono indisponivel neste ambiente.");
-    }
-    throw error;
-  }
-
-  const updatedRow = (Array.isArray(data) ? data[0] : data) as ConversationRow | null;
-  const updatedConversationId = String(updatedRow?.id ?? "").trim() || normalizedConversationId;
-  const details = await getConversationDetails(updatedConversationId);
-  if (!details) {
-    throw new Error("Falha ao carregar o grupo apos transferir a posse.");
-  }
-
-  return details;
+  return mapConversationDetails(row, profilesByUserId);
 }

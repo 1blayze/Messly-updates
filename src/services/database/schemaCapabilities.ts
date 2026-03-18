@@ -1,14 +1,10 @@
 type SchemaCapabilityKey =
-  | "conversations_extended_columns"
-  | "conversation_members_table"
-  | "create_group_dm_rpc";
+  | "conversations_extended_columns";
 
 const SCHEMA_CAPABILITY_STORAGE_PREFIX = "messly:schema-capability:v3:";
 const schemaCapabilityCache = new Map<SchemaCapabilityKey, boolean | null>();
 const DEFAULT_SCHEMA_CAPABILITIES: Record<SchemaCapabilityKey, boolean | null> = {
   conversations_extended_columns: null,
-  conversation_members_table: null,
-  create_group_dm_rpc: null,
 };
 
 function readCapabilityFromStorage(key: SchemaCapabilityKey): boolean | null {

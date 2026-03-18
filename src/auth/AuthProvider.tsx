@@ -12,6 +12,7 @@ import type { Session, User } from "@supabase/supabase-js";
 import { authActions } from "../stores/authSlice";
 import { useAppDispatch } from "../stores/store";
 import { supabase } from "../lib/supabaseClient";
+import { queryProfileById } from "../services/profile/profileReadApi";
 import { authService } from "../services/auth";
 import { normalizeEmail, validateUsernameInput } from "../services/usernameAvailability";
 import { ensureProfileForUser, fetchProfileById, type ProfileRow } from "../services/profile/profileService";
@@ -258,7 +259,7 @@ function isAuthSessionInvalidError(error: unknown): boolean {
 
 async function profileExists(uid: string): Promise<boolean> {
   try {
-    const { data, error } = await supabase.from("profiles").select("id").eq("id", uid).limit(1).maybeSingle();
+    const { data, error } = await queryProfileById(uid);
     if (error) {
       if (isTableMissing(error)) {
         return false;

@@ -1,4 +1,4 @@
-import { supabase } from "../lib/supabaseClient";
+import { queryProfileByUsername } from "../services/profile/profileReadApi";
 
 export const USERNAME_MIN_LENGTH = 3;
 export const USERNAME_MAX_LENGTH = 32;
@@ -66,18 +66,17 @@ export async function isUsernameAvailable(
   }
 
   const ignoreId = String(options.ignoreProfileId ?? "").trim() || null;
-  const query = supabase.from("profiles").select("id").eq("username", candidate).limit(1);
-  if (ignoreId) {
-    query.neq("id", ignoreId);
-  }
-
-  const { data, error } = await query;
+  const { data, error } = await queryProfileByUsername(candidate);
   if (error) {
     // In doubt, consider unavailable to avoid collisions; caller can retry.
     return false;
   }
 
-  return (data?.length ?? 0) === 0;
+  if (!data?.id) {
+    return true;
+  }
+
+  return !ignoreId || data.id === ignoreId;
 }
 
 export function buildUsernameSeedFromEmail(email: string): string {

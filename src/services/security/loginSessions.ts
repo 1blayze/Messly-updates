@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { supabase } from "../supabase";
+import { isDirectUsersRestBlocked, supabase } from "../supabase";
 import { EdgeFunctionError, invokeEdgeGet, invokeEdgeJson } from "../edge/edgeClient";
 import { authService } from "../auth";
 import { getInMemorySession } from "../auth/authStore";
@@ -12,7 +12,7 @@ const SESSIONS_EDGE_UNAUTHORIZED_COOLDOWN_MS = 2 * 60_000;
 const SESSION_STATUS_GRACE_PERIOD_MS = 90_000;
 
 let sessionsMutationApiTemporarilyDisabled = false;
-let sessionsDirectApiTemporarilyDisabled = false;
+let sessionsDirectApiTemporarilyDisabled = isDirectUsersRestBlocked();
 let sessionsEdgeUnauthorizedCooldownUntil = 0;
 const listSessionsCacheByUid = new Map<string, { fetchedAt: number; sessions: LoginSessionView[] }>();
 const listSessionsInFlightByUid = new Map<string, Promise<ListActiveLoginSessionsResult>>();
@@ -371,10 +371,15 @@ function shouldFallbackToEdgeSessionsList(error: unknown): boolean {
   }
 
   return (
+    status === 0 ||
     message.includes("does not exist") ||
     message.includes("schema cache") ||
     message.includes("column") ||
-    message.includes("ended_at")
+    message.includes("ended_at") ||
+    message.includes("failed to fetch") ||
+    message.includes("cors") ||
+    message.includes("access-control-allow-origin") ||
+    message.includes("net::err_failed")
   );
 }
 

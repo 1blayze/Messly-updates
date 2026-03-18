@@ -4,19 +4,17 @@ import type { RealtimeChannel, RealtimePostgresChangesPayload } from "@supabase/
 import { supabase } from "../services/supabase";
 import type { ChatMessageType } from "../services/chat/chatApi";
 import { getSchemaCapability, setSchemaCapability } from "../services/database/schemaCapabilities";
+
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const CONVERSATIONS_QUERY_VERSION = "v2";
-const CONVERSATION_SELECT_COLUMNS = "id,type,created_by,name,avatar_url,user1_id,user2_id,created_at";
+const CONVERSATIONS_QUERY_VERSION = "v3";
+const CONVERSATION_SELECT_COLUMNS = "id,type,user1_id,user2_id,created_at";
 const LEGACY_CONVERSATION_SELECT_COLUMNS = "id,user1_id,user2_id,created_at";
 
 export interface ConversationRealtimeRow {
   id: string;
-  type: "dm" | "group_dm";
-  created_by: string | null;
-  name: string | null;
-  avatar_url: string | null;
-  user1_id: string | null;
-  user2_id: string | null;
+  type: "dm";
+  user1_id: string;
+  user2_id: string;
   created_at: string | null;
   last_activity_at: string | null;
 }
@@ -24,9 +22,6 @@ export interface ConversationRealtimeRow {
 interface ConversationRecord {
   id?: string | null;
   type?: string | null;
-  created_by?: string | null;
-  name?: string | null;
-  avatar_url?: string | null;
   user1_id?: string | null;
   user2_id?: string | null;
   created_at?: string | null;
@@ -40,11 +35,6 @@ interface MessageRecord {
   type?: string | null;
   attachment?: unknown | null;
   created_at?: string | null;
-}
-
-interface ConversationMemberRecord {
-  conversation_id?: string | null;
-  user_id?: string | null;
 }
 
 export interface ConversationMessageInsertEvent {
@@ -77,46 +67,32 @@ function isConversationSchemaCompatibilityError(error: unknown): boolean {
   return (
     message.includes("conversations") &&
     (message.includes("column") || details.includes("column") || hint.includes("column")) &&
-    (
-      message.includes("type")
-      || message.includes("created_by")
-      || message.includes("avatar_url")
-      || message.includes("name")
-      || details.includes("type")
-      || details.includes("created_by")
-      || details.includes("avatar_url")
-      || details.includes("name")
-    )
+    (message.includes("type") || details.includes("type") || hint.includes("type"))
   );
 }
 
 function normalizeConversation(
   record: ConversationRecord | null | undefined,
+  currentUserId: string,
   lastActivityAtOverride?: string | null,
 ): ConversationRealtimeRow | null {
   const id = String(record?.id ?? "").trim();
-  if (!id) {
+  const user1Id = String(record?.user1_id ?? "").trim();
+  const user2Id = String(record?.user2_id ?? "").trim();
+  if (!id || !user1Id || !user2Id) {
     return null;
   }
-
-  const normalizedType = String(record?.type ?? "").trim().toLowerCase() === "group_dm" ? "group_dm" : "dm";
-  const user1Id = String(record?.user1_id ?? "").trim() || null;
-  const user2Id = String(record?.user2_id ?? "").trim() || null;
-  if (normalizedType === "dm" && (!user1Id || !user2Id)) {
+  if (user1Id !== currentUserId && user2Id !== currentUserId) {
     return null;
   }
 
   return {
     id,
-    type: normalizedType,
-    created_by: String(record?.created_by ?? "").trim() || null,
-    name: String(record?.name ?? "").trim() || null,
-    avatar_url: String(record?.avatar_url ?? "").trim() || null,
+    type: "dm",
     user1_id: user1Id,
     user2_id: user2Id,
-    created_at: record?.created_at ? String(record.created_at) : null,
-    last_activity_at:
-      String(lastActivityAtOverride ?? record?.created_at ?? "").trim() || null,
+    created_at: String(record?.created_at ?? "").trim() || null,
+    last_activity_at: String(lastActivityAtOverride ?? record?.created_at ?? "").trim() || null,
   };
 }
 
@@ -196,19 +172,21 @@ function normalizeMessageInsertEvent(record: MessageRecord | null | undefined): 
   };
 }
 
-async function fetchConversations(_currentUserId: string): Promise<ConversationRealtimeRow[]> {
+async function fetchConversations(currentUserId: string): Promise<ConversationRealtimeRow[]> {
   let rows: ConversationRecord[] = [];
   let shouldUseLegacyColumns = false;
+  const dmFilter = `user1_id.eq.${currentUserId},user2_id.eq.${currentUserId}`;
 
   const conversationsExtendedColumnsSupported = getSchemaCapability("conversations_extended_columns");
   if (conversationsExtendedColumnsSupported !== false) {
-    // Optimistically mark as unsupported while probing to avoid concurrent duplicate probes.
     if (conversationsExtendedColumnsSupported === null) {
       setSchemaCapability("conversations_extended_columns", false);
     }
     const primary = await supabase
       .from("conversations")
       .select(CONVERSATION_SELECT_COLUMNS)
+      .eq("type", "dm")
+      .or(dmFilter)
       .order("created_at", { ascending: false });
     if (primary.error) {
       if (!isConversationSchemaCompatibilityError(primary.error)) {
@@ -228,6 +206,7 @@ async function fetchConversations(_currentUserId: string): Promise<ConversationR
     const legacy = await supabase
       .from("conversations")
       .select(LEGACY_CONVERSATION_SELECT_COLUMNS)
+      .or(dmFilter)
       .order("created_at", { ascending: false });
     if (legacy.error) {
       throw legacy.error;
@@ -258,7 +237,7 @@ async function fetchConversations(_currentUserId: string): Promise<ConversationR
   }
 
   return rows
-    .map((row) => normalizeConversation(row, lastActivityByConversationId.get(String(row.id ?? "").trim()) ?? null))
+    .map((row) => normalizeConversation(row, currentUserId, lastActivityByConversationId.get(String(row.id ?? "").trim()) ?? null))
     .filter((row): row is ConversationRealtimeRow => row !== null)
     .sort(compareConversationsByActivity);
 }
@@ -311,8 +290,8 @@ export function useConversationsRealtime(
     };
 
     const applyRealtimeChange = (payload: RealtimePostgresChangesPayload<ConversationRecord>): void => {
-      const nextConversation = normalizeConversation(payload.new as ConversationRecord | null);
-      const oldConversation = normalizeConversation(payload.old as ConversationRecord | null);
+      const nextConversation = normalizeConversation(payload.new as ConversationRecord | null, normalizedUserId);
+      const oldConversation = normalizeConversation(payload.old as ConversationRecord | null, normalizedUserId);
       const conversationId = String(nextConversation?.id ?? oldConversation?.id ?? "").trim();
       if (!conversationId) {
         return;
@@ -355,56 +334,11 @@ export function useConversationsRealtime(
         });
       });
 
-      if (!isRelevantConversation) {
+      if (!isRelevantConversation || !normalizedEvent) {
         return;
       }
 
-      const onMessageInsert = onMessageInsertRef.current;
-      if (!onMessageInsert) {
-        return;
-      }
-
-      if (!normalizedEvent) {
-        return;
-      }
-      onMessageInsert(normalizedEvent);
-    };
-
-    const applyConversationMemberChange = (
-      payload: RealtimePostgresChangesPayload<ConversationMemberRecord>,
-    ): void => {
-      const nextRecord = (payload.new ?? null) as ConversationMemberRecord | null;
-      const previousRecord = (payload.old ?? null) as ConversationMemberRecord | null;
-      const conversationId = String(
-        nextRecord?.conversation_id
-        ?? previousRecord?.conversation_id
-        ?? "",
-      ).trim();
-      const affectedUserId = String(
-        nextRecord?.user_id
-        ?? previousRecord?.user_id
-        ?? "",
-      ).trim();
-
-      if (affectedUserId === normalizedUserId) {
-        invalidateConversationsQuery();
-        return;
-      }
-
-      if (!conversationId) {
-        return;
-      }
-
-      let isRelevantConversation = false;
-      queryClient.setQueryData<ConversationRealtimeRow[]>(queryKey, (current) => {
-        const safeCurrent = Array.isArray(current) ? current : [];
-        isRelevantConversation = safeCurrent.some((item) => item.id === conversationId);
-        return safeCurrent;
-      });
-
-      if (isRelevantConversation) {
-        invalidateConversationsQuery();
-      }
+      onMessageInsertRef.current?.(normalizedEvent);
     };
 
     const bootstrapTimer = window.setTimeout(() => {
@@ -418,11 +352,6 @@ export function useConversationsRealtime(
           "postgres_changes",
           { event: "*", schema: "public", table: "conversations" },
           applyRealtimeChange,
-        )
-        .on(
-          "postgres_changes",
-          { event: "*", schema: "public", table: "conversation_members" },
-          applyConversationMemberChange,
         )
         .on(
           "postgres_changes",

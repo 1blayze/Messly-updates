@@ -653,17 +653,8 @@ export class GatewayServer {
       this.membershipCache.set(key, result);
       return result;
     }
-
-    const memberResult = await this.options.supabase
-      .from("conversation_members")
-      .select("conversation_id,user_id")
-      .eq("conversation_id", conversationId)
-      .eq("user_id", userId)
-      .maybeSingle();
-    const memberValue =
-      !memberResult.error && memberResult.data !== null && String(memberResult.data.conversation_id ?? "") === conversationId;
-    this.membershipCache.set(key, memberValue);
-    return memberValue;
+    this.membershipCache.set(key, false);
+    return false;
   }
 
   private attachSocketContext(

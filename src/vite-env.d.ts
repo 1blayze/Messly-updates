@@ -203,7 +203,7 @@ interface MessageNotificationPayload {
   contentPreview?: string;
   createdAt?: string | null;
   avatarUrl?: string;
-  conversationType?: "dm" | "group" | "channel" | "guild" | "unknown";
+  conversationType?: "dm" | "channel" | "guild" | "unknown";
   contextLabel?: string;
   messageType?: "text" | "image" | "video" | "file";
   attachmentMimeType?: string;

@@ -28,13 +28,10 @@ function buildAuthorDisplayName(payload: GatewayMessageDispatchPayload): {
 
 function resolveNotificationConversationType(
   scopeTypeRaw: ConversationScopeType | string | null | undefined,
-): "dm" | "group" | "channel" | "guild" | "unknown" {
+): "dm" | "channel" | "guild" | "unknown" {
   const scopeType = String(scopeTypeRaw ?? "").trim().toLowerCase();
   if (scopeType === "dm") {
     return "dm";
-  }
-  if (scopeType === "group_dm" || scopeType === "group") {
-    return "group";
   }
   if (scopeType === "channel") {
     return "channel";
@@ -45,7 +42,7 @@ function resolveNotificationConversationType(
   return "unknown";
 }
 
-function resolveNotificationContextLabel(conversationType: "dm" | "group" | "channel" | "guild" | "unknown"): string | null {
+function resolveNotificationContextLabel(conversationType: "dm" | "channel" | "guild" | "unknown"): string | null {
   if (conversationType === "dm") {
     return null;
   }
@@ -54,9 +51,6 @@ function resolveNotificationContextLabel(conversationType: "dm" | "group" | "cha
   }
   if (conversationType === "guild") {
     return "Servidor";
-  }
-  if (conversationType === "group") {
-    return "Grupo";
   }
   return "Conversa";
 }

@@ -44,23 +44,11 @@ export class AudienceResolver {
       });
       return allowed;
     }
-
-    const memberResult = await this.supabase
-      .from("conversation_members")
-      .select("conversation_id,user_id")
-      .eq("conversation_id", conversationId)
-      .eq("user_id", userId)
-      .maybeSingle();
-
-    const allowed =
-      !memberResult.error &&
-      memberResult.data !== null &&
-      String(memberResult.data.conversation_id ?? "") === conversationId;
     this.conversationAccessCache.set(cacheKey, {
       expiresAt: nowMs() + this.cacheTtlMs,
-      value: allowed,
+      value: false,
     });
-    return allowed;
+    return false;
   }
 
   async getPresenceWatcherTargets(userId: string): Promise<GatewaySubscription[]> {

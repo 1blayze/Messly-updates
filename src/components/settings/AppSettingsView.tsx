@@ -29,6 +29,7 @@ import { PRESENCE_LABELS, type PresencePlatform, type PresenceState } from "../.
 import { supabase } from "../../services/supabase";
 import { isUsernameAvailable, normalizeEmail, validateUsernameInput } from "../../services/usernameAvailability";
 import { DEFAULT_BANNER_COLOR, getBannerColorInputValue, normalizeBannerColor } from "../../services/profile/bannerColor";
+import { queryProfileById, queryProfilesByIds } from "../../services/profile/profileReadApi";
 import { ensureUser, loadPendingProfile } from "../../services/userSync";
 import {
   connectSpotifyOAuth,
@@ -1562,16 +1563,11 @@ function getUsernameCooldownState(lastChangedAtRaw: string | null | undefined): 
 }
 
 async function queryUserByFirebaseUid(firebaseUid: string) {
-  return supabase
-    .from("profiles")
-    .select(USER_PROFILE_SELECT_COLUMNS)
-    .eq("id", firebaseUid)
-    .limit(1)
-    .maybeSingle();
+  return queryProfileById(firebaseUid);
 }
 
 async function queryUserById(userId: string) {
-  return supabase.from("profiles").select(USER_PROFILE_SELECT_COLUMNS).eq("id", userId).limit(1).maybeSingle();
+  return queryProfileById(userId);
 }
 
 async function queryUsernameChangedAt(userId: string): Promise<string | null> {
@@ -1580,7 +1576,7 @@ async function queryUsernameChangedAt(userId: string): Promise<string | null> {
     return null;
   }
 
-  const { data, error } = await supabase.from("profiles").select("updated_at").eq("id", normalizedUserId).limit(1).maybeSingle();
+  const { data, error } = await queryProfileById(normalizedUserId);
 
   if (error) {
     const message = String(error.message ?? "");
@@ -1597,7 +1593,7 @@ async function queryUsernameChangedAt(userId: string): Promise<string | null> {
     throw error;
   }
 
-  return normalizeStoredIsoTimestamp((data as { updated_at?: string | null } | null)?.updated_at ?? null);
+  return normalizeStoredIsoTimestamp(data?.updated_at ?? null);
 }
 
 async function updateUserMediaWithSchemaFallback(
@@ -3193,25 +3189,7 @@ export default function AppSettingsView({
         return;
       }
 
-      const { data: usersData, error: usersError } = await supabase
-        .from("profiles")
-        .select(BLOCKED_USERS_SELECT_COLUMNS)
-        .in("id", blockedIds);
-
-      let resolvedUsersData = usersData as BlockedUserRow[] | null;
-      let resolvedUsersError = usersError;
-
-      if (resolvedUsersError) {
-        const message = String(resolvedUsersError.message ?? "");
-        if (isUsersSchemaColumnCacheError(message) || isMissingAvatarUrlColumnError(message)) {
-          const fallbackUsersResult = await supabase
-            .from("profiles")
-            .select(BLOCKED_USERS_SELECT_COLUMNS_FALLBACK)
-            .in("id", blockedIds);
-          resolvedUsersData = fallbackUsersResult.data as BlockedUserRow[] | null;
-          resolvedUsersError = fallbackUsersResult.error;
-        }
-      }
+      const { data: resolvedUsersData, error: resolvedUsersError } = await queryProfilesByIds(blockedIds);
 
       if (!isMounted) {
         return;

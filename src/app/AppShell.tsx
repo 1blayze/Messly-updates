@@ -29,10 +29,10 @@ import {
 } from "../voice/client/accountState";
 import { getAvatarUrl, getBannerUrl, getNameAvatarUrl, isDefaultAvatarUrl, isDefaultBannerUrl } from "../services/cdn/mediaUrls";
 import { getConversationDetails } from "../api/conversationsApi";
-import { getGroupDmAvatarUrl, resolveGroupDmDisplayName } from "../services/chat/groupDm";
 import { normalizeBannerColor } from "../services/profile/bannerColor";
 import { supabase } from "../lib/supabaseClient";
 import { ensureProfileForUser } from "../services/profile/profileService";
+import { queryProfileById, queryProfilesByIds } from "../services/profile/profileReadApi";
 import { friendRequestsEnabled } from "../services/friends/friendRequests";
 import {
   buildFriendRequestBlockedNotice,
@@ -40,6 +40,13 @@ import {
   evaluateFriendRequestPermission,
   queryFriendRequestTargetById,
 } from "../services/friends/friendRequestPrivacy";
+import {
+  createFriendRequest,
+  deleteFriendRequest,
+  deleteFriendRequestsBetweenUsers,
+  rejectFriendRequest,
+  updateFriendRequestStatus,
+} from "../services/friends/friendRequestsApi";
 import { listMutualFriendIdsForCurrentUser } from "../services/friends/mutualFriends";
 import { useFriendRequestsRealtime } from "../hooks/useFriendRequestsRealtime";
 
@@ -809,7 +816,6 @@ function areSidebarSelectionsEqual(
       currentItem.conversationId !== nextItem.conversationId ||
       currentItem.userId !== nextItem.userId ||
       currentItem.conversationType !== nextItem.conversationType ||
-      (currentItem.createdBy ?? "") !== (nextItem.createdBy ?? "") ||
       currentItem.username !== nextItem.username ||
       currentItem.displayName !== nextItem.displayName ||
       currentItem.avatarSrc !== nextItem.avatarSrc ||
@@ -1060,10 +1066,9 @@ async function queryCurrentUserId(authUser: AuthUser | null): Promise<string | n
     }
   }
 
-  const byId = await supabase.from("profiles").select("id").eq("id", authUser.uid).limit(1);
-  const byIdData = Array.isArray(byId.data) && byId.data.length > 0 ? byId.data[0] : null;
-  if (!byId.error && byIdData?.id) {
-    return byIdData.id as string;
+  const byId = await queryProfileById(authUser.uid);
+  if (!byId.error && byId.data?.id) {
+    return byId.data.id;
   }
 
   if (byId.error && !isUsersSchemaColumnCacheError(byId.error.message ?? "")) {
@@ -1473,13 +1478,7 @@ export default function AppShell() {
       spotifyActivity: existingDirectMessage?.spotifyActivity ?? presenceStore.getPresenceSnapshot(card.targetUserId).spotifyActivity ?? null,
     });
 
-    const { data: userDataRaw, error: userError } = await supabase
-      .from("profiles")
-      .select(PROFILE_SAFE_COLUMNS)
-      .eq("id", card.targetUserId)
-      .limit(1)
-      .maybeSingle();
-    const userData = userDataRaw as ProfileAny | null;
+    const { data: userData, error: userError } = await queryProfileById(card.targetUserId);
 
     if (pendingProfileRequestCursorRef.current !== requestCursor || userError || !userData) {
       return;
@@ -1828,13 +1827,7 @@ export default function AppShell() {
 
     void (async () => {
       try {
-        const { data: userRowRaw, error: userError } = await supabase
-          .from("profiles")
-          .select(PROFILE_SAFE_COLUMNS)
-          .eq("id", currentUserId)
-          .limit(1)
-          .maybeSingle();
-        const userRow = userRowRaw as ProfileAny | null;
+        const { data: userRow, error: userError } = await queryProfileById(currentUserId);
 
         if (userError) {
           return;
@@ -2102,66 +2095,6 @@ export default function AppShell() {
       }
 
       const otherParticipants = conversation.participants.filter((participant) => participant.id !== currentUserId);
-      if (conversation.type === "group_dm") {
-        const participants: NonNullable<SidebarDirectMessageSelection["participants"]> = otherParticipants.map((participant) => {
-          const username = String(participant.username ?? "").trim() || "usuario";
-          const displayName = normalizeProfileDisplayName(participant.displayName, username, username);
-          const fallbackAvatar = getNameAvatarUrl(displayName || username || "U");
-          return {
-            userId: participant.id,
-            username,
-            displayName,
-            avatarSrc: String(participant.avatarUrl ?? "").trim() || fallbackAvatar,
-            presenceState: presenceStore.getPresenceState(participant.id),
-            firebaseUid: participant.firebaseUid ?? undefined,
-            aboutText: participant.aboutText ?? undefined,
-            bannerColor: participant.bannerColor ?? null,
-            themePrimaryColor: normalizeBannerColor(participant.themePrimaryColor) ?? null,
-            themeAccentColor: normalizeBannerColor(participant.themeAccentColor) ?? null,
-            bannerKey: participant.bannerKey ?? null,
-            bannerHash: participant.bannerHash ?? null,
-            memberSinceAt: participant.createdAt ?? null,
-            spotifyActivity: presenceStore.getPresenceSnapshot(participant.id).spotifyActivity ?? null,
-          };
-        });
-        const participantIds = participants.map((participant) => participant.userId);
-        const presenceStates = participants.map((participant) => participant.presenceState ?? "invisivel");
-        const presenceState = presenceStates.includes("online")
-          ? "online"
-          : presenceStates.includes("idle")
-            ? "idle"
-            : presenceStates.includes("dnd")
-              ? "dnd"
-              : "invisivel";
-        const bestSpotifyActivity = participants.reduce<PresenceSpotifyActivity | null>((best, participant) => {
-          const activity = participant.spotifyActivity ?? null;
-          if (!activity) {
-            return best;
-          }
-          if (!best || activity.updatedAt > best.updatedAt) {
-            return activity;
-          }
-          return best;
-        }, null);
-
-        return {
-          conversationId: conversation.id,
-          userId: `group:${conversation.id}`,
-          conversationType: "group_dm",
-          createdBy: conversation.createdBy ?? null,
-          username: "grupo",
-          displayName: resolveGroupDmDisplayName(
-            conversation.name,
-            participants.map((participant) => participant.displayName),
-          ),
-          avatarSrc: String(conversation.avatarUrl ?? "").trim() || getGroupDmAvatarUrl(),
-          presenceState,
-          participantIds,
-          participants,
-          spotifyActivity: bestSpotifyActivity,
-        };
-      }
-
       const targetParticipant = otherParticipants[0] ?? null;
       if (!targetParticipant) {
         return null;
@@ -2328,11 +2261,7 @@ export default function AppShell() {
             continue;
           }
 
-          const { data: usersRaw, error: usersError } = await supabase
-            .from("profiles")
-            .select(PROFILE_SAFE_COLUMNS)
-            .in("id", friendIds);
-          const users = usersRaw as ProfileAny[] | null;
+          const { data: users, error: usersError } = await queryProfilesByIds(friendIds);
 
           if (usersError) {
             throw usersError;
@@ -2489,11 +2418,7 @@ export default function AppShell() {
             ),
           );
 
-          const { data: usersRaw, error: usersError } = await supabase
-            .from("profiles")
-            .select(PROFILE_SAFE_COLUMNS)
-            .in("id", targetIds);
-          const users = usersRaw as ProfileAny[] | null;
+          const { data: users, error: usersError } = await queryProfilesByIds(targetIds);
 
           if (usersError) {
             throw usersError;
@@ -2752,9 +2677,6 @@ export default function AppShell() {
   }, [openPendingProfile?.userId]);
 
   useEffect(() => {
-    if (activeDirectMessage?.conversationType === "group_dm") {
-      return;
-    }
     const targetUserId = String(activeDirectMessage?.userId ?? "").trim();
     if (!targetUserId) {
       return;
@@ -2931,8 +2853,9 @@ export default function AppShell() {
     if (!currentUserId || !isFriendRequestsAvailable) {
       return;
     }
-    const { error: updateError } = await supabase.from("friend_requests").update({ status: "accepted" }).eq("id", requestId);
-    if (updateError) {
+    try {
+      await updateFriendRequestStatus(requestId, "accepted");
+    } catch {
       setPendingError("Não foi possível aceitar a solicitação.");
       return;
     }
@@ -2954,8 +2877,9 @@ export default function AppShell() {
       return;
     }
     const rejectedCard = pendingCards.find((card) => card.requestId === requestId) ?? null;
-    const { error } = await supabase.from("friend_requests").update({ status: "rejected" }).eq("id", requestId);
-    if (error) {
+    try {
+      await rejectFriendRequest(requestId);
+    } catch {
       setPendingError("Não foi possível recusar a solicitação.");
       return;
     }
@@ -2972,8 +2896,9 @@ export default function AppShell() {
       return;
     }
     const canceledCard = pendingCards.find((card) => card.requestId === requestId) ?? null;
-    const { error } = await supabase.from("friend_requests").delete().eq("id", requestId);
-    if (error) {
+    try {
+      await deleteFriendRequest(requestId);
+    } catch {
       setPendingError("Não foi possível cancelar a solicitação.");
       return;
     }
@@ -3064,8 +2989,9 @@ export default function AppShell() {
 
     setActiveFriendMenuUserId(null);
 
-    const { error } = await supabase.from("friend_requests").delete().eq("id", friend.requestId);
-    if (error) {
+    try {
+      await deleteFriendRequest(friend.requestId);
+    } catch {
       setFriendsError("Não foi possível desfazer a amizade.");
       return;
     }
@@ -3099,18 +3025,10 @@ export default function AppShell() {
         throw new Error(`FRIEND_REQUEST_BLOCKED_${permission.reason}`);
       }
 
-      const { data: insertedRequest, error } = await supabase
-        .from("friend_requests")
-        .insert({
-          requester_id: currentUserId,
-          addressee_id: targetUserId,
-          status: "pending",
-        })
-        .select("id,requester_id,addressee_id,status,created_at")
-        .limit(1)
-        .maybeSingle();
-
-      if (error) {
+      let insertedRequest: { id?: string | null; created_at?: string | null } | null = null;
+      try {
+        insertedRequest = await createFriendRequest(targetUserId);
+      } catch (error) {
         const errorCode = String((error as { code?: string | null }).code ?? "");
         if (errorCode === "23505") {
           setFriendsError("Esse usuário já recebeu sua solicitação ou já é seu amigo.");
@@ -3193,20 +3111,9 @@ export default function AppShell() {
     }
 
     // Remove friendship and pending requests for this pair after blocking.
-    const [deleteOutgoingResult, deleteIncomingResult] = await Promise.all([
-      supabase
-        .from("friend_requests")
-        .delete()
-        .eq("requester_id", currentUserId)
-        .eq("addressee_id", targetUserId),
-      supabase
-        .from("friend_requests")
-        .delete()
-        .eq("requester_id", targetUserId)
-        .eq("addressee_id", currentUserId),
-    ]);
-
-    if (deleteOutgoingResult.error || deleteIncomingResult.error) {
+    try {
+      await deleteFriendRequestsBetweenUsers(targetUserId);
+    } catch {
       setFriendsError("Usuário bloqueado, mas não foi possível atualizar a lista de amigos.");
     }
 
@@ -3353,20 +3260,19 @@ export default function AppShell() {
   const shouldKeepDirectMessageMountedForVoiceCall =
     !activeDirectMessage && (voiceCallUiSnapshot.callActive || voiceCallUiSnapshot.callConnecting);
   const chatViewDirectMessage = activeDirectMessage ?? (shouldKeepDirectMessageMountedForVoiceCall ? resolvedPinnedDirectMessageDuringCall : null);
-  const isChatViewGroupConversation = chatViewDirectMessage?.conversationType === "group_dm";
   const activeDirectMessageFriend = useMemo(() => {
-    if (!chatViewDirectMessage || isChatViewGroupConversation) {
+    if (!chatViewDirectMessage) {
       return null;
     }
 
     return friends.find((friend) => friend.userId === chatViewDirectMessage.userId) ?? null;
-  }, [chatViewDirectMessage, friends, isChatViewGroupConversation]);
+  }, [chatViewDirectMessage, friends]);
 
   useEffect(() => {
     const normalizedCurrentUserId = String(currentUserId ?? "").trim();
     const normalizedTargetUserId = String(chatViewDirectMessage?.userId ?? "").trim();
 
-    if (isChatViewGroupConversation || !normalizedCurrentUserId || !normalizedTargetUserId || normalizedTargetUserId === normalizedCurrentUserId) {
+    if (!normalizedCurrentUserId || !normalizedTargetUserId || normalizedTargetUserId === normalizedCurrentUserId) {
       activeDirectMessageMutualTargetUserIdRef.current = "";
       setActiveDirectMessageMutualFriendIds((current) => (current.length === 0 ? current : []));
       return;
@@ -3405,10 +3311,10 @@ export default function AppShell() {
     return () => {
       isDisposed = true;
     };
-  }, [chatViewDirectMessage?.userId, currentUserId, friendPresenceUserIdsKey, isChatViewGroupConversation]);
+  }, [chatViewDirectMessage?.userId, currentUserId, friendPresenceUserIdsKey]);
 
   const activeDirectMessageMutualFriends = useMemo(() => {
-    if (!chatViewDirectMessage || isChatViewGroupConversation || activeDirectMessageMutualFriendIds.length === 0) {
+    if (!chatViewDirectMessage || activeDirectMessageMutualFriendIds.length === 0) {
       return [];
     }
 
@@ -3422,16 +3328,16 @@ export default function AppShell() {
         username: friend.username,
         avatarSrc: friend.avatarSrc,
       }));
-  }, [activeDirectMessageMutualFriendIds, allFriends, chatViewDirectMessage, isChatViewGroupConversation]);
+  }, [activeDirectMessageMutualFriendIds, allFriends, chatViewDirectMessage]);
   const isActiveDirectMessagePendingOutgoingRequest = useMemo(() => {
-    if (!chatViewDirectMessage || isChatViewGroupConversation || !isFriendRequestsAvailable) {
+    if (!chatViewDirectMessage || !isFriendRequestsAvailable) {
       return false;
     }
 
     return pendingCards.some(
       (card) => card.targetUserId === chatViewDirectMessage.userId && card.direction === "outgoing",
     );
-  }, [chatViewDirectMessage, isChatViewGroupConversation, isFriendRequestsAvailable, pendingCards]);
+  }, [chatViewDirectMessage, isFriendRequestsAvailable, pendingCards]);
   const chatCurrentUser = useMemo<DirectMessageChatParticipant | null>(() => {
     if (!currentUserId) {
       return null;
@@ -3771,9 +3677,6 @@ export default function AppShell() {
                     conversationId={chatViewDirectMessage.conversationId}
                     currentUserId={chatCurrentUser.userId}
                     currentUser={chatCurrentUser}
-                    conversationType={chatViewDirectMessage.conversationType ?? "dm"}
-                    conversationCreatedBy={chatViewDirectMessage.createdBy ?? null}
-                    conversationParticipants={chatViewDirectMessage.participants ?? []}
                     targetUser={{
                       userId: chatViewDirectMessage.userId,
                       username: chatViewDirectMessage.username,
@@ -3793,29 +3696,25 @@ export default function AppShell() {
                       memberSinceAt: chatViewDirectMessage.memberSinceAt ?? null,
                     }}
                     onOpenSettings={handleOpenSettings}
-                    isTargetFriend={!isChatViewGroupConversation && Boolean(activeDirectMessageFriend)}
+                    isTargetFriend={Boolean(activeDirectMessageFriend)}
                     onUnfriendTarget={
-                      !isChatViewGroupConversation && activeDirectMessageFriend
+                      activeDirectMessageFriend
                         ? async () => {
                             await handleUnfriend(activeDirectMessageFriend);
                           }
                         : undefined
                     }
                     onAddFriendTarget={
-                      !isChatViewGroupConversation
-                        ? async () => {
-                            await handleAddFriendTargetUser(chatViewDirectMessage.userId);
-                          }
-                        : undefined
+                      async () => {
+                        await handleAddFriendTargetUser(chatViewDirectMessage.userId);
+                      }
                     }
-                    isTargetFriendRequestPending={!isChatViewGroupConversation && isActiveDirectMessagePendingOutgoingRequest}
-                    mutualFriends={!isChatViewGroupConversation ? activeDirectMessageMutualFriends : []}
+                    isTargetFriendRequestPending={isActiveDirectMessagePendingOutgoingRequest}
+                    mutualFriends={activeDirectMessageMutualFriends}
                     onBlockTarget={
-                      !isChatViewGroupConversation
-                        ? async () => {
-                            await handleBlockTargetUser(chatViewDirectMessage.userId);
-                          }
-                        : undefined
+                      async () => {
+                        await handleBlockTargetUser(chatViewDirectMessage.userId);
+                      }
                     }
                   />
                 </Suspense>

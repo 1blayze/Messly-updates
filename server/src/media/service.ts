@@ -792,19 +792,7 @@ export class MediaService {
         return;
       }
     }
-
-    const memberResult = await this.options.adminSupabase
-      .from("conversation_members")
-      .select("conversation_id")
-      .eq("conversation_id", conversationId)
-      .eq("user_id", userId)
-      .maybeSingle();
-
-    const isMember =
-      !memberResult.error && memberResult.data !== null && String(memberResult.data.conversation_id ?? "") === conversationId;
-    if (!isMember) {
-      throw new MediaServiceError(403, "FORBIDDEN", "Sem permissao para essa conversa.");
-    }
+    throw new MediaServiceError(403, "FORBIDDEN", "Sem permissao para essa conversa.");
   }
 
   private async upsertAuthorizationRow(

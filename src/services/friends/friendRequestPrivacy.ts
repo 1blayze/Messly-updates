@@ -1,5 +1,5 @@
-import { supabase } from "../supabase";
 import { listMutualFriendIdsForCurrentUser } from "./mutualFriends";
+import { queryProfileById, queryProfileByUsername } from "../profile/profileReadApi";
 
 export interface FriendRequestPrivacySettings {
   allowAll: boolean;
@@ -87,26 +87,12 @@ export function getFriendRequestPrivacySettings(
 
 export async function queryFriendRequestTargetByUsername(username: string) {
   const cleanedUsername = String(username ?? "").trim().replace(/^@+/, "").toLowerCase();
-  const primary = await supabase
-    .from("profiles")
-    .select(FRIEND_REQUEST_PRIVACY_SELECT_COLUMNS)
-    .eq("username", cleanedUsername)
-    .limit(1)
-    .maybeSingle();
-
-  return primary;
+  return queryProfileByUsername(cleanedUsername);
 }
 
 export async function queryFriendRequestTargetById(userId: string) {
   const normalizedUserId = String(userId ?? "").trim();
-  const primary = await supabase
-    .from("profiles")
-    .select(FRIEND_REQUEST_PRIVACY_SELECT_COLUMNS)
-    .eq("id", normalizedUserId)
-    .limit(1)
-    .maybeSingle();
-
-  return primary;
+  return queryProfileById(normalizedUserId);
 }
 
 export async function evaluateFriendRequestPermission(

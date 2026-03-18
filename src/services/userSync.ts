@@ -1,5 +1,5 @@
 import type { User as SupabaseUser } from "@supabase/supabase-js";
-import { supabase } from "./supabase";
+import { isDirectUsersRestBlocked, supabase } from "./supabase";
 import { ensureProfileForUser, type ProfileRow } from "./profile/profileService";
 import { normalizeEmail } from "./usernameAvailability";
 
@@ -158,7 +158,7 @@ export async function ensureUser(identity: AuthIdentityInput, options: EnsureUse
 
   // update cached email if changed
   const normalizedEmail = normalizeEmail(authUser.email ?? "");
-  if (normalizedEmail && profile.email !== normalizedEmail) {
+  if (normalizedEmail && profile.email !== normalizedEmail && !isDirectUsersRestBlocked()) {
     await supabase.from("profiles").update({ email: normalizedEmail }).eq("id", profile.id);
   }
 

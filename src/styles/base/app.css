@@ -12,7 +12,7 @@
   --cool-neutral-300: #a8a8a8;
   --cool-neutral-400: #7a7a7a;
   --cool-neutral-500: #4f4f4f;
-  --cool-neutral-600: #1e1e1e;
+  --cool-neutral-600: #141414;
   --cool-neutral-700: #101010;
 
   --slate-100: #ededed;
@@ -235,10 +235,6 @@ body[data-ui-lockdown="true"] :is(
   user-select: text !important;
 }
 
-/*
-  Hide scrollbar arrow buttons globally in Blink/WebKit/Electron without
-  removing the scrollbar itself.
-*/
 *::-webkit-scrollbar-button,
 *::-webkit-scrollbar-button:single-button,
 *::-webkit-scrollbar-button:double-button,
@@ -282,11 +278,7 @@ body[data-ui-lockdown="true"] :is(
   margin: 0 !important;
 }
 
-/*
-  Firefox-only scrollbar fallback.
-  Chromium/Electron now support scrollbar-width/color, and non-auto values there
-  can override ::-webkit-scrollbar styling, bringing the native Windows arrows back.
-*/
+
 @supports (-moz-appearance: none) {
   html,
   body,

@@ -26,7 +26,19 @@ export interface UserRow {
 export { supabase };
 
 export function isDirectUsersRestBlocked(): boolean {
-  return false;
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  const protocol = String(window.location.protocol ?? "").trim().toLowerCase();
+  const hostname = String(window.location.hostname ?? "").trim().toLowerCase();
+  const isLoopbackHost = hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+  const isDesktopShell = protocol === "app:" || protocol === "file:";
+  if (isLoopbackHost || isDesktopShell) {
+    return false;
+  }
+
+  return import.meta.env.PROD;
 }
 
 export interface SupabaseFunctionHeadersOptions {

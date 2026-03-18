@@ -1,7 +1,12 @@
-import { supabase } from "./client";
-import { listFriendRequests, type FriendRequestListRow } from "../services/friends/friendRequestsApi";
+import {
+  acceptFriendRequest as acceptFriendRequestApi,
+  createFriendRequest,
+  listFriendRequests,
+  rejectFriendRequest as rejectFriendRequestApi,
+} from "../services/friends/friendRequestsApi";
 import { mapFriendRequestRowToEntity, mapProfileRowToEntity, type UserProfileEntity } from "../stores/entities";
 import type { FriendRequestEntity } from "../stores/entities";
+import { queryProfilesByIds } from "../services/profile/profileReadApi";
 
 interface ProfileLookupRow {
   id: string;
@@ -25,10 +30,7 @@ async function fetchProfilesByIds(userIds: string[]): Promise<UserProfileEntity[
     return [];
   }
 
-  const { data, error } = await supabase
-    .from("profiles")
-    .select("id,username,display_name,avatar_url,banner_url,bio,updated_at")
-    .in("id", normalizedUserIds);
+  const { data, error } = await queryProfilesByIds(normalizedUserIds);
 
   if (error) {
     throw error;
@@ -75,33 +77,13 @@ export async function hydrateFriends(currentUserId: string): Promise<FriendsHydr
 }
 
 export async function sendFriendRequest(addresseeId: string): Promise<FriendRequestEntity> {
-  const { data, error } = await supabase
-    .from("friend_requests")
-    .insert({
-      addressee_id: addresseeId,
-      status: "pending",
-    })
-    .select("id,requester_id,addressee_id,status,created_at")
-    .limit(1)
-    .maybeSingle();
-
-  if (error) {
-    throw error;
-  }
-
-  return mapFriendRequestRowToEntity(data as FriendRequestListRow);
+  return mapFriendRequestRowToEntity(await createFriendRequest(addresseeId));
 }
 
 export async function acceptFriendRequest(requestId: string): Promise<void> {
-  const { error } = await supabase.from("friend_requests").update({ status: "accepted" }).eq("id", requestId);
-  if (error) {
-    throw error;
-  }
+  await acceptFriendRequestApi(requestId);
 }
 
 export async function rejectFriendRequest(requestId: string): Promise<void> {
-  const { error } = await supabase.from("friend_requests").update({ status: "rejected" }).eq("id", requestId);
-  if (error) {
-    throw error;
-  }
+  await rejectFriendRequestApi(requestId);
 }
