@@ -38,6 +38,10 @@
   grid-template-columns: minmax(0, 1fr) 320px;
 }
 
+.dm-chat__body--group {
+  grid-template-columns: minmax(0, 1fr) 248px;
+}
+
 .dm-chat__body--voice-call-focus {
   grid-template-columns: minmax(0, 1fr);
 }
@@ -387,21 +391,21 @@
 }
 
 .dm-chat__group-sidebar {
-  background: #2b2d31;
+  background: var(--cool-neutral-600);
   border-left: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 .dm-chat__group-sidebar-panel {
   min-height: 100%;
-  padding: 14px 8px 12px;
+  padding: 10px 6px 10px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  background: #2b2d31;
+  gap: 8px;
+  background: var(--cool-neutral-600);
 }
 
 .dm-chat__group-sidebar-header {
-  padding: 0 8px;
+  padding: 0 6px;
 }
 
 .dm-chat__group-sidebar-title {
@@ -424,12 +428,12 @@
   appearance: none;
   width: 100%;
   border: 0;
-  border-radius: 8px;
+  border-radius: 6px;
   background: transparent;
-  padding: 8px;
+  padding: 5px 6px;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
-  gap: 12px;
+  gap: 10px;
   align-items: center;
   cursor: pointer;
   text-align: left;
@@ -453,8 +457,8 @@
 
 .dm-chat__group-member-avatar-wrap {
   position: relative;
-  width: 40px;
-  height: 40px;
+  width: 34px;
+  height: 34px;
 }
 
 .dm-chat__group-member-avatar {
@@ -469,10 +473,10 @@
   position: absolute;
   right: -1px;
   bottom: -1px;
-  width: 14px;
-  height: 14px;
+  width: 12px;
+  height: 12px;
   border-radius: 999px;
-  border: 3px solid #2b2d31;
+  border: 2px solid var(--cool-neutral-600);
   background: #8b93a2;
 }
 
@@ -510,14 +514,14 @@
 
 .dm-chat__group-member-name {
   color: #f2f3f5;
-  font-size: 15px;
+  font-size: 14px;
   line-height: 1.25;
   font-weight: 600;
 }
 
 .dm-chat__group-member-meta {
   color: #a8afb9;
-  font-size: 12px;
+  font-size: 11px;
   line-height: 1.2;
 }
 
@@ -1190,6 +1194,16 @@
   gap: 1px;
 }
 
+.dm-chat__header-subtitle {
+  margin: 0;
+  color: rgba(185, 192, 203, 0.9);
+  font-size: 11px;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .dm-chat__header-name {
   margin: 0;
   font-family: var(--font-sans);
@@ -1449,6 +1463,11 @@
   margin: 0 0 10px;
 }
 
+.dm-chat__intro--group {
+  gap: 4px;
+  padding-top: 14px;
+}
+
 .dm-chat__intro-avatar {
   width: 72px;
   height: 72px;
@@ -1456,6 +1475,12 @@
   object-fit: cover;
   display: block;
   margin: 0 0 2px;
+}
+
+.dm-chat__intro-avatar--group {
+  width: 78px;
+  height: 78px;
+  margin-bottom: 8px;
 }
 
 .dm-chat__intro-name {
@@ -1466,6 +1491,15 @@
   line-height: 1.05;
   font-weight: 600;
   letter-spacing: -0.01em;
+}
+
+.dm-chat__intro-subtitle {
+  margin: 0 0 4px;
+  color: rgba(185, 192, 203, 0.9);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.2;
+  font-weight: 600;
 }
 
 .dm-chat__intro-copy {

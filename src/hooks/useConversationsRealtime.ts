@@ -42,6 +42,11 @@ interface MessageRecord {
   created_at?: string | null;
 }
 
+interface ConversationMemberRecord {
+  conversation_id?: string | null;
+  user_id?: string | null;
+}
+
 export interface ConversationMessageInsertEvent {
   messageId: string;
   conversationId: string;
@@ -301,6 +306,9 @@ export function useConversationsRealtime(
 
     let isDisposed = false;
     let channel: RealtimeChannel | null = null;
+    const invalidateConversationsQuery = (): void => {
+      void queryClient.invalidateQueries({ queryKey, exact: true });
+    };
 
     const applyRealtimeChange = (payload: RealtimePostgresChangesPayload<ConversationRecord>): void => {
       const nextConversation = normalizeConversation(payload.new as ConversationRecord | null);
@@ -334,6 +342,7 @@ export function useConversationsRealtime(
         const safeCurrent = Array.isArray(current) ? current : [];
         const existingConversation = safeCurrent.find((item) => item.id === conversationId);
         if (!existingConversation) {
+          invalidateConversationsQuery();
           return safeCurrent;
         }
         isRelevantConversation = true;
@@ -361,6 +370,23 @@ export function useConversationsRealtime(
       onMessageInsert(normalizedEvent);
     };
 
+    const applyConversationMemberChange = (
+      payload: RealtimePostgresChangesPayload<ConversationMemberRecord>,
+    ): void => {
+      const nextRecord = (payload.new ?? null) as ConversationMemberRecord | null;
+      const previousRecord = (payload.old ?? null) as ConversationMemberRecord | null;
+      const affectedUserId = String(
+        nextRecord?.user_id
+        ?? previousRecord?.user_id
+        ?? "",
+      ).trim();
+      if (!affectedUserId || affectedUserId !== normalizedUserId) {
+        return;
+      }
+
+      invalidateConversationsQuery();
+    };
+
     const bootstrapTimer = window.setTimeout(() => {
       if (isDisposed) {
         return;
@@ -372,6 +398,11 @@ export function useConversationsRealtime(
           "postgres_changes",
           { event: "*", schema: "public", table: "conversations" },
           applyRealtimeChange,
+        )
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "conversation_members", filter: `user_id=eq.${normalizedUserId}` },
+          applyConversationMemberChange,
         )
         .on(
           "postgres_changes",

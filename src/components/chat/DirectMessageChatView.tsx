@@ -4,6 +4,7 @@ import { gsap } from "gsap";
 import { ScrollToPlugin } from "gsap/ScrollToPlugin";
 import twemoji from "twemoji";
 import MaterialSymbolIcon from "../ui/MaterialSymbolIcon";
+import GroupCompositeAvatar from "../ui/GroupCompositeAvatar";
 import Modal from "../ui/Modal";
 import SpotifyIcon from "../ui/SpotifyIcon";
 import Tooltip from "../ui/Tooltip";
@@ -2795,6 +2796,18 @@ export default function DirectMessageChatView({
     });
   }, [conversationParticipants, currentParticipantIds, currentUser, isGroupConversation]);
   const groupSidebarMemberCount = groupSidebarMembers.length;
+  const groupMembersLabel = groupSidebarMemberCount <= 0
+    ? "Grupo privado"
+    : (groupSidebarMemberCount === 1 ? "1 membro" : `${groupSidebarMemberCount} membros`);
+  const groupAvatarParticipants = useMemo(
+    () => groupSidebarMembers.map((member) => ({
+      userId: member.lookupId,
+      username: member.username,
+      displayName: member.displayName,
+      avatarSrc: member.avatarSrc,
+    })),
+    [groupSidebarMembers],
+  );
 
   const isCurrentUserSender = useCallback(
     (userId: string): boolean => {
@@ -6814,21 +6827,33 @@ export default function DirectMessageChatView({
       <header className="dm-chat__header" role="banner">
         <div className="dm-chat__header-user">
           <div className="dm-chat__header-avatar-wrap">
-            <img
-              className="dm-chat__header-avatar"
-              src={targetAvatarSrc}
-              alt={`Avatar de ${safeTargetDisplayName}`}
-              loading="eager"
-              onError={(event) => {
-                const target = event.currentTarget;
-                if (target.src !== targetFallbackAvatar) {
-                  target.src = targetFallbackAvatar;
-                }
-              }}
-            />
+            {isGroupConversation ? (
+              <GroupCompositeAvatar
+                className="dm-chat__header-avatar dm-chat__header-avatar--group"
+                participants={groupAvatarParticipants}
+                label={safeTargetDisplayName}
+                fallbackSrc={targetAvatarSrc}
+              />
+            ) : (
+              <img
+                className="dm-chat__header-avatar"
+                src={targetAvatarSrc}
+                alt={`Avatar de ${safeTargetDisplayName}`}
+                loading="eager"
+                onError={(event) => {
+                  const target = event.currentTarget;
+                  if (target.src !== targetFallbackAvatar) {
+                    target.src = targetFallbackAvatar;
+                  }
+                }}
+              />
+            )}
           </div>
           <div className="dm-chat__header-meta">
             <h2 className="dm-chat__header-name">{safeTargetDisplayName}</h2>
+            {isGroupConversation ? (
+              <p className="dm-chat__header-subtitle">{groupMembersLabel}</p>
+            ) : null}
           </div>
         </div>
         <div className="dm-chat__header-tools">
@@ -6907,7 +6932,7 @@ export default function DirectMessageChatView({
       </header>
       ) : null}
 
-      <div className={`dm-chat__body${shouldHideVoiceCallChrome ? " dm-chat__body--voice-call-focus" : ""}`}>
+      <div className={`dm-chat__body${shouldHideVoiceCallChrome ? " dm-chat__body--voice-call-focus" : ""}${isGroupConversation ? " dm-chat__body--group" : ""}`}>
         <div className="dm-chat__main">
           {hasIncomingVoiceInvite ? (
             <section className="dm-chat__rejoin-stage dm-chat__rejoin-stage--compact" aria-label="Convite de chamada de voz">
@@ -7039,23 +7064,35 @@ export default function DirectMessageChatView({
           {loadError ? <p className="dm-chat__state dm-chat__state--error">{loadError}</p> : null}
           {shouldShowMessagesSkeleton ? <MessagesSkeleton /> : null}
           {!loadError ? (
-            <section className="dm-chat__intro" aria-label={`Inicio da conversa com ${safeTargetDisplayName}`}>
-              <img
-                className="dm-chat__intro-avatar"
-                src={targetAvatarSrc}
-                alt={`Avatar de ${safeTargetDisplayName}`}
-                loading="eager"
-                onError={(event) => {
-                  const target = event.currentTarget;
-                  if (target.src !== targetFallbackAvatar) {
-                    target.src = targetFallbackAvatar;
-                  }
-                }}
-              />
+            <section className={`dm-chat__intro${isGroupConversation ? " dm-chat__intro--group" : ""}`} aria-label={`Inicio da conversa com ${safeTargetDisplayName}`}>
+              {isGroupConversation ? (
+                <GroupCompositeAvatar
+                  className="dm-chat__intro-avatar dm-chat__intro-avatar--group"
+                  participants={groupAvatarParticipants}
+                  label={safeTargetDisplayName}
+                  fallbackSrc={targetAvatarSrc}
+                />
+              ) : (
+                <img
+                  className="dm-chat__intro-avatar"
+                  src={targetAvatarSrc}
+                  alt={`Avatar de ${safeTargetDisplayName}`}
+                  loading="eager"
+                  onError={(event) => {
+                    const target = event.currentTarget;
+                    if (target.src !== targetFallbackAvatar) {
+                      target.src = targetFallbackAvatar;
+                    }
+                  }}
+                />
+              )}
               <h3 className="dm-chat__intro-name">{safeTargetDisplayName}</h3>
+              {isGroupConversation ? (
+                <p className="dm-chat__intro-subtitle">{groupMembersLabel}</p>
+              ) : null}
               <p className="dm-chat__intro-copy">
                 {isGroupConversation
-                  ? `Este e o inicio do seu grupo privado com ${safeTargetDisplayName}.`
+                  ? `Bem-vindo ao comeco do grupo ${safeTargetDisplayName}.`
                   : `Este e o inicio da sua conversa privada com ${safeTargetDisplayName}.`}
               </p>
             </section>
