@@ -14,6 +14,33 @@ import type {
   UserProfileEntity,
 } from "../stores/entities";
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function sanitizeConversationEntity(conversation: ConversationEntity): ConversationEntity | null {
+  const conversationId = String(conversation.id ?? "").trim();
+  if (!conversationId || conversation.scopeType !== "dm") {
+    return null;
+  }
+
+  const participantIds = Array.from(
+    new Set(
+      (Array.isArray(conversation.participantIds) ? conversation.participantIds : [])
+        .map((participantId) => String(participantId ?? "").trim())
+        .filter((participantId) => UUID_PATTERN.test(participantId)),
+    ),
+  );
+
+  if (participantIds.length !== 2) {
+    return null;
+  }
+
+  return {
+    ...conversation,
+    scopeType: "dm",
+    participantIds,
+  };
+}
+
 function withAccount<T extends { accountId: string }>(accountId: string, value: Omit<T, "accountId">): T {
   return {
     ...value,
@@ -23,7 +50,10 @@ function withAccount<T extends { accountId: string }>(accountId: string, value: 
 
 export async function readConversationCache(accountId: string): Promise<Record<string, ConversationEntity>> {
   const rows = await messlyCacheDb.conversations.where("accountId").equals(accountId).toArray();
-  return Object.fromEntries(rows.map(({ accountId: _accountId, ...conversation }) => [conversation.id, conversation]));
+  const sanitizedRows = rows
+    .map(({ accountId: _accountId, ...conversation }) => sanitizeConversationEntity(conversation))
+    .filter((conversation): conversation is ConversationEntity => conversation !== null);
+  return Object.fromEntries(sanitizedRows.map((conversation) => [conversation.id, conversation]));
 }
 
 export async function writeConversationCache(

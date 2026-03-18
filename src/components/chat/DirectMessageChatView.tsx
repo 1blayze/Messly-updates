@@ -45,6 +45,7 @@ import {
 } from "../../services/chat/chatApi";
 import { prepareAttachmentUpload, uploadAttachmentBlob } from "../../services/media/attachmentPipeline";
 import { incrementMetric, recordLatency, reportClientError } from "../../services/observability/clientObservability";
+import { authService } from "../../services/auth";
 import { supabase } from "../../services/supabase";
 import VoiceCallInterface from "../../voice/ui/callInterface";
 import {
@@ -210,6 +211,39 @@ interface MessageRow {
 
 interface MessageReadRow {
   message_id: string;
+}
+
+function isAuthRejectedSupabaseError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const casted = error as {
+    status?: unknown;
+    code?: unknown;
+    message?: unknown;
+    details?: unknown;
+  };
+  const status = Number(casted.status ?? 0);
+  const code = String(casted.code ?? "").trim().toUpperCase();
+  const message = String(casted.message ?? "").trim().toLowerCase();
+  const details = String(casted.details ?? "").trim().toLowerCase();
+  const combined = `${code} ${message} ${details}`;
+
+  return (
+    status === 401 ||
+    status === 403 ||
+    code === "UNAUTHENTICATED" ||
+    code === "UNAUTHORIZED" ||
+    code === "INVALID_TOKEN" ||
+    code === "INVALID_JWT" ||
+    code === "JWT_EXPIRED" ||
+    code === "PGRST301" ||
+    combined.includes("invalid jwt") ||
+    combined.includes("jwt expired") ||
+    combined.includes("session from session_id claim in jwt does not exist") ||
+    combined.includes("session_id claim")
+  );
 }
 
 interface ChatMessageItem {
@@ -3309,6 +3343,11 @@ export default function DirectMessageChatView({
 
   const markConversationAsRead = useCallback(
     async (nextMessages: ChatMessageItem[]): Promise<void> => {
+      const validatedAccessToken = await authService.getValidatedEdgeAccessToken().catch(() => null);
+      if (!validatedAccessToken) {
+        return;
+      }
+
       const incomingIds = nextMessages
         .filter(
           (message) =>
@@ -3331,6 +3370,9 @@ export default function DirectMessageChatView({
         .in("message_id", incomingIds);
 
       if (readsError) {
+        if (isAuthRejectedSupabaseError(readsError)) {
+          void authService.clearLocalSession().catch(() => undefined);
+        }
         return;
       }
 
@@ -3340,7 +3382,7 @@ export default function DirectMessageChatView({
         return;
       }
 
-      await supabase.from("message_reads").upsert(
+      const { error: upsertReadError } = await supabase.from("message_reads").upsert(
         missingIds.map((messageId) => ({
           message_id: messageId,
           user_id: currentUserId,
@@ -3350,6 +3392,10 @@ export default function DirectMessageChatView({
           onConflict: "message_id,user_id",
         },
       );
+
+      if (upsertReadError && isAuthRejectedSupabaseError(upsertReadError)) {
+        void authService.clearLocalSession().catch(() => undefined);
+      }
     },
     [currentUserId],
   );

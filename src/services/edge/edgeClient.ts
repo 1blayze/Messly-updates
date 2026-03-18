@@ -283,6 +283,7 @@ async function invokeEdgeRequest<TResponse>(
         } catch {
           // Fall through to standard missing auth error handling below.
         }
+        await authService.clearLocalSession().catch(() => undefined);
         throw buildMissingEdgeAuthError();
       }
 
@@ -318,8 +319,10 @@ async function invokeEdgeRequest<TResponse>(
             continue;
           }
           activateEdgeUnauthorizedCooldown();
+          await authService.clearLocalSession().catch(() => undefined);
         } catch {
           activateEdgeUnauthorizedCooldown();
+          await authService.clearLocalSession().catch(() => undefined);
           // Fall through to the standard error handling below.
         }
       }

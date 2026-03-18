@@ -27,6 +27,7 @@ const PRESENCE_FETCH_RETRY_DELAY_MS = 2_500;
 const PRESENCE_REALTIME_RECONNECT_DELAY_MS = 1_500;
 const PRESENCE_REALTIME_DISCONNECT_GRACE_MS = 750;
 const PRESENCE_DEBUG_ENABLED = import.meta.env.DEV;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 interface PresenceEntry {
   userId: string;
@@ -191,7 +192,7 @@ function normalizeUserIds(userIds: string[]): string[] {
     new Set(
       userIds
         .map((userId) => String(userId ?? "").trim())
-        .filter((userId) => Boolean(userId)),
+        .filter((userId) => UUID_PATTERN.test(userId)),
     ),
   ).sort((left, right) => left.localeCompare(right));
 }
@@ -395,6 +396,9 @@ async function fetchPresenceRows(userIds: string[]): Promise<void> {
 
     if (error) {
       shouldRetry = !isPresenceAuthError(error);
+      if (isPresenceAuthError(error)) {
+        void authService.clearLocalSession().catch(() => undefined);
+      }
       logPresenceDebug("fetch_rows_failed", {
         reason: String((error as { message?: unknown } | null)?.message ?? "unknown"),
         userCount: userIds.length,
@@ -412,6 +416,9 @@ async function fetchPresenceRows(userIds: string[]): Promise<void> {
     }
   } catch (error) {
     shouldRetry = !isPresenceAuthError(error);
+    if (isPresenceAuthError(error)) {
+      void authService.clearLocalSession().catch(() => undefined);
+    }
     logPresenceDebug("fetch_rows_threw", {
       reason: error instanceof Error ? error.message : String(error),
       userCount: userIds.length,

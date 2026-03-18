@@ -3,10 +3,6 @@ import { authService } from "../services/auth";
 import { getGatewaySocketUrl } from "../config/domains";
 
 export async function getSupabaseAccessToken(): Promise<string | null> {
-  const currentAccessToken = await authService.getCurrentAccessToken().catch(() => null);
-  if (currentAccessToken) {
-    return currentAccessToken;
-  }
   return authService.getValidatedEdgeAccessToken();
 }
 

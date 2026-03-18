@@ -269,7 +269,8 @@ const SIDEBAR_IDENTITY_CACHE_PREFIX = "messly:sidebar-identity:";
 const DIRECT_MESSAGES_CACHE_PREFIX = "messly:direct-messages:";
 const DIRECT_MESSAGES_FAVORITES_CACHE_PREFIX = "messly:direct-messages:favorites:";
 const SIDEBAR_RESOLVED_MEDIA_CACHE_PREFIX = "messly:sidebar-media:";
-const DIRECT_MESSAGES_CACHE_VERSION = 11;
+const DIRECT_MESSAGES_CACHE_VERSION = 12;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const DM_PRELOAD_LIMIT = 30;             
 const DM_PRELOAD_HOVER_DEBOUNCE_MS = 150; 
 const DM_PRELOAD_MAX_AGE_MS = 90_000;
@@ -658,7 +659,7 @@ function readDirectMessagesCache(userId: string | null | undefined): DirectMessa
         const conversationId = String(casted.conversationId ?? "").trim();
         const userIdValue = String(casted.userId ?? "").trim();
         const conversationType: "dm" = "dm";
-        if (!conversationId || !userIdValue) {
+        if (!conversationId || !UUID_PATTERN.test(userIdValue)) {
           return null;
         }
         const username = normalizeIdentityUsername(casted.username);
@@ -686,14 +687,14 @@ function readDirectMessagesCache(userId: string | null | undefined): DirectMessa
           new Set(
             cachedParticipantIds
               .map((participantId) => String(participantId ?? "").trim())
-              .filter((participantId) => Boolean(participantId)),
+              .filter((participantId) => UUID_PATTERN.test(participantId)),
           ),
         );
         const cachedParticipants = Array.isArray(casted.participants) ? casted.participants : [];
         const participants = cachedParticipants
           .map((participant): SidebarDirectMessageParticipant | null => {
             const participantUserId = String(participant?.userId ?? "").trim();
-            if (!participantUserId) {
+            if (!UUID_PATTERN.test(participantUserId)) {
               return null;
             }
             const participantUsername = normalizeIdentityUsername(participant?.username);
