@@ -5,11 +5,79 @@
   border-top: 1px solid var(--border-subtle);
   background: #000000;
   box-shadow: none;
-  padding: 40px 0 18px;
+  padding: 18px 12px 18px;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 14px;
+  gap: 10px;
+}
+
+.voice-call-panel__meta {
+  width: min(480px, 100%);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.voice-call-panel__state {
+  font-size: 13px;
+  font-weight: 700;
+  color: #d8dce6;
+  letter-spacing: 0.01em;
+}
+
+.voice-call-panel__state--connecting {
+  color: #8bb2ff;
+}
+
+.voice-call-panel__elapsed {
+  font-size: 13px;
+  font-weight: 700;
+  color: #f5f7fb;
+  font-variant-numeric: tabular-nums;
+}
+
+.voice-call-panel__participants-label {
+  margin: 0;
+  width: min(480px, 100%);
+  color: #a8b0bd;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.voice-call-panel__notice {
+  margin: 0;
+  width: min(480px, 100%);
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.voice-call-panel__notice--error {
+  color: #ffd7db;
+  border-color: rgba(229, 72, 90, 0.55);
+  background: rgba(229, 72, 90, 0.16);
+}
+
+.voice-call-panel__notice--warning {
+  color: #ffe5bf;
+  border-color: rgba(246, 180, 79, 0.5);
+  background: rgba(246, 180, 79, 0.14);
+}
+
+.voice-call-panel__diagnostics {
+  margin: 0;
+  width: min(480px, 100%);
+  color: #9fb7e4;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.voice-call-panel__diagnostics--warn {
+  color: #ffb4bc;
 }
 
 .voice-call-panel__avatars {

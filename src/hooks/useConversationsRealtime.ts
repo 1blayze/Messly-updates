@@ -375,16 +375,36 @@ export function useConversationsRealtime(
     ): void => {
       const nextRecord = (payload.new ?? null) as ConversationMemberRecord | null;
       const previousRecord = (payload.old ?? null) as ConversationMemberRecord | null;
+      const conversationId = String(
+        nextRecord?.conversation_id
+        ?? previousRecord?.conversation_id
+        ?? "",
+      ).trim();
       const affectedUserId = String(
         nextRecord?.user_id
         ?? previousRecord?.user_id
         ?? "",
       ).trim();
-      if (!affectedUserId || affectedUserId !== normalizedUserId) {
+
+      if (affectedUserId === normalizedUserId) {
+        invalidateConversationsQuery();
         return;
       }
 
-      invalidateConversationsQuery();
+      if (!conversationId) {
+        return;
+      }
+
+      let isRelevantConversation = false;
+      queryClient.setQueryData<ConversationRealtimeRow[]>(queryKey, (current) => {
+        const safeCurrent = Array.isArray(current) ? current : [];
+        isRelevantConversation = safeCurrent.some((item) => item.id === conversationId);
+        return safeCurrent;
+      });
+
+      if (isRelevantConversation) {
+        invalidateConversationsQuery();
+      }
     };
 
     const bootstrapTimer = window.setTimeout(() => {
@@ -401,7 +421,7 @@ export function useConversationsRealtime(
         )
         .on(
           "postgres_changes",
-          { event: "*", schema: "public", table: "conversation_members", filter: `user_id=eq.${normalizedUserId}` },
+          { event: "*", schema: "public", table: "conversation_members" },
           applyConversationMemberChange,
         )
         .on(

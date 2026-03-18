@@ -30,15 +30,10 @@ export function resolveGroupDmDisplayName(
   storedName: string | null | undefined,
   participantDisplayNames: string[],
 ): string {
-  const resolvedDynamicName = buildGroupDmName(participantDisplayNames);
-  if (resolvedDynamicName !== "Grupo privado") {
-    return resolvedDynamicName;
-  }
-
   const normalizedStoredName = String(storedName ?? "").trim();
   if (normalizedStoredName) {
     return normalizedStoredName;
   }
 
-  return resolvedDynamicName;
+  return buildGroupDmName(participantDisplayNames);
 }

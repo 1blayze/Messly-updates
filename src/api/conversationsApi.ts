@@ -138,6 +138,111 @@ function isMissingCreateGroupDmRpcError(error: unknown): boolean {
   );
 }
 
+function isMissingUpdateGroupDmRpcError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const candidate = error as { code?: string; message?: string; details?: string; hint?: string };
+  const code = String(candidate.code ?? "").trim().toUpperCase();
+  const message = String(candidate.message ?? "").toLowerCase();
+  const details = String(candidate.details ?? "").toLowerCase();
+  const hint = String(candidate.hint ?? "").toLowerCase();
+  return (
+    code === "404" ||
+    code === "PGRST202" ||
+    code === "42883" ||
+    message.includes("update_group_dm") ||
+    details.includes("update_group_dm") ||
+    hint.includes("update_group_dm") ||
+    message.includes("function was not found") ||
+    details.includes("function was not found")
+  );
+}
+
+function isMissingLeaveGroupDmRpcError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const candidate = error as { code?: string; message?: string; details?: string; hint?: string };
+  const code = String(candidate.code ?? "").trim().toUpperCase();
+  const message = String(candidate.message ?? "").toLowerCase();
+  const details = String(candidate.details ?? "").toLowerCase();
+  const hint = String(candidate.hint ?? "").toLowerCase();
+  return (
+    code === "404" ||
+    code === "PGRST202" ||
+    code === "42883" ||
+    message.includes("leave_group_dm") ||
+    details.includes("leave_group_dm") ||
+    hint.includes("leave_group_dm") ||
+    message.includes("function was not found") ||
+    details.includes("function was not found")
+  );
+}
+
+function isMissingAddGroupDmMembersRpcError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const candidate = error as { code?: string; message?: string; details?: string; hint?: string };
+  const code = String(candidate.code ?? "").trim().toUpperCase();
+  const message = String(candidate.message ?? "").toLowerCase();
+  const details = String(candidate.details ?? "").toLowerCase();
+  const hint = String(candidate.hint ?? "").toLowerCase();
+  return (
+    code === "404" ||
+    code === "PGRST202" ||
+    code === "42883" ||
+    message.includes("add_group_dm_members") ||
+    details.includes("add_group_dm_members") ||
+    hint.includes("add_group_dm_members") ||
+    message.includes("function was not found") ||
+    details.includes("function was not found")
+  );
+}
+
+function isMissingRemoveGroupDmMemberRpcError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const candidate = error as { code?: string; message?: string; details?: string; hint?: string };
+  const code = String(candidate.code ?? "").trim().toUpperCase();
+  const message = String(candidate.message ?? "").toLowerCase();
+  const details = String(candidate.details ?? "").toLowerCase();
+  const hint = String(candidate.hint ?? "").toLowerCase();
+  return (
+    code === "404" ||
+    code === "PGRST202" ||
+    code === "42883" ||
+    message.includes("remove_group_dm_member") ||
+    details.includes("remove_group_dm_member") ||
+    hint.includes("remove_group_dm_member") ||
+    message.includes("function was not found") ||
+    details.includes("function was not found")
+  );
+}
+
+function isMissingTransferGroupDmOwnerRpcError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const candidate = error as { code?: string; message?: string; details?: string; hint?: string };
+  const code = String(candidate.code ?? "").trim().toUpperCase();
+  const message = String(candidate.message ?? "").toLowerCase();
+  const details = String(candidate.details ?? "").toLowerCase();
+  const hint = String(candidate.hint ?? "").toLowerCase();
+  return (
+    code === "404" ||
+    code === "PGRST202" ||
+    code === "42883" ||
+    message.includes("transfer_group_dm_owner") ||
+    details.includes("transfer_group_dm_owner") ||
+    hint.includes("transfer_group_dm_owner") ||
+    message.includes("function was not found") ||
+    details.includes("function was not found")
+  );
+}
+
 function toNullableTrimmedString(value: unknown): string | null {
   const normalized = String(value ?? "").trim();
   return normalized || null;
@@ -653,6 +758,158 @@ export async function createGroupConversation(
   const details = await getConversationDetails(createdConversationId);
   if (!details) {
     throw new Error("Falha ao carregar o grupo privado criado.");
+  }
+
+  return details;
+}
+
+export async function updateGroupConversation(
+  conversationId: string,
+  name?: string | null,
+  avatarUrl?: string | null,
+  options?: {
+    clearAvatar?: boolean;
+  },
+): Promise<ConversationDetails> {
+  const normalizedConversationId = String(conversationId ?? "").trim();
+  if (!normalizedConversationId) {
+    throw new Error("Grupo invalido para editar.");
+  }
+
+  const { data, error } = await supabase.rpc("update_group_dm", {
+    p_conversation_id: normalizedConversationId,
+    p_name: toNullableTrimmedString(name),
+    p_avatar_url: toNullableTrimmedString(avatarUrl),
+    p_clear_avatar: Boolean(options?.clearAvatar),
+  });
+
+  if (error) {
+    if (isMissingUpdateGroupDmRpcError(error)) {
+      throw new Error("Edicao de grupo indisponivel neste ambiente.");
+    }
+    throw error;
+  }
+
+  const updatedRow = (Array.isArray(data) ? data[0] : data) as ConversationRow | null;
+  const updatedConversationId = String(updatedRow?.id ?? "").trim() || normalizedConversationId;
+  const details = await getConversationDetails(updatedConversationId);
+  if (!details) {
+    throw new Error("Falha ao carregar o grupo atualizado.");
+  }
+
+  return details;
+}
+
+export async function leaveGroupConversation(conversationId: string): Promise<void> {
+  const normalizedConversationId = String(conversationId ?? "").trim();
+  if (!normalizedConversationId) {
+    throw new Error("Grupo invalido para sair.");
+  }
+
+  const { error } = await supabase.rpc("leave_group_dm", {
+    p_conversation_id: normalizedConversationId,
+  });
+
+  if (error) {
+    if (isMissingLeaveGroupDmRpcError(error)) {
+      throw new Error("Saida de grupo indisponivel neste ambiente.");
+    }
+    throw error;
+  }
+}
+
+export async function addGroupConversationMembers(
+  conversationId: string,
+  participantIds: string[],
+): Promise<ConversationDetails> {
+  const normalizedConversationId = String(conversationId ?? "").trim();
+  if (!normalizedConversationId) {
+    throw new Error("Grupo invalido para convidar membros.");
+  }
+
+  const normalizedParticipantIds = Array.from(
+    new Set(
+      participantIds
+        .map((participantId) => String(participantId ?? "").trim())
+        .filter((participantId) => Boolean(participantId)),
+    ),
+  );
+  if (normalizedParticipantIds.length === 0) {
+    throw new Error("Selecione pelo menos uma pessoa para convidar.");
+  }
+
+  const { data, error } = await supabase.rpc("add_group_dm_members", {
+    p_conversation_id: normalizedConversationId,
+    p_participant_ids: normalizedParticipantIds,
+  });
+
+  if (error) {
+    if (isMissingAddGroupDmMembersRpcError(error)) {
+      throw new Error("Convites de grupo indisponiveis neste ambiente.");
+    }
+    throw error;
+  }
+
+  const updatedRow = (Array.isArray(data) ? data[0] : data) as ConversationRow | null;
+  const updatedConversationId = String(updatedRow?.id ?? "").trim() || normalizedConversationId;
+  const details = await getConversationDetails(updatedConversationId);
+  if (!details) {
+    throw new Error("Falha ao carregar o grupo apos o convite.");
+  }
+
+  return details;
+}
+
+export async function removeGroupConversationMember(
+  conversationId: string,
+  participantId: string,
+): Promise<void> {
+  const normalizedConversationId = String(conversationId ?? "").trim();
+  const normalizedParticipantId = String(participantId ?? "").trim();
+  if (!normalizedConversationId || !normalizedParticipantId) {
+    throw new Error("Membro invalido para remover do grupo.");
+  }
+
+  const { error } = await supabase.rpc("remove_group_dm_member", {
+    p_conversation_id: normalizedConversationId,
+    p_user_id: normalizedParticipantId,
+  });
+
+  if (error) {
+    if (isMissingRemoveGroupDmMemberRpcError(error)) {
+      throw new Error("Remocao de membros indisponivel neste ambiente.");
+    }
+    throw error;
+  }
+}
+
+export async function transferGroupConversationOwner(
+  conversationId: string,
+  newOwnerId: string,
+): Promise<ConversationDetails> {
+  const normalizedConversationId = String(conversationId ?? "").trim();
+  const normalizedNewOwnerId = String(newOwnerId ?? "").trim();
+  if (!normalizedConversationId || !normalizedNewOwnerId) {
+    throw new Error("Novo dono invalido para o grupo.");
+  }
+
+  const { data, error } = await supabase.rpc("transfer_group_dm_owner", {
+    p_conversation_id: normalizedConversationId,
+    p_new_owner_id: normalizedNewOwnerId,
+  });
+
+  if (error) {
+    if (isMissingTransferGroupDmOwnerRpcError(error)) {
+      throw new Error("Transferencia de dono indisponivel neste ambiente.");
+    }
+    throw error;
+  }
+
+  const updatedRow = (Array.isArray(data) ? data[0] : data) as ConversationRow | null;
+  const updatedConversationId = String(updatedRow?.id ?? "").trim() || normalizedConversationId;
+  const details = await getConversationDetails(updatedConversationId);
+  if (!details) {
+    throw new Error("Falha ao carregar o grupo apos transferir a posse.");
   }
 
   return details;

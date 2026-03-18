@@ -15,23 +15,23 @@ export interface VoiceActivityDetectorOptions {
 }
 
 const DEFAULT_FFT_SIZE = 1024;
-const DEFAULT_THRESHOLD_DB = -52;
-const DEFAULT_SPEAKING_HANG_MS = 220;
-const DEFAULT_SMOOTHING = 0.1;
-const DEFAULT_MIN_VOICE_BAND_RATIO = 0.34;
-const DEFAULT_MAX_HIGH_BAND_RATIO = 0.5;
+const DEFAULT_THRESHOLD_DB = -54;
+const DEFAULT_SPEAKING_HANG_MS = 300;
+const DEFAULT_SMOOTHING = 0.08;
+const DEFAULT_MIN_VOICE_BAND_RATIO = 0.3;
+const DEFAULT_MAX_HIGH_BAND_RATIO = 0.56;
 const DEFAULT_MIN_ZERO_CROSSING_RATE = 0.02;
-const DEFAULT_MAX_ZERO_CROSSING_RATE = 0.22;
-const DEFAULT_CONFIDENCE_ATTACK = 0.2;
-const DEFAULT_CONFIDENCE_RELEASE = 0.1;
-const DEFAULT_OPEN_CONFIDENCE_THRESHOLD = 0.36;
+const DEFAULT_MAX_ZERO_CROSSING_RATE = 0.24;
+const DEFAULT_CONFIDENCE_ATTACK = 0.24;
+const DEFAULT_CONFIDENCE_RELEASE = 0.055;
+const DEFAULT_OPEN_CONFIDENCE_THRESHOLD = 0.28;
 const SPEECH_BAND_MIN_HZ = 220;
 const SPEECH_BAND_MAX_HZ = 4_200;
 const HIGH_BAND_MIN_HZ = 4_800;
 const HIGH_BAND_MAX_HZ = 12_000;
-const VOICE_PEAK_IMPULSE_THRESHOLD = 0.62;
-const VOICE_CREST_IMPULSE_THRESHOLD = 5.8;
-const VOICE_DB_JUMP_IMPULSE_THRESHOLD = 6;
+const VOICE_PEAK_IMPULSE_THRESHOLD = 0.7;
+const VOICE_CREST_IMPULSE_THRESHOLD = 6.4;
+const VOICE_DB_JUMP_IMPULSE_THRESHOLD = 7;
 const NOISE_FLOOR_ATTACK = 0.03;
 const NOISE_FLOOR_RELEASE = 0.98;
 
@@ -204,12 +204,13 @@ export class VoiceActivityDetector {
       this.noiseFloorDb = clamp(adaptive, -85, -38);
     }
 
-    const dynamicVoiceThreshold = Math.max(this.options.thresholdDb, this.noiseFloorDb + 9);
+    const dynamicVoiceThreshold = Math.max(this.options.thresholdDb, this.noiseFloorDb + 8);
     const likelyTransientImpulse =
       peak >= VOICE_PEAK_IMPULSE_THRESHOLD
       && crestFactor >= VOICE_CREST_IMPULSE_THRESHOLD
       && dbJump >= VOICE_DB_JUMP_IMPULSE_THRESHOLD
-      && highBandRatio >= 0.25;
+      && highBandRatio >= 0.32
+      && speechBandRatio < 0.58;
 
     const likelyHumanVoice =
       db >= dynamicVoiceThreshold
@@ -217,7 +218,7 @@ export class VoiceActivityDetector {
       && highBandRatio <= this.options.maxHighBandRatio
       && zeroCrossingRate >= this.options.minZeroCrossingRate
       && zeroCrossingRate <= this.options.maxZeroCrossingRate
-      && crestFactor <= 7.6
+      && crestFactor <= 8.4
       && !likelyTransientImpulse;
 
     this.speechConfidence = clamp(

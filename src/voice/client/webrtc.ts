@@ -35,10 +35,13 @@ const OPUS_FRAME_DURATION = 20;
 const VOICE_TARGET_LATENCY_MS = 60;
 const VOICE_MAX_JITTER_MS = 30;
 const VOICE_DEVICE_ID_STORAGE_KEY = "messly:voice:device-id:v1";
+const ICE_RESTART_COOLDOWN_MS = 4_000;
+
+const DEFAULT_STUN_URLS = ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"];
 
 const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
   {
-    urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"],
+    urls: DEFAULT_STUN_URLS,
   },
 ];
 
@@ -560,6 +563,46 @@ function normalizeMediaPreferences(preferences: VoiceCallMediaPreferences | null
   };
 }
 
+function parseIceServerUrls(urlsRaw: string | null | undefined): string[] {
+  const raw = String(urlsRaw ?? "").trim();
+  if (!raw) {
+    return [];
+  }
+
+  return raw
+    .split(/[\n,;\s]+/g)
+    .map((url) => url.trim())
+    .filter((url) => Boolean(url));
+}
+
+function resolveVoiceIceServers(): RTCIceServer[] {
+  const stunUrls = parseIceServerUrls(import.meta.env.VITE_VOICE_STUN_URLS);
+  const turnUrls = parseIceServerUrls(import.meta.env.VITE_VOICE_TURN_URLS);
+  const turnUsername = String(import.meta.env.VITE_VOICE_TURN_USERNAME ?? "").trim();
+  const turnCredential = String(import.meta.env.VITE_VOICE_TURN_CREDENTIAL ?? "").trim();
+
+  const servers: RTCIceServer[] = [];
+  if (stunUrls.length > 0) {
+    servers.push({
+      urls: stunUrls,
+    });
+  } else {
+    servers.push(...DEFAULT_ICE_SERVERS);
+  }
+
+  if (turnUrls.length > 0 && turnUsername && turnCredential) {
+    servers.push({
+      urls: turnUrls,
+      username: turnUsername,
+      credential: turnCredential,
+    });
+  }
+
+  return servers;
+}
+
+const VOICE_ICE_SERVERS = resolveVoiceIceServers();
+
 export class VoiceCallClient {
   private readonly roomId: string;
   private readonly self: VoiceUserIdentity;
@@ -590,6 +633,7 @@ export class VoiceCallClient {
   private readonly participants = new Map<string, VoiceParticipantState>();
   private readonly peers = new Map<string, PeerConnectionContext>();
   private readonly remoteAudioElements = new Map<string, HTMLAudioElement>();
+  private readonly lastIceRestartAtByPeer = new Map<string, number>();
   private pendingSpeakingState: PendingSpeakingState | null = null;
   private lastSignalingRttMs: number | null = null;
   private lastSignalingPongAtMs = 0;
@@ -734,9 +778,15 @@ export class VoiceCallClient {
         connectionState: "connecting",
       });
       this.localVoiceDetector = new VoiceActivityDetector(this.localStream, {
-        thresholdDb: -49,
-        speakingHangMs: 170,
-        smoothingTimeConstant: 0.06,
+        thresholdDb: -52,
+        speakingHangMs: 280,
+        smoothingTimeConstant: 0.08,
+        minVoiceBandRatio: 0.3,
+        maxHighBandRatio: 0.56,
+        maxZeroCrossingRate: 0.24,
+        confidenceAttack: 0.24,
+        confidenceRelease: 0.055,
+        openConfidenceThreshold: 0.28,
         onSpeakingChange: (speaking, level) => {
           const normalizedLevel = clamp(level, 0, 1);
           this.updateLocalParticipant({
@@ -818,6 +868,7 @@ export class VoiceCallClient {
 
     this.disposePeerConnections();
     clearRemoteAudioPlayback(this.remoteAudioElements);
+    this.lastIceRestartAtByPeer.clear();
     stopMediaStream(this.localStream);
     this.localStream = null;
     stopMediaStream(this.capturedMicrophoneStream);
@@ -997,7 +1048,7 @@ export class VoiceCallClient {
       }
 
       this.disposePeerConnections();
-      this.clearRemoteParticipants();
+      this.markRemoteParticipantsDisconnected();
       this.scheduleReconnect();
     });
 
@@ -1240,7 +1291,7 @@ export class VoiceCallClient {
     }
 
     const connection = new RTCPeerConnection({
-      iceServers: DEFAULT_ICE_SERVERS,
+      iceServers: VOICE_ICE_SERVERS,
       iceCandidatePoolSize: 2,
       bundlePolicy: "max-bundle",
       rtcpMuxPolicy: "require",
@@ -1299,6 +1350,7 @@ export class VoiceCallClient {
     connection.onconnectionstatechange = () => {
       const state = connection.connectionState;
       if (state === "connected") {
+        this.lastIceRestartAtByPeer.delete(userId);
         this.updateRemoteParticipant(userId, { connectionState: "connected" });
         return;
       }
@@ -1315,11 +1367,26 @@ export class VoiceCallClient {
 
       if (state === "failed") {
         this.updateRemoteParticipant(userId, { connectionState: "failed" });
-        try {
-          connection.restartIce();
-        } catch {
-          // Ignore restart errors.
-        }
+        void this.restartIceForPeer(userId, {
+          force: true,
+        });
+      }
+    };
+
+    connection.oniceconnectionstatechange = () => {
+      const state = connection.iceConnectionState;
+      if (state === "connected" || state === "completed") {
+        this.lastIceRestartAtByPeer.delete(userId);
+        return;
+      }
+      if (state === "disconnected") {
+        void this.restartIceForPeer(userId);
+        return;
+      }
+      if (state === "failed") {
+        void this.restartIceForPeer(userId, {
+          force: true,
+        });
       }
     };
 
@@ -1353,6 +1420,47 @@ export class VoiceCallClient {
       targetUserId: userId,
       sdp: localOffer,
     });
+  }
+
+  private async restartIceForPeer(userIdRaw: string, options?: { force?: boolean }): Promise<void> {
+    const userId = String(userIdRaw ?? "").trim();
+    if (!userId || this.leaving || !this.joinedRoom) {
+      return;
+    }
+
+    const peerContext = this.peers.get(userId);
+    if (!peerContext) {
+      return;
+    }
+
+    const now = Date.now();
+    const lastRestartAt = this.lastIceRestartAtByPeer.get(userId) ?? 0;
+    if (!options?.force && now - lastRestartAt < ICE_RESTART_COOLDOWN_MS) {
+      return;
+    }
+    this.lastIceRestartAtByPeer.set(userId, now);
+
+    const connection = peerContext.connection;
+    if (connection.signalingState !== "stable") {
+      return;
+    }
+
+    try {
+      const restartOffer = await connection.createOffer({ iceRestart: true });
+      await connection.setLocalDescription(restartOffer);
+      const localOffer = this.toLocalSdpPayload(connection.localDescription);
+      if (!localOffer) {
+        return;
+      }
+      this.updateRemoteParticipant(userId, { connectionState: "connecting" });
+      this.sendSignal({
+        type: "offer",
+        targetUserId: userId,
+        sdp: localOffer,
+      });
+    } catch {
+      // Ignore transient ICE restart failures.
+    }
   }
 
   private async setRemoteDescriptionWithRecovery(
@@ -1835,6 +1943,7 @@ export class VoiceCallClient {
     peerContext.connection.onicecandidate = null;
     peerContext.connection.ontrack = null;
     peerContext.connection.onconnectionstatechange = null;
+    peerContext.connection.oniceconnectionstatechange = null;
     try {
       peerContext.connection.close();
     } catch {
@@ -1842,6 +1951,7 @@ export class VoiceCallClient {
     }
     peerContext.remoteStream.getTracks().forEach((track) => track.stop());
     this.peers.delete(userId);
+    this.lastIceRestartAtByPeer.delete(userId);
     removeRemoteAudioPlayback(userId, this.remoteAudioElements);
   }
 
@@ -1946,6 +2056,25 @@ export class VoiceCallClient {
     }
     clearRemoteAudioPlayback(this.remoteAudioElements);
     this.emitParticipants();
+  }
+
+  private markRemoteParticipantsDisconnected(): void {
+    let changed = false;
+    for (const [userId, participant] of this.participants.entries()) {
+      if (userId === this.self.userId) {
+        continue;
+      }
+      this.participants.set(userId, {
+        ...participant,
+        speaking: false,
+        speakingLevel: 0,
+        connectionState: "disconnected",
+      });
+      changed = true;
+    }
+    if (changed) {
+      this.emitParticipants();
+    }
   }
 
   private emitParticipants(): void {

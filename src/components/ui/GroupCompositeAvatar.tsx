@@ -15,6 +15,7 @@ interface GroupCompositeAvatarProps {
   label: string;
   className?: string;
   fallbackSrc?: string;
+  fixedSrc?: string | null;
 }
 
 interface ResolvedAvatarParticipant {
@@ -32,7 +33,9 @@ export default function GroupCompositeAvatar({
   label,
   className,
   fallbackSrc,
+  fixedSrc,
 }: GroupCompositeAvatarProps) {
+  const normalizedFixedSrc = String(fixedSrc ?? "").trim();
   const resolvedParticipants = useMemo<ResolvedAvatarParticipant[]>(() => {
     return participants
       .map((participant, index) => {
@@ -51,6 +54,18 @@ export default function GroupCompositeAvatar({
       .filter((participant) => Boolean(participant.key))
       .slice(0, 4);
   }, [participants]);
+
+  if (normalizedFixedSrc) {
+    return (
+      <AvatarImage
+        className={joinClassNames("group-composite-avatar", className)}
+        src={normalizedFixedSrc}
+        name={label || "Grupo privado"}
+        alt={`Avatar de ${label}`}
+        loading="lazy"
+      />
+    );
+  }
 
   if (resolvedParticipants.length <= 1) {
     const firstParticipant = resolvedParticipants[0] ?? null;

@@ -21,10 +21,17 @@ export interface MicrophoneCaptureOptions {
 export interface VoiceInputQualityReport {
   level: number;
   noiseLevel: number;
+  peakLevel: number;
+  rmsDb: number;
+  noiseFloorDb: number;
+  speechConfidence: number;
+  gateGain: number;
+  inputGain: number;
   clipping: boolean;
   lowVolume: boolean;
   excessiveNoise: boolean;
   distortion: boolean;
+  suppressionMode: VoiceNoiseSuppressionMode;
   warningMessage: string | null;
 }
 
@@ -55,26 +62,36 @@ const HIGH_PASS_CUTOFF_HZ = 80;
 const VOICE_LOW_CUT_HZ = 200;
 const VOICE_PRESENCE_HZ = 3000;
 const NOISE_GATE_OPEN_GAIN = 1.0;
-const NOISE_GATE_CLOSED_GAIN = 0.002;
-const NOISE_GATE_TRANSIENT_SUPPRESS_GAIN = 0.0001;
-const NOISE_GATE_OPEN_CONFIDENCE = 0.6;
-const NOISE_GATE_CONFIDENCE_ATTACK = 0.25;
-const NOISE_GATE_CONFIDENCE_RELEASE = 0.12;
-const NOISE_GATE_TRANSIENT_HOLD_MS = 200;
+const NOISE_GATE_CLOSED_GAIN = 0.14;
+const NOISE_GATE_TRANSIENT_SUPPRESS_GAIN = 0.05;
+const NOISE_GATE_RNNOISE_CLOSED_GAIN = 0.22;
+const NOISE_GATE_RNNOISE_TRANSIENT_SUPPRESS_GAIN = 0.08;
+const NOISE_GATE_OPEN_CONFIDENCE = 0.44;
+const NOISE_GATE_RNNOISE_OPEN_CONFIDENCE = 0.4;
+const NOISE_GATE_CONFIDENCE_ATTACK = 0.34;
+const NOISE_GATE_CONFIDENCE_RELEASE = 0.045;
+const NOISE_GATE_RNNOISE_CONFIDENCE_RELEASE = 0.035;
+const NOISE_GATE_TRANSIENT_HOLD_MS = 90;
+const NOISE_GATE_SPEECH_HOLD_MS = 280;
+const NOISE_GATE_RNNOISE_SPEECH_HOLD_MS = 340;
 const SPEECH_BAND_MIN_HZ = 200;
 const SPEECH_BAND_MAX_HZ = 4200;
 const LOW_BAND_MIN_HZ = 70;
 const LOW_BAND_MAX_HZ = 200;
 const HIGH_BAND_MIN_HZ = 4200;
 const HIGH_BAND_MAX_HZ = 13000;
-const SPEECH_DB_GATE_MARGIN = 12;
-const SPEECH_MIN_DB = -48;
-const VOICE_PEAK_IMPULSE_THRESHOLD = 0.5;
-const IMPULSE_DB_JUMP_THRESHOLD = 6.0;
-const IMPULSE_HIGH_BAND_RATIO_THRESHOLD = 0.3;
-const IMPULSE_CREST_THRESHOLD = 5.0;
+const SPEECH_DB_GATE_MARGIN = 10;
+const SPEECH_MIN_DB = -52;
+const VOICE_PEAK_IMPULSE_THRESHOLD = 0.68;
+const IMPULSE_DB_JUMP_THRESHOLD = 7.5;
+const IMPULSE_HIGH_BAND_RATIO_THRESHOLD = 0.36;
+const IMPULSE_CREST_THRESHOLD = 6.4;
 const QUALITY_EMIT_INTERVAL_MS = 120;
 const RNNOISE_MAX_CHANNELS = 1;
+const VOICE_INPUT_TRIM_MIN_GAIN = 0.74;
+const VOICE_INPUT_TRIM_CLIP_STEP = 0.045;
+const VOICE_INPUT_TRIM_RECOVERY_STEP = 0.01;
+const VOICE_INPUT_TRIM_RECOVER_AFTER_MS = 2_800;
 
 let rnnoiseWasmBinaryPromise: Promise<ArrayBuffer> | null = null;
 const rnnoiseWorkletContextIds = new WeakSet<AudioContext>();
@@ -331,12 +348,31 @@ export async function createVoiceAudioPipeline(
   }
 
   let highPass: BiquadFilterNode | null = null;
+  let inputTrim: GainNode | null = null;
   let adaptiveNoiseGate: GainNode | null = null;
   let lowCut: BiquadFilterNode | null = null;
   let presenceBoost: BiquadFilterNode | null = null;
   let compressor: DynamicsCompressorNode | null = null;
   let limiter: DynamicsCompressorNode | null = null;
+  const gateClosedGain = effectiveNoiseSuppressionMode === "rnnoise"
+    ? NOISE_GATE_RNNOISE_CLOSED_GAIN
+    : NOISE_GATE_CLOSED_GAIN;
+  const gateTransientSuppressGain = effectiveNoiseSuppressionMode === "rnnoise"
+    ? NOISE_GATE_RNNOISE_TRANSIENT_SUPPRESS_GAIN
+    : NOISE_GATE_TRANSIENT_SUPPRESS_GAIN;
+  const gateOpenConfidence = effectiveNoiseSuppressionMode === "rnnoise"
+    ? NOISE_GATE_RNNOISE_OPEN_CONFIDENCE
+    : NOISE_GATE_OPEN_CONFIDENCE;
+  const gateConfidenceRelease = effectiveNoiseSuppressionMode === "rnnoise"
+    ? NOISE_GATE_RNNOISE_CONFIDENCE_RELEASE
+    : NOISE_GATE_CONFIDENCE_RELEASE;
+  const gateSpeechHoldMs = effectiveNoiseSuppressionMode === "rnnoise"
+    ? NOISE_GATE_RNNOISE_SPEECH_HOLD_MS
+    : NOISE_GATE_SPEECH_HOLD_MS;
   if (effectiveNoiseSuppressionMode !== "off") {
+    inputTrim = context.createGain();
+    inputTrim.gain.value = 1;
+
     highPass = context.createBiquadFilter();
     highPass.type = "highpass";
     highPass.frequency.value = HIGH_PASS_CUTOFF_HZ;
@@ -349,27 +385,27 @@ export async function createVoiceAudioPipeline(
     lowCut.type = "peaking";
     lowCut.frequency.value = VOICE_LOW_CUT_HZ;
     lowCut.Q.value = 1.1;
-    lowCut.gain.value = -3;
+    lowCut.gain.value = -1.5;
 
     presenceBoost = context.createBiquadFilter();
     presenceBoost.type = "peaking";
     presenceBoost.frequency.value = VOICE_PRESENCE_HZ;
     presenceBoost.Q.value = 1.2;
-    presenceBoost.gain.value = 3;
+    presenceBoost.gain.value = 2;
 
     compressor = context.createDynamicsCompressor();
-    compressor.threshold.value = -24;
-    compressor.knee.value = 18;
-    compressor.ratio.value = 4;
-    compressor.attack.value = 0.003;
-    compressor.release.value = 0.25;
+    compressor.threshold.value = -20;
+    compressor.knee.value = 20;
+    compressor.ratio.value = 2.8;
+    compressor.attack.value = 0.004;
+    compressor.release.value = 0.16;
 
     limiter = context.createDynamicsCompressor();
-    limiter.threshold.value = -3;
+    limiter.threshold.value = -1.2;
     limiter.knee.value = 0;
-    limiter.ratio.value = 20;
+    limiter.ratio.value = 12;
     limiter.attack.value = 0.001;
-    limiter.release.value = 0.08;
+    limiter.release.value = 0.06;
   }
 
   const destination = context.createMediaStreamDestination();
@@ -379,8 +415,9 @@ export async function createVoiceAudioPipeline(
 
   if (effectiveNoiseSuppressionMode === "off") {
     source.connect(destination);
-  } else if (highPass && adaptiveNoiseGate && lowCut && presenceBoost && compressor && limiter) {
-    processingSource.connect(highPass);
+  } else if (inputTrim && highPass && adaptiveNoiseGate && lowCut && presenceBoost && compressor && limiter) {
+    processingSource.connect(inputTrim);
+    inputTrim.connect(highPass);
     highPass.connect(adaptiveNoiseGate);
     adaptiveNoiseGate.connect(lowCut);
     lowCut.connect(presenceBoost);
@@ -390,7 +427,7 @@ export async function createVoiceAudioPipeline(
   } else {
     source.connect(destination);
   }
-  processingSource.connect(analyser);
+  (inputTrim ?? processingSource).connect(analyser);
 
   const outputTrack = destination.stream.getAudioTracks()[0];
   if (outputTrack) {
@@ -415,6 +452,9 @@ export async function createVoiceAudioPipeline(
   let speechConfidence = 0;
   let lastQualityEmitAt = 0;
   let transientSuppressUntilMs = 0;
+  let speechHoldUntilMs = 0;
+  let inputTrimTargetGain = 1;
+  let lastClippingAtMs = 0;
   let previousDb = -90;
 
   const tick = (): void => {
@@ -476,31 +516,32 @@ export async function createVoiceAudioPipeline(
     const dynamicSpeechDbThreshold = Math.max(SPEECH_MIN_DB, noiseFloorDb + SPEECH_DB_GATE_MARGIN);
     const speakingLikely = (
       currentDb >= dynamicSpeechDbThreshold
-      && speechBandRatio >= 0.46
-      && highBandRatio <= 0.44
-      && lowBandRatio <= 0.34
+      && speechBandRatio >= 0.4
+      && highBandRatio <= 0.5
+      && lowBandRatio <= 0.38
       && zeroCrossRate >= 0.02
-      && zeroCrossRate <= 0.22
+      && zeroCrossRate <= 0.24
     );
     const likelyTransientImpulse = (
-      (
-        peak >= VOICE_PEAK_IMPULSE_THRESHOLD
-        && crestFactor >= IMPULSE_CREST_THRESHOLD
-        && dbJump >= IMPULSE_DB_JUMP_THRESHOLD
-        && (highBandRatio >= IMPULSE_HIGH_BAND_RATIO_THRESHOLD || speechBandRatio <= 0.5)
-      )
-      || (peak >= 0.72 && crestFactor >= 6.6 && highBandRatio >= 0.24)
-      || (peak >= 0.88 && crestFactor >= 8.2)
+      peak >= VOICE_PEAK_IMPULSE_THRESHOLD
+      && crestFactor >= IMPULSE_CREST_THRESHOLD
+      && dbJump >= IMPULSE_DB_JUMP_THRESHOLD
+      && highBandRatio >= IMPULSE_HIGH_BAND_RATIO_THRESHOLD
+      && speechBandRatio < 0.58
+    ) || (
+      peak >= 0.9
+      && crestFactor >= 8.8
+      && speechBandRatio < 0.52
     );
     const keyboardLikeTransient = (
-      highBandRatio >= 0.38
-      && crestFactor >= 4.2
-      && dbJump >= 5
-      && speechBandRatio < 0.5
+      highBandRatio >= 0.42
+      && crestFactor >= 4.8
+      && dbJump >= 6.2
+      && speechBandRatio < 0.54
     );
     const speechFrameLikely =
       speakingLikely
-      && crestFactor <= 7.5
+      && crestFactor <= 8.2
       && !likelyTransientImpulse
       && !keyboardLikeTransient;
 
@@ -508,28 +549,33 @@ export async function createVoiceAudioPipeline(
       noiseFloorDb = clamp((noiseFloorDb * 0.982) + (currentDb * 0.018), -85, -40);
     }
 
+    const nowMs = performance.now();
+
     if (adaptiveNoiseGate) {
-      const nowMs = performance.now();
       if (likelyTransientImpulse && !speechFrameLikely) {
         transientSuppressUntilMs = Math.max(transientSuppressUntilMs, nowMs + NOISE_GATE_TRANSIENT_HOLD_MS);
       }
+      if (speechFrameLikely) {
+        speechHoldUntilMs = Math.max(speechHoldUntilMs, nowMs + gateSpeechHoldMs);
+      }
       const transientSuppressionActive = nowMs < transientSuppressUntilMs;
+      const speechHoldActive = nowMs < speechHoldUntilMs;
       speechConfidence = clamp(
-        speechConfidence + (speechFrameLikely ? NOISE_GATE_CONFIDENCE_ATTACK : -NOISE_GATE_CONFIDENCE_RELEASE),
+        speechConfidence + (speechFrameLikely ? NOISE_GATE_CONFIDENCE_ATTACK : -gateConfidenceRelease),
         0,
         1,
       );
-      const gateOpen = speechConfidence >= NOISE_GATE_OPEN_CONFIDENCE && !transientSuppressionActive;
+      const gateOpen = (speechConfidence >= gateOpenConfidence || speechHoldActive) && !transientSuppressionActive;
       const gateTargetGain = gateOpen
         ? NOISE_GATE_OPEN_GAIN
-        : (transientSuppressionActive ? NOISE_GATE_TRANSIENT_SUPPRESS_GAIN : NOISE_GATE_CLOSED_GAIN);
+        : (transientSuppressionActive ? gateTransientSuppressGain : gateClosedGain);
       adaptiveNoiseGate.gain.setTargetAtTime(gateTargetGain, context.currentTime, gateOpen ? 0.006 : 0.028);
     }
 
     const clipping = peak >= 0.985;
-    const lowVolume = speakingLikely && currentDb <= -43;
+    const lowVolume = speechFrameLikely && currentDb <= -45;
     const excessiveNoise =
-      (!speakingLikely && currentDb >= Math.max(-52, noiseFloorDb + 9))
+      (!speechFrameLikely && currentDb >= Math.max(-50, noiseFloorDb + 12))
       || keyboardLikeTransient
       || likelyTransientImpulse;
     const distortion = clipping || (zeroCrossRate >= 0.25 && rms >= 0.09);
@@ -539,12 +585,28 @@ export async function createVoiceAudioPipeline(
     noiseScore = clamp(noiseScore + (excessiveNoise ? 1 : -0.3), 0, 20);
     distortionScore = clamp(distortionScore + (distortion ? 1 : -0.25), 0, 20);
 
+    if (clipping) {
+      lastClippingAtMs = nowMs;
+    }
+    if (inputTrim) {
+      if (clippingScore >= 3.2) {
+        inputTrimTargetGain = Math.max(VOICE_INPUT_TRIM_MIN_GAIN, inputTrimTargetGain - VOICE_INPUT_TRIM_CLIP_STEP);
+      } else if (!clipping && nowMs - lastClippingAtMs >= VOICE_INPUT_TRIM_RECOVER_AFTER_MS) {
+        inputTrimTargetGain = Math.min(1, inputTrimTargetGain + VOICE_INPUT_TRIM_RECOVERY_STEP);
+      }
+      inputTrim.gain.setTargetAtTime(
+        inputTrimTargetGain,
+        context.currentTime,
+        clipping ? 0.012 : 0.12,
+      );
+    }
+
     let warningMessage: string | null = null;
     if (clippingScore >= 4) {
-      warningMessage = "Seu microfone pode estar com qualidade baixa (clipping detectado).";
+      warningMessage = "Detectamos clipping no microfone e reduzimos levemente o ganho para proteger a voz.";
     } else if (distortionScore >= 8) {
       warningMessage = "Seu microfone pode estar com qualidade baixa (distorcao detectada).";
-    } else if (noiseScore >= 10) {
+    } else if (noiseScore >= 12) {
       warningMessage = "Seu microfone pode estar com qualidade baixa (ruido de fundo elevado).";
     } else if (lowVolumeScore >= 10) {
       warningMessage = "Seu microfone pode estar com qualidade baixa (volume muito baixo).";
@@ -556,10 +618,17 @@ export async function createVoiceAudioPipeline(
       options.onQuality({
         level: currentLevel,
         noiseLevel: toNormalizedLevel(noiseFloorDb),
+        peakLevel: clamp(peak, 0, 1),
+        rmsDb: currentDb,
+        noiseFloorDb,
+        speechConfidence,
+        gateGain: adaptiveNoiseGate?.gain.value ?? NOISE_GATE_OPEN_GAIN,
+        inputGain: inputTrim?.gain.value ?? 1,
         clipping,
         lowVolume,
         excessiveNoise,
         distortion,
+        suppressionMode: effectiveNoiseSuppressionMode,
         warningMessage,
       });
     }
@@ -577,6 +646,7 @@ export async function createVoiceAudioPipeline(
         rafId = null;
       }
       source.disconnect();
+      inputTrim?.disconnect();
       rnnoiseNode?.disconnect();
       rnnoiseNode?.destroy();
       highPass?.disconnect();

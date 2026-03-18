@@ -8,6 +8,43 @@ export interface VoiceCallUiSnapshot {
 export type VoiceCallUiCommand = "toggle-mute" | "toggle-deafen";
 
 const VOICE_CALL_UI_STORAGE_KEY = "messly:voice-ui-controls:v1";
+const VOICE_CALL_UI_SYNC_STORAGE_KEY = "messly:voice-ui-sync:v1";
+const VOICE_CALL_UI_COMMAND_STORAGE_KEY = "messly:voice-ui-command:v1";
+const VOICE_CALL_UI_BROADCAST_CHANNEL_NAME = "messly:voice-ui:v1";
+const VOICE_CALL_UI_MAX_SYNC_AGE_MS = 30_000;
+
+type VoiceUiSyncKind = "snapshot" | "command";
+
+interface VoiceUiSyncEnvelopeBase {
+  kind: VoiceUiSyncKind;
+  sourceId: string;
+  sentAt: number;
+}
+
+interface VoiceUiSnapshotSyncEnvelope extends VoiceUiSyncEnvelopeBase {
+  kind: "snapshot";
+  snapshot: VoiceCallUiSnapshot;
+}
+
+interface VoiceUiCommandSyncEnvelope extends VoiceUiSyncEnvelopeBase {
+  kind: "command";
+  command: VoiceCallUiCommand;
+}
+
+type VoiceUiSyncEnvelope = VoiceUiSnapshotSyncEnvelope | VoiceUiCommandSyncEnvelope;
+
+function createVoiceUiSourceId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.round(Math.random() * 1_000_000_000)}`;
+}
+
+const voiceUiSourceId = createVoiceUiSourceId();
+const voiceUiBroadcastChannel =
+  typeof window !== "undefined" && typeof BroadcastChannel === "function"
+    ? new BroadcastChannel(VOICE_CALL_UI_BROADCAST_CHANNEL_NAME)
+    : null;
 
 function readStoredControls(): Pick<VoiceCallUiSnapshot, "muted" | "deafened"> {
   if (typeof window === "undefined") {
@@ -87,27 +124,193 @@ function emitSnapshot(): void {
   }
 }
 
-export function getVoiceCallUiSnapshot(): VoiceCallUiSnapshot {
-  return { ...currentSnapshot };
+function normalizeSnapshot(snapshot: VoiceCallUiSnapshot): VoiceCallUiSnapshot {
+  const deafened = Boolean(snapshot.deafened);
+  return {
+    callActive: Boolean(snapshot.callActive),
+    callConnecting: Boolean(snapshot.callConnecting),
+    muted: deafened ? true : Boolean(snapshot.muted),
+    deafened,
+  };
 }
 
-export function publishVoiceCallUiSnapshot(partialSnapshot: Partial<VoiceCallUiSnapshot>): void {
-  const nextSnapshotBase: VoiceCallUiSnapshot = {
-    ...currentSnapshot,
-    ...partialSnapshot,
-  };
-  const nextSnapshot: VoiceCallUiSnapshot = nextSnapshotBase.deafened
-    ? {
-        ...nextSnapshotBase,
-        muted: true,
-      }
-    : nextSnapshotBase;
+function isVoiceCallUiCommand(commandRaw: unknown): commandRaw is VoiceCallUiCommand {
+  return commandRaw === "toggle-mute" || commandRaw === "toggle-deafen";
+}
+
+function isVoiceCallUiSnapshotShape(value: unknown): value is VoiceCallUiSnapshot {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const candidate = value as Partial<VoiceCallUiSnapshot>;
+  return (
+    typeof candidate.callActive === "boolean" &&
+    typeof candidate.callConnecting === "boolean" &&
+    typeof candidate.muted === "boolean" &&
+    typeof candidate.deafened === "boolean"
+  );
+}
+
+function parseVoiceUiSyncEnvelope(payloadRaw: unknown): VoiceUiSyncEnvelope | null {
+  if (!payloadRaw || typeof payloadRaw !== "object") {
+    return null;
+  }
+
+  const payload = payloadRaw as Partial<VoiceUiSyncEnvelope>;
+  const kind = payload.kind;
+  const sourceId = String(payload.sourceId ?? "").trim();
+  const sentAt = Number(payload.sentAt ?? 0);
+  if (!sourceId || !Number.isFinite(sentAt) || sentAt <= 0) {
+    return null;
+  }
+
+  if (kind === "snapshot") {
+    if (!isVoiceCallUiSnapshotShape(payload.snapshot)) {
+      return null;
+    }
+    return {
+      kind: "snapshot",
+      sourceId,
+      sentAt,
+      snapshot: normalizeSnapshot(payload.snapshot),
+    };
+  }
+
+  if (kind === "command") {
+    if (!isVoiceCallUiCommand(payload.command)) {
+      return null;
+    }
+    return {
+      kind: "command",
+      sourceId,
+      sentAt,
+      command: payload.command,
+    };
+  }
+
+  return null;
+}
+
+function emitCommandLocally(command: VoiceCallUiCommand): void {
+  for (const listener of commandListeners) {
+    listener(command);
+  }
+}
+
+function applySnapshot(nextSnapshotRaw: VoiceCallUiSnapshot, options?: { broadcast?: boolean }): void {
+  const nextSnapshot = normalizeSnapshot(nextSnapshotRaw);
   if (isSnapshotEqual(currentSnapshot, nextSnapshot)) {
     return;
   }
   currentSnapshot = nextSnapshot;
   persistControls(currentSnapshot);
   emitSnapshot();
+
+  if (options?.broadcast) {
+    broadcastVoiceUiEnvelope({
+      kind: "snapshot",
+      sourceId: voiceUiSourceId,
+      sentAt: Date.now(),
+      snapshot: currentSnapshot,
+    });
+  }
+}
+
+function handleIncomingVoiceUiEnvelope(envelope: VoiceUiSyncEnvelope): void {
+  if (envelope.sourceId === voiceUiSourceId) {
+    return;
+  }
+  if (Date.now() - envelope.sentAt > VOICE_CALL_UI_MAX_SYNC_AGE_MS) {
+    return;
+  }
+
+  if (envelope.kind === "snapshot") {
+    applySnapshot(envelope.snapshot, {
+      broadcast: false,
+    });
+    return;
+  }
+
+  emitCommandLocally(envelope.command);
+}
+
+function broadcastVoiceUiEnvelope(envelope: VoiceUiSyncEnvelope): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  if (voiceUiBroadcastChannel) {
+    try {
+      voiceUiBroadcastChannel.postMessage(envelope);
+    } catch {
+      // Ignore transient cross-tab messaging failures.
+    }
+    return;
+  }
+
+  const storageKey = envelope.kind === "snapshot"
+    ? VOICE_CALL_UI_SYNC_STORAGE_KEY
+    : VOICE_CALL_UI_COMMAND_STORAGE_KEY;
+  try {
+    window.localStorage.setItem(storageKey, JSON.stringify(envelope));
+  } catch {
+    // Ignore storage write failures.
+  }
+}
+
+function initializeVoiceUiSyncBridge(): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  if (voiceUiBroadcastChannel) {
+    voiceUiBroadcastChannel.addEventListener("message", (event: MessageEvent<unknown>) => {
+      const envelope = parseVoiceUiSyncEnvelope(event.data);
+      if (!envelope) {
+        return;
+      }
+      handleIncomingVoiceUiEnvelope(envelope);
+    });
+    return;
+  }
+
+  window.addEventListener("storage", (event) => {
+    if (
+      event.key !== VOICE_CALL_UI_SYNC_STORAGE_KEY &&
+      event.key !== VOICE_CALL_UI_COMMAND_STORAGE_KEY
+    ) {
+      return;
+    }
+    if (!event.newValue) {
+      return;
+    }
+    try {
+      const parsed = JSON.parse(event.newValue) as unknown;
+      const envelope = parseVoiceUiSyncEnvelope(parsed);
+      if (!envelope) {
+        return;
+      }
+      handleIncomingVoiceUiEnvelope(envelope);
+    } catch {
+      // Ignore malformed cross-tab payloads.
+    }
+  });
+}
+
+initializeVoiceUiSyncBridge();
+
+export function getVoiceCallUiSnapshot(): VoiceCallUiSnapshot {
+  return { ...currentSnapshot };
+}
+
+export function publishVoiceCallUiSnapshot(partialSnapshot: Partial<VoiceCallUiSnapshot>): void {
+  const nextSnapshot: VoiceCallUiSnapshot = {
+    ...currentSnapshot,
+    ...partialSnapshot,
+  };
+  applySnapshot(nextSnapshot, {
+    broadcast: true,
+  });
 }
 
 export function resetVoiceCallUiSnapshot(): void {
@@ -116,12 +319,9 @@ export function resetVoiceCallUiSnapshot(): void {
     callActive: false,
     callConnecting: false,
   };
-  if (isSnapshotEqual(currentSnapshot, nextSnapshot)) {
-    return;
-  }
-  currentSnapshot = nextSnapshot;
-  persistControls(currentSnapshot);
-  emitSnapshot();
+  applySnapshot(nextSnapshot, {
+    broadcast: true,
+  });
 }
 
 export function subscribeVoiceCallUiSnapshot(
@@ -135,9 +335,13 @@ export function subscribeVoiceCallUiSnapshot(
 }
 
 export function emitVoiceCallUiCommand(command: VoiceCallUiCommand): void {
-  for (const listener of commandListeners) {
-    listener(command);
-  }
+  emitCommandLocally(command);
+  broadcastVoiceUiEnvelope({
+    kind: "command",
+    sourceId: voiceUiSourceId,
+    sentAt: Date.now(),
+    command,
+  });
 }
 
 export function subscribeVoiceCallUiCommand(

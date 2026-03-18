@@ -665,6 +665,102 @@
   box-shadow: none;
 }
 
+.friends-sidebar__edit-group-modal {
+  width: min(480px, calc(100vw - 28px)) !important;
+}
+
+.friends-sidebar__edit-group-modal-body {
+  display: grid;
+  gap: 14px;
+}
+
+.friends-sidebar__edit-group {
+  display: grid;
+  gap: 18px;
+}
+
+.friends-sidebar__edit-group-avatar-wrap {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+}
+
+.friends-sidebar__edit-group-avatar-button {
+  position: relative;
+  width: 116px;
+  height: 116px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.friends-sidebar__edit-group-avatar-button:focus-visible {
+  outline: none;
+}
+
+.friends-sidebar__edit-group-avatar-preview {
+  width: 116px;
+  height: 116px;
+  border-radius: 999px;
+  overflow: hidden;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+}
+
+.friends-sidebar__edit-group-avatar-edit-badge {
+  position: absolute;
+  right: 4px;
+  top: 4px;
+  width: 30px;
+  height: 30px;
+  border-radius: 999px;
+  background: #3a3f47;
+  color: #f2f3f5;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.28);
+}
+
+.friends-sidebar__edit-group-avatar-input {
+  display: none;
+}
+
+.friends-sidebar__edit-group-avatar-remove {
+  border: 0;
+  background: transparent;
+  color: rgba(236, 241, 248, 0.72);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.friends-sidebar__edit-group-avatar-remove:hover,
+.friends-sidebar__edit-group-avatar-remove:focus-visible {
+  color: rgba(248, 250, 252, 0.96);
+  outline: none;
+}
+
+.friends-sidebar__edit-group-form {
+  display: grid;
+  gap: 8px;
+}
+
+.friends-sidebar__edit-group-helper {
+  margin: 0;
+  color: rgba(220, 226, 235, 0.64);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.friends-sidebar__edit-group-modal-footer {
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+}
+
 .friends-sidebar__request-blocked-modal {
   width: min(400px, calc(100vw - 24px)) !important;
 }

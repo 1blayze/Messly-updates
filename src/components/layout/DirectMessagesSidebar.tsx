@@ -6,6 +6,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ChangeEvent,
   type MouseEvent as ReactMouseEvent,
 } from "react";
 import MaterialSymbolIcon from "../ui/MaterialSymbolIcon";
@@ -29,6 +30,12 @@ import { listFriendRequests } from "../../services/friends/friendRequestsApi";
 import { useConversationsRealtime, type ConversationMessageInsertEvent } from "../../hooks/useConversationsRealtime";
 import { getSchemaCapability, setSchemaCapability } from "../../services/database/schemaCapabilities";
 import {
+  addGroupConversationMembers,
+  leaveGroupConversation,
+  updateGroupConversation,
+  type ConversationDetails,
+} from "../../api/conversationsApi";
+import {
   FRIEND_REQUEST_BLOCKED_EVENT,
   buildFriendRequestBlockedNotice,
   dispatchFriendRequestBlockedNotice,
@@ -43,12 +50,15 @@ import {
   upsertCachedInitialChatMessages,
 } from "../../services/chat/chatApi";
 import CreateGroupDmModal from "./CreateGroupDmModal";
+import InviteGroupDmModal from "./InviteGroupDmModal";
 import {
   buildHiddenDirectMessageStorageScopes,
   persistHiddenDirectMessageConversationIds,
   readHiddenDirectMessageConversationIds,
 } from "../../services/chat/hiddenDirectMessages";
 import { messagesService } from "../../services/messages";
+import { AVATAR_MAX_BYTES, AVATAR_MAX_MB } from "../../services/media/imageLimits";
+import { uploadMediaAsset } from "../../services/uploadMedia";
 import { normalizeBannerColor } from "../../services/profile/bannerColor";
 import { loadPendingProfile } from "../../services/userSync";
 import { getGroupDmAvatarUrl, resolveGroupDmDisplayName } from "../../services/chat/groupDm";
@@ -81,6 +91,7 @@ export interface SidebarDirectMessageSelection {
   conversationId: string;
   userId: string;
   conversationType: "dm" | "group_dm";
+  createdBy?: string | null;
   username: string;
   displayName: string;
   avatarSrc: string;
@@ -158,6 +169,8 @@ interface ProfileUpdatedDetail {
   profile_theme_accent_color?: string | null;
 }
 
+type GroupConversationProfile = ConversationDetails["participants"][number];
+
 const DM_PRESENCE_DEVICE_STALE_MS = 90_000;
 const DM_SPOTIFY_ACTIVITY_END_GRACE_MS = 8_000;
 const DM_SPOTIFY_ACTIVITY_NO_DURATION_STALE_MS = 60_000;
@@ -208,9 +221,12 @@ interface DirectMessageItem {
   conversationId: string;
   userId: string;
   conversationType: "dm" | "group_dm";
+  createdBy?: string | null;
   username: string;
   displayName: string;
   avatarSrc: string;
+  customName?: string | null;
+  customAvatarUrl?: string | null;
   presenceState: PresenceState;
   lastMessageAt: string | null;
   isFavorite: boolean;
@@ -280,7 +296,7 @@ const SIDEBAR_IDENTITY_CACHE_PREFIX = "messly:sidebar-identity:";
 const DIRECT_MESSAGES_CACHE_PREFIX = "messly:direct-messages:";
 const DIRECT_MESSAGES_FAVORITES_CACHE_PREFIX = "messly:direct-messages:favorites:";
 const SIDEBAR_RESOLVED_MEDIA_CACHE_PREFIX = "messly:sidebar-media:";
-const DIRECT_MESSAGES_CACHE_VERSION = 10;
+const DIRECT_MESSAGES_CACHE_VERSION = 11;
 const DM_PRELOAD_LIMIT = 30;             
 const DM_PRELOAD_HOVER_DEBOUNCE_MS = 150; 
 const DM_PRELOAD_MAX_AGE_MS = 90_000;
@@ -316,7 +332,10 @@ interface DirectMessageContextMenuState {
   conversationId: string;
   userId: string;
   conversationType: "dm" | "group_dm";
+  createdBy?: string | null;
   displayName: string;
+  customName?: string | null;
+  customAvatarUrl?: string | null;
   x: number;
   y: number;
 }
@@ -343,6 +362,7 @@ function toSidebarSelection(dm: DirectMessageItem): SidebarDirectMessageSelectio
     conversationId: dm.conversationId,
     userId: dm.userId,
     conversationType: dm.conversationType,
+    createdBy: dm.createdBy ?? null,
     username: dm.username,
     displayName: resolvedDisplayName,
     avatarSrc: dm.avatarSrc,
@@ -462,6 +482,21 @@ function normalizeActivityTimestamp(value: string | null | undefined): string | 
 function buildGroupConversationSyntheticUserId(conversationIdRaw: string): string {
   const conversationId = String(conversationIdRaw ?? "").trim();
   return conversationId ? `group:${conversationId}` : "group";
+}
+
+function normalizeGroupDmCustomName(value: string | null | undefined): string | null {
+  const normalized = String(value ?? "").trim();
+  return normalized || null;
+}
+
+function normalizeGroupDmCustomAvatarUrl(value: string | null | undefined): string | null {
+  const normalized = String(value ?? "").trim();
+  return normalized || null;
+}
+
+function hasCustomGroupAvatar(value: string | null | undefined): boolean {
+  const normalized = normalizeGroupDmCustomAvatarUrl(value);
+  return Boolean(normalized && normalized !== getGroupDmAvatarUrl());
 }
 
 function getTrackedDirectMessageUserIds(dm: Pick<DirectMessageItem, "conversationType" | "userId" | "participantIds">): string[] {
@@ -626,10 +661,14 @@ function applyConversationActivityToDirectMessages(
       return;
     }
 
+    if (row.type === "group_dm") {
+      missingRows.push(row);
+      currentByConversationId.delete(row.id);
+      return;
+    }
+
     currentByConversationId.delete(row.id);
-    const otherUserId = row.type === "group_dm"
-      ? buildGroupConversationSyntheticUserId(row.id)
-      : (row.user1_id === currentUserId ? row.user2_id : row.user1_id);
+    const otherUserId = row.user1_id === currentUserId ? row.user2_id : row.user1_id;
     const nextLastMessageAt = normalizeActivityTimestamp(row.last_activity_at ?? row.created_at);
     if (
       existing.userId === otherUserId &&
@@ -690,6 +729,13 @@ function readDirectMessagesCache(userId: string | null | undefined): DirectMessa
         }
         const username = normalizeIdentityUsername(casted.username);
         const displayName = normalizeIdentityDisplayName(casted.displayName, username, username);
+        const createdBy = String((casted as { createdBy?: string | null }).createdBy ?? "").trim() || null;
+        const customName = conversationType === "group_dm"
+          ? normalizeGroupDmCustomName((casted as { customName?: string | null }).customName ?? null)
+          : null;
+        const customAvatarUrl = conversationType === "group_dm"
+          ? normalizeGroupDmCustomAvatarUrl((casted as { customAvatarUrl?: string | null }).customAvatarUrl ?? null)
+          : null;
         const cachedAvatarSrc = String(casted.avatarSrc ?? "").trim();
         const avatarSrc = conversationType === "group_dm"
           ? (cachedAvatarSrc || getGroupDmAvatarUrl())
@@ -756,9 +802,12 @@ function readDirectMessagesCache(userId: string | null | undefined): DirectMessa
           conversationId,
           userId: userIdValue,
           conversationType,
+          ...(createdBy ? { createdBy } : {}),
           username,
           displayName,
           avatarSrc,
+          ...(customName ? { customName } : {}),
+          ...(customAvatarUrl ? { customAvatarUrl } : {}),
           presenceState: normalizePresenceState((casted as { presenceState?: unknown }).presenceState ?? null),
           lastMessageAt: normalizeActivityTimestamp(
             (casted as { lastMessageAt?: string | null }).lastMessageAt ?? null,
@@ -987,6 +1036,15 @@ function mergeDirectMessagesWithoutAvatarDowngrade(
     if (mergedItem.lastMessageAt == null && currentItem.lastMessageAt != null) {
       mergedItem.lastMessageAt = currentItem.lastMessageAt;
     }
+    if (typeof mergedItem.createdBy === "undefined" && currentItem.createdBy) {
+      mergedItem.createdBy = currentItem.createdBy;
+    }
+    if (typeof mergedItem.customName === "undefined" && currentItem.customName) {
+      mergedItem.customName = currentItem.customName;
+    }
+    if (typeof mergedItem.customAvatarUrl === "undefined" && currentItem.customAvatarUrl) {
+      mergedItem.customAvatarUrl = currentItem.customAvatarUrl;
+    }
     if (mergedItem.participantIds.length === 0 && currentItem.participantIds.length > 0) {
       mergedItem.participantIds = [...currentItem.participantIds];
     }
@@ -1047,9 +1105,12 @@ function areDirectMessageListsEqual(current: DirectMessageItem[], next: DirectMe
       currentItem.conversationId !== nextItem.conversationId ||
       currentItem.userId !== nextItem.userId ||
       currentItem.conversationType !== nextItem.conversationType ||
+      (currentItem.createdBy ?? "") !== (nextItem.createdBy ?? "") ||
       currentItem.username !== nextItem.username ||
       currentItem.displayName !== nextItem.displayName ||
       currentItem.avatarSrc !== nextItem.avatarSrc ||
+      (currentItem.customName ?? "") !== (nextItem.customName ?? "") ||
+      (currentItem.customAvatarUrl ?? "") !== (nextItem.customAvatarUrl ?? "") ||
       currentItem.presenceState !== nextItem.presenceState ||
       (currentItem.lastMessageAt ?? "") !== (nextItem.lastMessageAt ?? "") ||
       currentItem.isFavorite !== nextItem.isFavorite ||
@@ -1135,6 +1196,7 @@ const DirectMessageListItem = memo(function DirectMessageListItem({
   const fallbackNameAvatar = getDmDisplayAvatar(resolvedDisplayName, dm.username, dm.userId);
   const isGroupDm = dm.conversationType === "group_dm";
   const safeGroupFallbackAvatarSrc = String(dm.avatarSrc ?? "").trim() || getGroupDmAvatarUrl();
+  const fixedGroupAvatarSrc = hasCustomGroupAvatar(dm.customAvatarUrl ?? dm.avatarSrc) ? String(dm.customAvatarUrl ?? dm.avatarSrc ?? "").trim() : null;
   const groupMemberCount = useMemo(() => {
     if (!isGroupDm) {
       return 0;
@@ -1195,6 +1257,7 @@ const DirectMessageListItem = memo(function DirectMessageListItem({
             participants={dm.participants}
             label={resolvedDisplayName}
             fallbackSrc={safeGroupFallbackAvatarSrc}
+            fixedSrc={fixedGroupAvatarSrc}
           />
         ) : (
           <>
@@ -1756,8 +1819,19 @@ export default function DirectMessagesSidebar({
   });
   const [isAddFriendModalOpen, setIsAddFriendModalOpen] = useState(false);
   const [isCreateGroupDmModalOpen, setIsCreateGroupDmModalOpen] = useState(false);
+  const [inviteGroupConversationId, setInviteGroupConversationId] = useState<string | null>(null);
+  const [editGroupConversationId, setEditGroupConversationId] = useState<string | null>(null);
   const [friendIdentifier, setFriendIdentifier] = useState("");
   const [isAddingFriend, setIsAddingFriend] = useState(false);
+  const [isSavingGroupEdit, setIsSavingGroupEdit] = useState(false);
+  const [isLeavingGroup, setIsLeavingGroup] = useState(false);
+  const [groupEditError, setGroupEditError] = useState<string | null>(null);
+  const [editGroupName, setEditGroupName] = useState("");
+  const [editGroupInitialCustomName, setEditGroupInitialCustomName] = useState<string | null>(null);
+  const [editGroupInitialCustomAvatarUrl, setEditGroupInitialCustomAvatarUrl] = useState<string | null>(null);
+  const [editGroupAvatarPreviewSrc, setEditGroupAvatarPreviewSrc] = useState<string | null>(null);
+  const [editGroupAvatarFile, setEditGroupAvatarFile] = useState<File | null>(null);
+  const [isEditGroupAvatarRemoved, setIsEditGroupAvatarRemoved] = useState(false);
   const [addFriendFeedback, setAddFriendFeedback] = useState<AddFriendFeedbackState | null>(null);
   const [friendRequestBlockedNotice, setFriendRequestBlockedNotice] = useState<FriendRequestBlockedNoticeDetail | null>(null);
   const [isFriendRequestsAvailable, setIsFriendRequestsAvailable] = useState(friendRequestsEnabled);
@@ -1770,6 +1844,8 @@ export default function DirectMessagesSidebar({
     return readDirectMessagesCache(initialDirectMessagesCacheOwnerId) ?? [];
   });
   const directMessagesRef = useRef<DirectMessageItem[]>(directMessages);
+  const editGroupAvatarObjectUrlRef = useRef<string | null>(null);
+  const editGroupAvatarInputRef = useRef<HTMLInputElement | null>(null);
   const [dmContextMenu, setDmContextMenu] = useState<DirectMessageContextMenuState | null>(null);
   const dmItemRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const dmItemPositionsRef = useRef<Map<string, number>>(new Map());
@@ -2787,7 +2863,9 @@ export default function DirectMessagesSidebar({
         const lastMessageAt = normalizeActivityTimestamp(conversation.last_activity_at ?? conversation.created_at);
 
         if (conversation.type === "group_dm") {
-          const groupAvatarSrc = String(conversation.avatar_url ?? "").trim() || getGroupDmAvatarUrl();
+          const customName = normalizeGroupDmCustomName(conversation.name);
+          const customAvatarUrl = normalizeGroupDmCustomAvatarUrl(conversation.avatar_url);
+          const groupAvatarSrc = customAvatarUrl || getGroupDmAvatarUrl();
           const aggregatedPresence = resolveDirectMessagePresenceSnapshot({
             conversationType: "group_dm",
             userId: buildGroupConversationSyntheticUserId(conversation.id),
@@ -2797,12 +2875,15 @@ export default function DirectMessagesSidebar({
             conversationId: conversation.id,
             userId: buildGroupConversationSyntheticUserId(conversation.id),
             conversationType: "group_dm",
+            createdBy: String(conversation.created_by ?? "").trim() || null,
             username: "grupo",
             displayName: resolveGroupDmDisplayName(
-              conversation.name,
+              customName,
               participants.map((participant) => participant.displayName),
             ),
             avatarSrc: groupAvatarSrc,
+            customName,
+            customAvatarUrl,
             presenceState: aggregatedPresence.presenceState,
             lastMessageAt,
             isFavorite: favoriteConversationIdSet.has(conversation.id),
@@ -2987,7 +3068,7 @@ export default function DirectMessagesSidebar({
           return {
             ...item,
             displayName: resolveGroupDmDisplayName(
-              item.displayName,
+              item.customName,
               hydratedParticipants.map((participant) => participant.displayName),
             ),
             participants: hydratedParticipants,
@@ -3491,6 +3572,7 @@ export default function DirectMessagesSidebar({
       conversationId: dm.conversationId,
       userId: dm.userId,
       conversationType: dm.conversationType,
+      createdBy: dm.createdBy ?? null,
       username: dm.username,
       displayName: resolvedDisplayName,
       avatarSrc: dm.avatarSrc,
@@ -3626,11 +3708,77 @@ export default function DirectMessagesSidebar({
       conversationId: dm.conversationId,
       userId: dm.userId,
       conversationType: dm.conversationType,
+      createdBy: dm.createdBy ?? null,
       displayName: nextDisplayName,
+      customName: dm.customName ?? null,
+      customAvatarUrl: dm.customAvatarUrl ?? null,
       x: event.clientX,
       y: event.clientY,
     });
   }, []);
+
+  const buildGroupParticipantFromConversationProfile = useCallback((profile: GroupConversationProfile): SidebarDirectMessageParticipant => {
+    const username = normalizeIdentityUsername(profile.username);
+    const displayName = normalizeIdentityDisplayName(profile.displayName, username, username);
+    const avatarSrc = String(profile.avatarUrl ?? "").trim() || getDmDisplayAvatar(displayName, username, profile.id);
+    const presenceSnapshot = presenceStore.getPresenceSnapshot(profile.id);
+
+    return {
+      userId: profile.id,
+      username,
+      displayName,
+      avatarSrc,
+      presenceState: presenceSnapshot.presenceState,
+      spotifyActivity: presenceSnapshot.spotifyActivity ?? null,
+      firebaseUid: profile.firebaseUid ?? undefined,
+      aboutText: profile.aboutText ?? undefined,
+      bannerColor: normalizeBannerColor(profile.bannerColor) ?? null,
+      themePrimaryColor: normalizeBannerColor(profile.themePrimaryColor) ?? null,
+      themeAccentColor: normalizeBannerColor(profile.themeAccentColor) ?? null,
+      bannerKey: profile.bannerKey ?? null,
+      bannerHash: profile.bannerHash ?? null,
+      memberSinceAt: profile.createdAt ?? null,
+    };
+  }, []);
+
+  const buildGroupDirectMessageItemFromDetails = useCallback((conversation: ConversationDetails): DirectMessageItem | null => {
+    if (conversation.type !== "group_dm") {
+      return null;
+    }
+
+    const normalizedCurrentUserId = String(effectiveIdentityUserId ?? "").trim();
+    const otherParticipants = conversation.participants.filter((participant) => participant.id !== normalizedCurrentUserId);
+    const participants = otherParticipants.map(buildGroupParticipantFromConversationProfile);
+    const participantIds = participants.map((participant) => participant.userId);
+    const customName = normalizeGroupDmCustomName(conversation.name);
+    const customAvatarUrl = normalizeGroupDmCustomAvatarUrl(conversation.avatarUrl);
+    const aggregatedPresence = resolveDirectMessagePresenceSnapshot({
+      conversationType: "group_dm",
+      userId: buildGroupConversationSyntheticUserId(conversation.id),
+      participantIds,
+    });
+
+    return {
+      conversationId: conversation.id,
+      userId: buildGroupConversationSyntheticUserId(conversation.id),
+      conversationType: "group_dm",
+      createdBy: String(conversation.createdBy ?? "").trim() || null,
+      username: "grupo",
+      displayName: resolveGroupDmDisplayName(
+        customName,
+        participants.map((participant) => participant.displayName),
+      ),
+      avatarSrc: customAvatarUrl || getGroupDmAvatarUrl(),
+      customName,
+      customAvatarUrl,
+      presenceState: aggregatedPresence.presenceState,
+      lastMessageAt: null,
+      isFavorite: false,
+      participantIds,
+      participants,
+      spotifyActivity: aggregatedPresence.spotifyActivity,
+    };
+  }, [buildGroupParticipantFromConversationProfile, effectiveIdentityUserId]);
 
   const handleCreateGroupDirectMessage = useCallback(async (participantIds: string[], generatedName: string): Promise<void> => {
     const normalizedCurrentUserId = String(effectiveIdentityUserId ?? "").trim();
@@ -3680,12 +3828,15 @@ export default function DirectMessagesSidebar({
       conversationId,
       userId: syntheticUserId,
       conversationType: "group_dm",
+      createdBy: normalizedCurrentUserId,
       username: "grupo",
       displayName: resolveGroupDmDisplayName(
-        generatedName,
+        null,
         participants.map((participant) => participant.displayName),
       ),
       avatarSrc: getGroupDmAvatarUrl(),
+      customName: null,
+      customAvatarUrl: null,
       presenceState: aggregatedPresence.presenceState,
       lastMessageAt: new Date().toISOString(),
       isFavorite: false,
@@ -3708,6 +3859,342 @@ export default function DirectMessagesSidebar({
     setIsCreateGroupDmModalOpen(false);
     void conversationsQuery.refetch().catch(() => undefined);
   }, [conversationsQuery, effectiveIdentityUserId, handleDirectMessageActivate]);
+
+  const revokeEditGroupAvatarObjectUrl = useCallback((): void => {
+    if (!editGroupAvatarObjectUrlRef.current || typeof URL === "undefined") {
+      return;
+    }
+
+    URL.revokeObjectURL(editGroupAvatarObjectUrlRef.current);
+    editGroupAvatarObjectUrlRef.current = null;
+  }, []);
+
+  const handleCloseEditGroupModal = useCallback((): void => {
+    if (isSavingGroupEdit) {
+      return;
+    }
+
+    revokeEditGroupAvatarObjectUrl();
+    if (editGroupAvatarInputRef.current) {
+      editGroupAvatarInputRef.current.value = "";
+    }
+    setEditGroupConversationId(null);
+    setEditGroupName("");
+    setEditGroupInitialCustomName(null);
+    setEditGroupInitialCustomAvatarUrl(null);
+    setEditGroupAvatarPreviewSrc(null);
+    setEditGroupAvatarFile(null);
+    setIsEditGroupAvatarRemoved(false);
+    setGroupEditError(null);
+  }, [isSavingGroupEdit, revokeEditGroupAvatarObjectUrl]);
+
+  useEffect(
+    () => () => {
+      revokeEditGroupAvatarObjectUrl();
+    },
+    [revokeEditGroupAvatarObjectUrl],
+  );
+
+  const editingGroupDirectMessage = useMemo(() => {
+    const normalizedConversationId = String(editGroupConversationId ?? "").trim();
+    if (!normalizedConversationId) {
+      return null;
+    }
+
+    return directMessages.find((item) => (
+      item.conversationId === normalizedConversationId && item.conversationType === "group_dm"
+    )) ?? null;
+  }, [directMessages, editGroupConversationId]);
+
+  const inviteGroupDirectMessage = useMemo(() => {
+    const normalizedConversationId = String(inviteGroupConversationId ?? "").trim();
+    if (!normalizedConversationId) {
+      return null;
+    }
+
+    return directMessages.find((item) => (
+      item.conversationId === normalizedConversationId && item.conversationType === "group_dm"
+    )) ?? null;
+  }, [directMessages, inviteGroupConversationId]);
+
+  const upsertGroupDirectMessageLocally = useCallback((
+    conversation: ConversationDetails,
+    options?: {
+      activate?: boolean;
+    },
+  ): DirectMessageItem | null => {
+    const nextItem = buildGroupDirectMessageItemFromDetails(conversation);
+    if (!nextItem) {
+      return null;
+    }
+
+    const currentItem = directMessagesRef.current.find((item) => item.conversationId === nextItem.conversationId) ?? null;
+    const mergedItem = currentItem
+      ? mergeDirectMessagesWithoutAvatarDowngrade([currentItem], [nextItem])[0] ?? nextItem
+      : nextItem;
+
+    setDirectMessages((current) => {
+      const updated = sortDirectMessages([
+        mergedItem,
+        ...current.filter((item) => item.conversationId !== mergedItem.conversationId),
+      ]);
+      writeDirectMessagesCache(effectiveIdentityUserId, updated);
+      return updated;
+    });
+    setHiddenDmConversationIds((current) =>
+      current.includes(mergedItem.conversationId)
+        ? current.filter((conversationId) => conversationId !== mergedItem.conversationId)
+        : current,
+    );
+
+    if (options?.activate) {
+      handleDirectMessageActivate(mergedItem);
+    }
+
+    return mergedItem;
+  }, [buildGroupDirectMessageItemFromDetails, effectiveIdentityUserId, handleDirectMessageActivate]);
+
+  const handleOpenInviteGroupModal = useCallback((conversationId: string): void => {
+    const normalizedConversationId = String(conversationId ?? "").trim();
+    if (!normalizedConversationId) {
+      return;
+    }
+
+    setDmContextMenu(null);
+    setInviteGroupConversationId(normalizedConversationId);
+  }, []);
+
+  const handleInviteGroupMembers = useCallback(async (participantIds: string[]): Promise<void> => {
+    const normalizedConversationId = String(inviteGroupConversationId ?? "").trim();
+    if (!normalizedConversationId) {
+      throw new Error("Grupo invalido para convidar.");
+    }
+
+    const updatedConversation = await addGroupConversationMembers(normalizedConversationId, participantIds);
+    upsertGroupDirectMessageLocally(updatedConversation, {
+      activate: activeConversationId === normalizedConversationId,
+    });
+    void conversationsQuery.refetch().catch(() => undefined);
+  }, [activeConversationId, conversationsQuery, inviteGroupConversationId, upsertGroupDirectMessageLocally]);
+
+  const handleOpenEditGroupModal = useCallback((conversationId: string): void => {
+    const normalizedConversationId = String(conversationId ?? "").trim();
+    if (!normalizedConversationId) {
+      return;
+    }
+
+    const targetGroup = directMessagesRef.current.find((item) => (
+      item.conversationId === normalizedConversationId && item.conversationType === "group_dm"
+    ));
+    if (!targetGroup) {
+      return;
+    }
+
+    revokeEditGroupAvatarObjectUrl();
+    if (editGroupAvatarInputRef.current) {
+      editGroupAvatarInputRef.current.value = "";
+    }
+    setDmContextMenu(null);
+    setEditGroupConversationId(normalizedConversationId);
+    setEditGroupInitialCustomName(targetGroup.customName ?? null);
+    setEditGroupName(targetGroup.customName ?? targetGroup.displayName);
+    setEditGroupInitialCustomAvatarUrl(normalizeGroupDmCustomAvatarUrl(targetGroup.customAvatarUrl ?? null));
+    setEditGroupAvatarPreviewSrc(normalizeGroupDmCustomAvatarUrl(targetGroup.customAvatarUrl ?? null));
+    setEditGroupAvatarFile(null);
+    setIsEditGroupAvatarRemoved(false);
+    setGroupEditError(null);
+  }, [revokeEditGroupAvatarObjectUrl]);
+
+  const handleEditGroupAvatarChange = useCallback((event: ChangeEvent<HTMLInputElement>): void => {
+    const file = event.target.files?.[0] ?? null;
+    event.target.value = "";
+
+    if (!file) {
+      return;
+    }
+
+    if (!file.type.startsWith("image/")) {
+      setGroupEditError("Selecione uma imagem valida para o avatar do grupo.");
+      return;
+    }
+
+    if (file.size > AVATAR_MAX_BYTES) {
+      setGroupEditError(`O avatar do grupo deve ter no maximo ${AVATAR_MAX_MB} MB.`);
+      return;
+    }
+
+    revokeEditGroupAvatarObjectUrl();
+
+    const objectUrl = typeof URL !== "undefined" ? URL.createObjectURL(file) : null;
+    if (objectUrl) {
+      editGroupAvatarObjectUrlRef.current = objectUrl;
+    }
+
+    setEditGroupAvatarFile(file);
+    setEditGroupAvatarPreviewSrc(objectUrl);
+    setIsEditGroupAvatarRemoved(false);
+    setGroupEditError(null);
+  }, [revokeEditGroupAvatarObjectUrl]);
+
+  const handleRemoveEditGroupAvatar = useCallback((): void => {
+    revokeEditGroupAvatarObjectUrl();
+    if (editGroupAvatarInputRef.current) {
+      editGroupAvatarInputRef.current.value = "";
+    }
+    setEditGroupAvatarFile(null);
+    setEditGroupAvatarPreviewSrc(null);
+    setIsEditGroupAvatarRemoved(Boolean(editGroupInitialCustomAvatarUrl));
+    setGroupEditError(null);
+  }, [editGroupInitialCustomAvatarUrl, revokeEditGroupAvatarObjectUrl]);
+
+  const handleSaveGroupEdit = useCallback(async (): Promise<void> => {
+    const normalizedConversationId = String(editGroupConversationId ?? "").trim();
+    if (!normalizedConversationId || isSavingGroupEdit) {
+      return;
+    }
+
+    const currentGroup = directMessagesRef.current.find((item) => (
+      item.conversationId === normalizedConversationId && item.conversationType === "group_dm"
+    ));
+    if (!currentGroup) {
+      setGroupEditError("Nao foi possivel localizar este grupo agora.");
+      return;
+    }
+
+    const normalizedEnteredName = normalizeGroupDmCustomName(editGroupName);
+    const normalizedCurrentDisplayName = normalizeGroupDmCustomName(currentGroup.displayName);
+    const normalizedCurrentCustomName = normalizeGroupDmCustomName(currentGroup.customName ?? null);
+    const normalizedNextName =
+      !normalizedCurrentCustomName && normalizedEnteredName === normalizedCurrentDisplayName
+        ? null
+        : normalizedEnteredName;
+    const shouldClearAvatar = isEditGroupAvatarRemoved && !editGroupAvatarFile;
+    const hasNameChanged = normalizedNextName !== normalizedCurrentCustomName;
+    const hasAvatarChanged = Boolean(editGroupAvatarFile) || shouldClearAvatar;
+
+    if (!hasNameChanged && !hasAvatarChanged) {
+      handleCloseEditGroupModal();
+      return;
+    }
+
+    setIsSavingGroupEdit(true);
+    setGroupEditError(null);
+
+    try {
+      let uploadedAvatarUrl: string | null | undefined;
+      if (editGroupAvatarFile) {
+        const uploadedAvatar = await uploadMediaAsset({
+          kind: "avatar",
+          file: editGroupAvatarFile,
+          conversationId: normalizedConversationId,
+        });
+        uploadedAvatarUrl = String(uploadedAvatar.cdnUrl ?? "").trim() || null;
+      }
+
+      const updatedConversation = await updateGroupConversation(
+        normalizedConversationId,
+        normalizedNextName,
+        uploadedAvatarUrl,
+        { clearAvatar: shouldClearAvatar },
+      );
+
+      upsertGroupDirectMessageLocally(updatedConversation, {
+        activate: activeConversationId === normalizedConversationId,
+      });
+      handleCloseEditGroupModal();
+      void conversationsQuery.refetch().catch(() => undefined);
+    } catch (error) {
+      setGroupEditError(error instanceof Error ? error.message : "Nao foi possivel salvar o grupo agora.");
+    } finally {
+      setIsSavingGroupEdit(false);
+    }
+  }, [
+    activeConversationId,
+    conversationsQuery,
+    editGroupAvatarFile,
+    editGroupConversationId,
+    editGroupName,
+    handleCloseEditGroupModal,
+    isEditGroupAvatarRemoved,
+    isSavingGroupEdit,
+    upsertGroupDirectMessageLocally,
+  ]);
+
+  const handleLeaveGroupAction = useCallback(async (conversationIdRaw?: string): Promise<void> => {
+    const normalizedConversationId = String(conversationIdRaw ?? dmContextMenu?.conversationId ?? "").trim();
+    if (!normalizedConversationId || isLeavingGroup) {
+      return;
+    }
+
+    const confirmed = window.confirm("Tem certeza que deseja sair deste grupo?");
+    if (!confirmed) {
+      return;
+    }
+
+    setIsLeavingGroup(true);
+    setDmContextMenu(null);
+
+    try {
+      await leaveGroupConversation(normalizedConversationId);
+
+      setDirectMessages((current) => {
+        const updated = current.filter((item) => item.conversationId !== normalizedConversationId);
+        writeDirectMessagesCache(effectiveIdentityUserId, updated);
+        return updated;
+      });
+      setHiddenDmConversationIds((current) => current.filter((conversationId) => conversationId !== normalizedConversationId));
+      if (inviteGroupConversationId === normalizedConversationId) {
+        setInviteGroupConversationId(null);
+      }
+      if (editGroupConversationId === normalizedConversationId) {
+        handleCloseEditGroupModal();
+      }
+      if (activeConversationId === normalizedConversationId) {
+        onOpenFriends?.();
+      }
+      void conversationsQuery.refetch().catch(() => undefined);
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "Nao foi possivel sair do grupo agora.");
+    } finally {
+      setIsLeavingGroup(false);
+    }
+  }, [
+    activeConversationId,
+    conversationsQuery,
+    dmContextMenu?.conversationId,
+    editGroupConversationId,
+    effectiveIdentityUserId,
+    handleCloseEditGroupModal,
+    inviteGroupConversationId,
+    isLeavingGroup,
+    onOpenFriends,
+  ]);
+
+  useEffect(() => {
+    if (!editGroupConversationId) {
+      return;
+    }
+
+    const groupStillExists = directMessages.some((item) => (
+      item.conversationId === editGroupConversationId && item.conversationType === "group_dm"
+    ));
+    if (!groupStillExists) {
+      handleCloseEditGroupModal();
+    }
+  }, [directMessages, editGroupConversationId, handleCloseEditGroupModal]);
+
+  useEffect(() => {
+    if (!inviteGroupConversationId) {
+      return;
+    }
+
+    const groupStillExists = directMessages.some((item) => (
+      item.conversationId === inviteGroupConversationId && item.conversationType === "group_dm"
+    ));
+    if (!groupStillExists) {
+      setInviteGroupConversationId(null);
+    }
+  }, [directMessages, inviteGroupConversationId]);
 
   useEffect(() => {
     if (!dmContextMenu) {
@@ -4102,9 +4589,50 @@ export default function DirectMessagesSidebar({
               event.stopPropagation();
             }}
           >
-            <div className="friends-sidebar__dm-context-menu-group" role="none">
-              {dmContextMenu.conversationType === "dm" ? (
-                <>
+            {dmContextMenu.conversationType === "group_dm" ? (
+              <>
+                <div className="friends-sidebar__dm-context-menu-group" role="none">
+                  <button
+                    className="friends-sidebar__dm-context-menu-item"
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      handleOpenInviteGroupModal(dmContextMenu.conversationId);
+                    }}
+                  >
+                    <span>Convites</span>
+                  </button>
+
+                  <button
+                    className="friends-sidebar__dm-context-menu-item"
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      handleOpenEditGroupModal(dmContextMenu.conversationId);
+                    }}
+                  >
+                    <span>Editar grupo</span>
+                  </button>
+                </div>
+
+                <div className="friends-sidebar__dm-context-menu-divider" role="separator" />
+
+                <div className="friends-sidebar__dm-context-menu-group" role="none">
+                  <button
+                    className="friends-sidebar__dm-context-menu-item friends-sidebar__dm-context-menu-item--danger"
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      void handleLeaveGroupAction(dmContextMenu.conversationId);
+                    }}
+                  >
+                    <span>Sair do grupo</span>
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="friends-sidebar__dm-context-menu-group" role="none">
                   <button
                     className="friends-sidebar__dm-context-menu-item"
                     type="button"
@@ -4126,65 +4654,61 @@ export default function DirectMessagesSidebar({
                   >
                     <span>Iniciar chamada</span>
                   </button>
-                </>
-              ) : null}
 
-              <button
-                className="friends-sidebar__dm-context-menu-item"
-                type="button"
-                role="menuitem"
-                onClick={() => {
-                  toggleFavoriteDirectMessage(dmContextMenu.conversationId);
-                }}
-              >
-                <span>
-                  {directMessagesRef.current.find((item) => item.conversationId === dmContextMenu.conversationId)?.isFavorite
-                    ? "Desfavoritar usuário"
-                    : "Favoritar usuário"}
-                </span>
-              </button>
-            </div>
+                  <button
+                    className="friends-sidebar__dm-context-menu-item"
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      toggleFavoriteDirectMessage(dmContextMenu.conversationId);
+                    }}
+                  >
+                    <span>
+                      {directMessagesRef.current.find((item) => item.conversationId === dmContextMenu.conversationId)?.isFavorite
+                        ? "Desfavoritar usuario"
+                        : "Favoritar usuario"}
+                    </span>
+                  </button>
+                </div>
 
-            <div className="friends-sidebar__dm-context-menu-divider" role="separator" />
+                <div className="friends-sidebar__dm-context-menu-divider" role="separator" />
 
-            <div className="friends-sidebar__dm-context-menu-group" role="none">
-              {dmContextMenu.conversationType === "dm" ? (
-                <button
-                  className="friends-sidebar__dm-context-menu-item"
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    void handleUnfriendDirectMessageUser(dmContextMenu.userId);
-                  }}
-                >
-                  <span>Desfazer amizade</span>
-                </button>
-              ) : null}
+                <div className="friends-sidebar__dm-context-menu-group" role="none">
+                  <button
+                    className="friends-sidebar__dm-context-menu-item"
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      void handleUnfriendDirectMessageUser(dmContextMenu.userId);
+                    }}
+                  >
+                    <span>Desfazer amizade</span>
+                  </button>
 
-              <button
-                className="friends-sidebar__dm-context-menu-item"
-                type="button"
-                role="menuitem"
-                onClick={() => {
-                  handleHideDirectMessage(dmContextMenu.conversationId);
-                }}
-              >
-                <span>Fechar mensagem direta</span>
-              </button>
+                  <button
+                    className="friends-sidebar__dm-context-menu-item"
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      handleHideDirectMessage(dmContextMenu.conversationId);
+                    }}
+                  >
+                    <span>Fechar mensagem direta</span>
+                  </button>
 
-              {dmContextMenu.conversationType === "dm" ? (
-                <button
-                  className="friends-sidebar__dm-context-menu-item friends-sidebar__dm-context-menu-item--danger"
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    void handleBlockDirectMessageUser(dmContextMenu.userId);
-                  }}
-                >
-                  <span>Bloquear</span>
-                </button>
-              ) : null}
-            </div>
+                  <button
+                    className="friends-sidebar__dm-context-menu-item friends-sidebar__dm-context-menu-item--danger"
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      void handleBlockDirectMessageUser(dmContextMenu.userId);
+                    }}
+                  >
+                    <span>Bloquear</span>
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         ) : null}
 
@@ -4282,6 +4806,116 @@ export default function DirectMessagesSidebar({
         }}
         onCreate={handleCreateGroupDirectMessage}
       />
+
+      <InviteGroupDmModal
+        isOpen={Boolean(inviteGroupDirectMessage)}
+        currentUserId={effectiveIdentityUserId}
+        existingParticipantIds={inviteGroupDirectMessage?.participantIds ?? []}
+        onClose={() => {
+          setInviteGroupConversationId(null);
+        }}
+        onInvite={handleInviteGroupMembers}
+      />
+
+      <Modal
+        isOpen={Boolean(editingGroupDirectMessage)}
+        title="Editar grupo"
+        ariaLabel="Editar grupo privado"
+        onClose={handleCloseEditGroupModal}
+        panelClassName="friends-sidebar__edit-group-modal"
+        bodyClassName="friends-sidebar__edit-group-modal-body"
+        footer={(
+          <div className="friends-sidebar__edit-group-modal-footer">
+            <button
+              className="friends-sidebar__add-friend-cancel"
+              type="button"
+              onClick={handleCloseEditGroupModal}
+              disabled={isSavingGroupEdit}
+            >
+              Cancelar
+            </button>
+            <button
+              className="friends-sidebar__add-friend-submit"
+              type="button"
+              onClick={() => {
+                void handleSaveGroupEdit();
+              }}
+              disabled={isSavingGroupEdit}
+            >
+              {isSavingGroupEdit ? "Salvando..." : "Salvar"}
+            </button>
+          </div>
+        )}
+      >
+        <div className="friends-sidebar__edit-group">
+          <div className="friends-sidebar__edit-group-avatar-wrap">
+            <button
+              className="friends-sidebar__edit-group-avatar-button"
+              type="button"
+              onClick={() => {
+                editGroupAvatarInputRef.current?.click();
+              }}
+              disabled={isSavingGroupEdit}
+              aria-label="Selecionar avatar do grupo"
+            >
+              <GroupCompositeAvatar
+                className="friends-sidebar__edit-group-avatar-preview"
+                participants={editingGroupDirectMessage?.participants ?? []}
+                label={editingGroupDirectMessage?.displayName ?? "Grupo privado"}
+                fallbackSrc={getGroupDmAvatarUrl()}
+                fixedSrc={!isEditGroupAvatarRemoved ? editGroupAvatarPreviewSrc : null}
+              />
+              <span className="friends-sidebar__edit-group-avatar-edit-badge" aria-hidden="true">
+                <MaterialSymbolIcon name="edit" size={14} />
+              </span>
+            </button>
+
+            <input
+              ref={editGroupAvatarInputRef}
+              className="friends-sidebar__edit-group-avatar-input"
+              type="file"
+              accept="image/*"
+              onChange={handleEditGroupAvatarChange}
+              disabled={isSavingGroupEdit}
+            />
+
+            {!isEditGroupAvatarRemoved && (editGroupAvatarPreviewSrc || editGroupInitialCustomAvatarUrl) ? (
+              <button
+                className="friends-sidebar__edit-group-avatar-remove"
+                type="button"
+                onClick={handleRemoveEditGroupAvatar}
+                disabled={isSavingGroupEdit}
+              >
+                Remover avatar
+              </button>
+            ) : null}
+          </div>
+
+          <div className="friends-sidebar__edit-group-form">
+            <label className="friends-sidebar__add-friend-label" htmlFor="edit-group-name-input">
+              Nome do grupo
+            </label>
+            <input
+              id="edit-group-name-input"
+              className="friends-sidebar__add-friend-input"
+              type="text"
+              value={editGroupName}
+              onChange={(event) => setEditGroupName(event.target.value)}
+              placeholder="Nome do grupo"
+              autoComplete="off"
+              disabled={isSavingGroupEdit}
+            />
+            <p className="friends-sidebar__edit-group-helper">
+              Se deixar sem nome personalizado, o grupo usa os nomes dos participantes automaticamente.
+            </p>
+            {groupEditError ? (
+              <p className="friends-sidebar__add-friend-feedback friends-sidebar__add-friend-feedback--error">
+                {groupEditError}
+              </p>
+            ) : null}
+          </div>
+        </div>
+      </Modal>
 
       <Modal
         isOpen={Boolean(friendRequestBlockedNotice)}

@@ -809,6 +809,7 @@ function areSidebarSelectionsEqual(
       currentItem.conversationId !== nextItem.conversationId ||
       currentItem.userId !== nextItem.userId ||
       currentItem.conversationType !== nextItem.conversationType ||
+      (currentItem.createdBy ?? "") !== (nextItem.createdBy ?? "") ||
       currentItem.username !== nextItem.username ||
       currentItem.displayName !== nextItem.displayName ||
       currentItem.avatarSrc !== nextItem.avatarSrc ||
@@ -1566,6 +1567,18 @@ export default function AppShell() {
   const handleSidebarDirectMessagesChange = useCallback((items: SidebarDirectMessageSelection[]): void => {
     setIsSidebarHydrated(true);
     setSidebarDirectMessages((current) => (areSidebarSelectionsEqual(current, items) ? current : items));
+    setActiveDirectMessage((current) => {
+      if (!current) {
+        return current;
+      }
+
+      const nextSelection = items.find((item) => item.conversationId === current.conversationId) ?? null;
+      if (!nextSelection) {
+        return null;
+      }
+
+      return areSidebarSelectionsEqual([current], [nextSelection]) ? current : nextSelection;
+    });
   }, []);
 
   useEffect(() => {
@@ -2135,6 +2148,7 @@ export default function AppShell() {
           conversationId: conversation.id,
           userId: `group:${conversation.id}`,
           conversationType: "group_dm",
+          createdBy: conversation.createdBy ?? null,
           username: "grupo",
           displayName: resolveGroupDmDisplayName(
             conversation.name,
@@ -3758,6 +3772,7 @@ export default function AppShell() {
                     currentUserId={chatCurrentUser.userId}
                     currentUser={chatCurrentUser}
                     conversationType={chatViewDirectMessage.conversationType ?? "dm"}
+                    conversationCreatedBy={chatViewDirectMessage.createdBy ?? null}
                     conversationParticipants={chatViewDirectMessage.participants ?? []}
                     targetUser={{
                       userId: chatViewDirectMessage.userId,

@@ -12,7 +12,9 @@ import UserProfilePopover, { type UserProfileMutualFriendItem } from "../UserPro
 import EmojiButton from "./EmojiButton";
 import EmojiPopover from "./EmojiPopover";
 import MessageDateDivider from "./MessageDateDivider";
+import { removeGroupConversationMember, transferGroupConversationOwner } from "../../api/conversationsApi";
 import { getAttachmentUrl, getBannerUrl, getDefaultBannerUrl, getNameAvatarUrl, isDefaultBannerUrl } from "../../services/cdn/mediaUrls";
+import { getGroupDmAvatarUrl } from "../../services/chat/groupDm";
 import {
   PRESENCE_LABELS,
   type PresenceSpotifyActivity,
@@ -326,6 +328,19 @@ type VoiceRealtimeEventName =
   | "call:ended";
 type VoiceCallStartOrigin = "outgoing" | "incoming" | "rejoin" | "restore";
 
+interface VoiceSignalDedupState {
+  sentAt: number;
+  action: VoiceCallSignalAction;
+}
+
+const VOICE_SIGNAL_ACTION_PRIORITY: Record<VoiceCallSignalAction, number> = {
+  invite: 1,
+  cancel: 2,
+};
+const VOICE_SIGNAL_SEND_MAX_ATTEMPTS = 3;
+const VOICE_SIGNAL_SEND_RETRY_DELAY_MS = 140;
+const VOICE_CALL_START_CONNECT_TIMEOUT_MS = 20_000;
+
 interface VoiceCallSignalPayload {
   version: 1;
   action: VoiceCallSignalAction;
@@ -567,6 +582,7 @@ interface DirectMessageChatViewProps {
   currentUser: DirectMessageChatParticipant;
   targetUser: DirectMessageChatParticipant;
   conversationType?: "dm" | "group_dm";
+  conversationCreatedBy?: string | null;
   conversationParticipants?: DirectMessageChatParticipant[];
   onOpenSettings?: (section?: "account" | "profile" | "connections" | "social" | "devices" | "audio" | "windows") => void;
   isTargetFriend?: boolean;
@@ -575,6 +591,15 @@ interface DirectMessageChatViewProps {
   onAddFriendTarget?: () => void | Promise<void>;
   onBlockTarget?: () => void | Promise<void>;
   mutualFriends?: UserProfileMutualFriendItem[];
+}
+
+interface GroupMemberContextMenuState {
+  userId: string;
+  lookupId: string;
+  displayName: string;
+  isCurrentMember: boolean;
+  x: number;
+  y: number;
 }
 
 interface ConversationMessagesCacheEntry {
@@ -1868,6 +1893,7 @@ export default function DirectMessageChatView({
   currentUser,
   targetUser,
   conversationType = "dm",
+  conversationCreatedBy = null,
   conversationParticipants = [],
   onOpenSettings,
   isTargetFriend = false,
@@ -1918,6 +1944,9 @@ export default function DirectMessageChatView({
     createDefaultSpotifyListenAlongSession("", ""),
   );
   const [openMessageProfileUserId, setOpenMessageProfileUserId] = useState<string | null>(null);
+  const [groupOwnerUserId, setGroupOwnerUserId] = useState<string>(() => String(conversationCreatedBy ?? "").trim());
+  const [groupMemberContextMenu, setGroupMemberContextMenu] = useState<GroupMemberContextMenuState | null>(null);
+  const [isGroupMemberActionPending, setIsGroupMemberActionPending] = useState(false);
   const [isSidebarFullProfileOpen, setIsSidebarFullProfileOpen] = useState(false);
   const [isUnfriendingTarget, setIsUnfriendingTarget] = useState(false);
   const [isAddingTargetFriend, setIsAddingTargetFriend] = useState(false);
@@ -1939,6 +1968,9 @@ export default function DirectMessageChatView({
   const [incomingVoiceInviteRoomId, setIncomingVoiceInviteRoomId] = useState<string | null>(null);
   const [incomingVoiceInviteExpiresAtMs, setIncomingVoiceInviteExpiresAtMs] = useState<number | null>(null);
   const [voiceCallRejoinFallback, setVoiceCallRejoinFallback] = useState<VoiceCallRejoinFallback | null>(null);
+  const [isChatWindowFocused, setIsChatWindowFocused] = useState<boolean>(() =>
+    typeof document === "undefined" ? true : !document.hidden && document.hasFocus(),
+  );
   const [headerSearchValue, setHeaderSearchValue] = useState("");
   const [headerSearchIndex, setHeaderSearchIndex] = useState(-1);
   const [messageProfilePosition, setMessageProfilePosition] = useState<{ top: number; left: number }>({
@@ -1980,11 +2012,12 @@ export default function DirectMessageChatView({
   const voicePresenceClientRef = useRef<VoiceCallPresenceClient | null>(null);
   const dmRealtimeChannelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const voiceSignalMessageIdsRef = useRef<Set<string>>(new Set());
-  const latestVoiceSignalBySenderRef = useRef<Map<string, number>>(new Map());
+  const latestVoiceSignalBySenderRef = useRef<Map<string, VoiceSignalDedupState>>(new Map());
   const incomingVoiceInviteFromUserIdRef = useRef<string | null>(null);
   const voiceCallParticipantsRef = useRef<VoiceParticipantState[]>([]);
   const activeVoiceRoomIdRef = useRef<string>("");
   const activeVoiceSessionTokenRef = useRef<symbol | null>(null);
+  const isStartingVoiceCallRef = useRef(false);
   const hadRemoteParticipantInSessionRef = useRef(false);
   const connectedRemoteParticipantsCountRef = useRef(0);
   const suppressedIncomingVoiceInviteRef = useRef<VoiceCallSuppressedInvite | null>(null);
@@ -2004,6 +2037,7 @@ export default function DirectMessageChatView({
   const singleParticipantTimerRef = useRef<number | null>(null);
   const incomingVoiceInviteTimerRef = useRef<number | null>(null);
   const rejoinFallbackTimerRef = useRef<number | null>(null);
+  const voiceCallStartTimeoutRef = useRef<number | null>(null);
   const stopVoiceCallSessionRef = useRef<(() => Promise<void>) | null>(null);
   const openPerfRef = useRef<{ conversationId: string; openedAt: number; firstPaintLogged: boolean }>({
     conversationId,
@@ -2031,6 +2065,13 @@ export default function DirectMessageChatView({
   );
   const targetAvatarSrc = (targetUser.avatarSrc || "").trim() || targetFallbackAvatar;
   const currentAvatarSrc = (currentUser.avatarSrc || "").trim() || currentFallbackAvatar;
+  const fixedGroupAvatarSrc = useMemo(() => {
+    const raw = String(targetUser.avatarSrc ?? "").trim();
+    if (!raw || raw === getGroupDmAvatarUrl()) {
+      return null;
+    }
+    return raw;
+  }, [targetUser.avatarSrc]);
   const safeTargetDisplayName = targetDisplayNameForFallback;
   const safeTargetUsername = normalizedTargetUsername || "usuario";
   const voiceRoomId = useMemo(
@@ -2710,6 +2751,13 @@ export default function DirectMessageChatView({
     return new Set(normalizedIds);
   }, [currentUser.firebaseUid, currentUser.userId, currentUserId]);
 
+  useEffect(() => {
+    setGroupOwnerUserId(String(conversationCreatedBy ?? "").trim());
+  }, [conversationCreatedBy, conversationId]);
+
+  const normalizedGroupOwnerUserId = String(groupOwnerUserId ?? "").trim().toLowerCase();
+  const isCurrentUserGroupOwner = Boolean(normalizedGroupOwnerUserId) && currentParticipantIds.has(normalizedGroupOwnerUserId);
+
   const conversationParticipantsById = useMemo(() => {
     const map = new Map<string, DirectMessageChatParticipant>();
     conversationParticipants.forEach((participant) => {
@@ -2778,11 +2826,14 @@ export default function DirectMessageChatView({
       const normalizedUserId = String(participant.userId ?? "").trim();
       const normalizedFirebaseUid = String(participant.firebaseUid ?? "").trim();
       const lookupId = normalizedUserId || normalizedFirebaseUid;
-      const isCurrentMember =
+      const isCurrentMember = Boolean(
         (normalizedUserId && currentParticipantIds.has(normalizedUserId.toLowerCase()))
-        || (normalizedFirebaseUid && currentParticipantIds.has(normalizedFirebaseUid.toLowerCase()));
+        || (normalizedFirebaseUid && currentParticipantIds.has(normalizedFirebaseUid.toLowerCase())),
+      );
 
       return {
+        userId: normalizedUserId || null,
+        firebaseUid: normalizedFirebaseUid || null,
         lookupId,
         key: lookupId || `${displayName}:${username}`,
         displayName,
@@ -2799,15 +2850,16 @@ export default function DirectMessageChatView({
   const groupMembersLabel = groupSidebarMemberCount <= 0
     ? "Grupo privado"
     : (groupSidebarMemberCount === 1 ? "1 membro" : `${groupSidebarMemberCount} membros`);
-  const groupAvatarParticipants = useMemo(
-    () => groupSidebarMembers.map((member) => ({
+  const groupAvatarParticipants = useMemo(() => {
+    const preferredMembers = groupSidebarMembers.filter((member) => !member.isCurrentMember);
+    const sourceMembers = preferredMembers.length > 0 ? preferredMembers : groupSidebarMembers;
+    return sourceMembers.map((member) => ({
       userId: member.lookupId,
       username: member.username,
       displayName: member.displayName,
       avatarSrc: member.avatarSrc,
-    })),
-    [groupSidebarMembers],
-  );
+    }));
+  }, [groupSidebarMembers]);
 
   const isCurrentUserSender = useCallback(
     (userId: string): boolean => {
@@ -3123,10 +3175,113 @@ export default function DirectMessageChatView({
     [closeMessageProfilePopover, closeSidebarFullProfile, loadMessageProfileExtra, openMessageProfileUserId],
   );
 
+  const handleOpenGroupMemberContextMenu = useCallback((
+    event: ReactMouseEvent<HTMLElement>,
+    member: {
+      userId: string | null;
+      lookupId: string;
+      displayName: string;
+      isCurrentMember: boolean;
+    },
+  ): void => {
+    if (!member.userId) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    closeMessageProfilePopover();
+    closeSidebarFullProfile();
+    setGroupMemberContextMenu({
+      userId: member.userId,
+      lookupId: member.lookupId,
+      displayName: member.displayName,
+      isCurrentMember: member.isCurrentMember,
+      x: event.clientX,
+      y: event.clientY,
+    });
+  }, [closeMessageProfilePopover, closeSidebarFullProfile]);
+
+  const handleRemoveGroupMember = useCallback(async (): Promise<void> => {
+    if (!groupMemberContextMenu || !isCurrentUserGroupOwner || groupMemberContextMenu.isCurrentMember) {
+      return;
+    }
+
+    if (!window.confirm(`Remover ${groupMemberContextMenu.displayName} deste grupo?`)) {
+      return;
+    }
+
+    setIsGroupMemberActionPending(true);
+    try {
+      await removeGroupConversationMember(conversationId, groupMemberContextMenu.userId);
+      setGroupMemberContextMenu(null);
+      if (openMessageProfileUserId === groupMemberContextMenu.lookupId) {
+        closeMessageProfilePopover();
+      }
+    } finally {
+      setIsGroupMemberActionPending(false);
+    }
+  }, [
+    closeMessageProfilePopover,
+    conversationId,
+    groupMemberContextMenu,
+    isCurrentUserGroupOwner,
+    openMessageProfileUserId,
+  ]);
+
+  const handleTransferGroupOwner = useCallback(async (): Promise<void> => {
+    if (!groupMemberContextMenu || !isCurrentUserGroupOwner || groupMemberContextMenu.isCurrentMember) {
+      return;
+    }
+
+    if (!window.confirm(`Tornar ${groupMemberContextMenu.displayName} dono(a) deste grupo?`)) {
+      return;
+    }
+
+    setIsGroupMemberActionPending(true);
+    try {
+      await transferGroupConversationOwner(conversationId, groupMemberContextMenu.userId);
+      setGroupOwnerUserId(groupMemberContextMenu.userId);
+      setGroupMemberContextMenu(null);
+    } finally {
+      setIsGroupMemberActionPending(false);
+    }
+  }, [conversationId, groupMemberContextMenu, isCurrentUserGroupOwner]);
+
   useEffect(() => {
     closeMessageProfilePopover();
     closeSidebarFullProfile();
+    setGroupMemberContextMenu(null);
   }, [closeMessageProfilePopover, closeSidebarFullProfile, conversationId]);
+
+  useEffect(() => {
+    if (!groupMemberContextMenu) {
+      return;
+    }
+
+    const closeMenu = (): void => {
+      setGroupMemberContextMenu(null);
+    };
+
+    const handleEscape = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") {
+        closeMenu();
+      }
+    };
+
+    window.addEventListener("click", closeMenu);
+    window.addEventListener("blur", closeMenu);
+    window.addEventListener("resize", closeMenu);
+    window.addEventListener("scroll", closeMenu, true);
+    window.addEventListener("keydown", handleEscape);
+    return () => {
+      window.removeEventListener("click", closeMenu);
+      window.removeEventListener("blur", closeMenu);
+      window.removeEventListener("resize", closeMenu);
+      window.removeEventListener("scroll", closeMenu, true);
+      window.removeEventListener("keydown", handleEscape);
+    };
+  }, [groupMemberContextMenu]);
 
   useEffect(() => {
     if (!openMessageProfileUserId) {
@@ -3466,7 +3621,11 @@ export default function DirectMessageChatView({
     [currentUserId],
   );
 
-  const shouldProcessVoiceSignal = useCallback((senderUserIdRaw: string, sentAtRaw: number): boolean => {
+  const shouldProcessVoiceSignal = useCallback((
+    senderUserIdRaw: string,
+    sentAtRaw: number,
+    actionRaw: VoiceCallSignalAction,
+  ): boolean => {
     const senderUserId = String(senderUserIdRaw ?? "").trim();
     if (!senderUserId) {
       return false;
@@ -3475,12 +3634,38 @@ export default function DirectMessageChatView({
       return false;
     }
 
+    const action: VoiceCallSignalAction = actionRaw === "cancel" ? "cancel" : "invite";
     const latestBySender = latestVoiceSignalBySenderRef.current;
-    const knownSentAt = latestBySender.get(senderUserId) ?? 0;
-    if (sentAtRaw <= knownSentAt) {
+    const known = latestBySender.get(senderUserId);
+    if (!known) {
+      latestBySender.set(senderUserId, {
+        sentAt: sentAtRaw,
+        action,
+      });
+      return true;
+    }
+    if (sentAtRaw > known.sentAt) {
+      latestBySender.set(senderUserId, {
+        sentAt: sentAtRaw,
+        action,
+      });
+      return true;
+    }
+    if (sentAtRaw < known.sentAt) {
       return false;
     }
-    latestBySender.set(senderUserId, sentAtRaw);
+
+    // Same timestamp: allow higher-priority action (cancel beats invite).
+    const knownPriority = VOICE_SIGNAL_ACTION_PRIORITY[known.action];
+    const incomingPriority = VOICE_SIGNAL_ACTION_PRIORITY[action];
+    if (incomingPriority <= knownPriority) {
+      return false;
+    }
+
+    latestBySender.set(senderUserId, {
+      sentAt: sentAtRaw,
+      action,
+    });
     return true;
   }, []);
 
@@ -3589,6 +3774,13 @@ export default function DirectMessageChatView({
     if (rejoinFallbackTimerRef.current != null) {
       window.clearTimeout(rejoinFallbackTimerRef.current);
       rejoinFallbackTimerRef.current = null;
+    }
+  }, []);
+
+  const clearVoiceCallStartTimeout = useCallback((): void => {
+    if (voiceCallStartTimeoutRef.current != null) {
+      window.clearTimeout(voiceCallStartTimeoutRef.current);
+      voiceCallStartTimeoutRef.current = null;
     }
   }, []);
 
@@ -3733,10 +3925,6 @@ export default function DirectMessageChatView({
         senderUserId,
         direction: "incoming",
       });
-      playAudioCue(incomingVoiceRingAudioRef, voiceCallRingingSoundUrl, {
-        loop: true,
-        restart: false,
-      });
       notifyIncomingVoiceCallDesktop(senderUserId, roomId, sentAtRaw);
       incomingVoiceInviteTimerRef.current = window.setTimeout(() => {
         clearIncomingVoiceInviteState();
@@ -3748,7 +3936,6 @@ export default function DirectMessageChatView({
       clearIncomingVoiceInviteTimer,
       notifyIncomingVoiceCallDesktop,
       isIncomingVoiceInviteSuppressed,
-      voiceCallRingingSoundUrl,
       voiceRoomId,
     ],
   );
@@ -3983,7 +4170,10 @@ export default function DirectMessageChatView({
         sentAt: Date.now(),
       };
 
-      latestVoiceSignalBySenderRef.current.set(senderUserId, signal.sentAt);
+      latestVoiceSignalBySenderRef.current.set(senderUserId, {
+        sentAt: signal.sentAt,
+        action,
+      });
       if (action === "invite") {
         emitVoiceRealtimeEvent("call:ringing", `${roomId}:${senderUserId}`, {
           roomId,
@@ -3999,9 +4189,24 @@ export default function DirectMessageChatView({
         });
       }
 
+      const signalClientId = createClientMessageId();
+      const waitBeforeRetry = async (attempt: number): Promise<void> => {
+        const backoffMs = VOICE_SIGNAL_SEND_RETRY_DELAY_MS * attempt;
+        if (backoffMs <= 0) {
+          return;
+        }
+        await new Promise<void>((resolve) => {
+          window.setTimeout(resolve, backoffMs);
+        });
+      };
+
       let realtimeDelivered = false;
+      let realtimeFailure: unknown = null;
       const activeChannel = dmRealtimeChannelRef.current;
-      if (activeChannel) {
+      for (let attempt = 1; attempt <= VOICE_SIGNAL_SEND_MAX_ATTEMPTS; attempt += 1) {
+        if (!activeChannel) {
+          break;
+        }
         try {
           const realtimeResult = await activeChannel.send({
             type: "broadcast",
@@ -4009,26 +4214,81 @@ export default function DirectMessageChatView({
             payload: signal,
           });
           realtimeDelivered = realtimeResult === "ok";
-        } catch {
-          realtimeDelivered = false;
+          if (realtimeDelivered) {
+            break;
+          }
+          realtimeFailure = new Error(`Realtime voice-signal failed with status "${String(realtimeResult)}".`);
+        } catch (error) {
+          realtimeFailure = error;
         }
+
+        if (realtimeDelivered || attempt >= VOICE_SIGNAL_SEND_MAX_ATTEMPTS) {
+          break;
+        }
+        await waitBeforeRetry(attempt);
       }
 
       const encodedSignal = encodeVoiceCallSignal(signal);
-      try {
-        await sendChatMessage({
-          conversationId,
-          clientId: createClientMessageId(),
-          type: "text",
-          content: encodedSignal,
-          replyToId: null,
-          replyToSnapshot: null,
-          attachment: null,
-        });
-      } catch (error) {
-        if (!realtimeDelivered) {
-          throw error;
+      let chatPersisted = false;
+      let chatFailure: unknown = null;
+      for (let attempt = 1; attempt <= VOICE_SIGNAL_SEND_MAX_ATTEMPTS; attempt += 1) {
+        try {
+          await sendChatMessage({
+            conversationId,
+            clientId: signalClientId,
+            type: "text",
+            content: encodedSignal,
+            replyToId: null,
+            replyToSnapshot: null,
+            attachment: null,
+          });
+          chatPersisted = true;
+          break;
+        } catch (error) {
+          chatFailure = error;
+          if (attempt >= VOICE_SIGNAL_SEND_MAX_ATTEMPTS) {
+            break;
+          }
+          await waitBeforeRetry(attempt);
         }
+      }
+
+      if (!realtimeDelivered && !chatPersisted) {
+        const failure =
+          chatFailure instanceof Error
+            ? chatFailure
+            : realtimeFailure instanceof Error
+              ? realtimeFailure
+              : new Error("Falha ao enviar sinal de voz.");
+        reportClientError(failure, {
+          scope: "voice.sendSignal",
+          action,
+          conversationId,
+          roomId,
+          senderUserId,
+          realtimeDelivered,
+          chatPersisted,
+        });
+        incrementMetric("voice_signal_send_failure_total", 1);
+        throw failure;
+      }
+
+      if (!realtimeDelivered || !chatPersisted) {
+        incrementMetric("voice_signal_send_partial_total", 1);
+        if (import.meta.env.DEV) {
+          console.warn("[voice:signal-partial]", {
+            action,
+            roomId,
+            senderUserId,
+            realtimeDelivered,
+            chatPersisted,
+            realtimeFailure:
+              realtimeFailure instanceof Error ? realtimeFailure.message : String(realtimeFailure ?? ""),
+            chatFailure: chatFailure instanceof Error ? chatFailure.message : String(chatFailure ?? ""),
+          });
+        }
+      } else {
+        incrementMetric("voice_signal_send_success_total", 1);
       }
     },
     [conversationId, currentUser.userId, currentUserId, emitVoiceRealtimeEvent, voiceRoomId],
@@ -4067,7 +4327,7 @@ export default function DirectMessageChatView({
         return true;
       }
       const sentAt = Number(signal.sentAt ?? 0);
-      if (!shouldProcessVoiceSignal(senderUserId, sentAt)) {
+      if (!shouldProcessVoiceSignal(senderUserId, sentAt, signal.action)) {
         return true;
       }
 
@@ -4169,6 +4429,23 @@ export default function DirectMessageChatView({
   useEffect(() => {
     incomingVoiceInviteFromUserIdRef.current = incomingVoiceInviteFromUserId;
   }, [incomingVoiceInviteFromUserId]);
+
+  useEffect(() => {
+    const updateFocusState = (): void => {
+      setIsChatWindowFocused(!document.hidden && document.hasFocus());
+    };
+
+    updateFocusState();
+    window.addEventListener("focus", updateFocusState);
+    window.addEventListener("blur", updateFocusState);
+    document.addEventListener("visibilitychange", updateFocusState);
+
+    return () => {
+      window.removeEventListener("focus", updateFocusState);
+      window.removeEventListener("blur", updateFocusState);
+      document.removeEventListener("visibilitychange", updateFocusState);
+    };
+  }, []);
 
   useEffect(() => {
     const localUserId = String(currentUser.userId ?? "").trim() || String(currentUserId ?? "").trim();
@@ -4815,7 +5092,7 @@ export default function DirectMessageChatView({
 
             if (action === "invite") {
               const sentAt = Number(raw.sentAt ?? 0);
-              if (!shouldProcessVoiceSignal(senderUserId, sentAt)) {
+              if (!shouldProcessVoiceSignal(senderUserId, sentAt, "invite")) {
                 return;
               }
               if (!isVoiceCallActiveRef.current && !isVoiceCallConnectingRef.current) {
@@ -4825,7 +5102,7 @@ export default function DirectMessageChatView({
             }
 
             const sentAt = Number(raw.sentAt ?? 0);
-            if (!shouldProcessVoiceSignal(senderUserId, sentAt)) {
+            if (!shouldProcessVoiceSignal(senderUserId, sentAt, "cancel")) {
               return;
             }
 
@@ -4986,6 +5263,7 @@ export default function DirectMessageChatView({
     clearSingleParticipantTimer();
     clearIncomingVoiceInviteTimer();
     clearRejoinFallbackTimer();
+    clearVoiceCallStartTimeout();
     clearSuppressedIncomingVoiceInvite();
     stopAudioCue(incomingVoiceRingAudioRef, true);
     stopAudioCue(outgoingVoiceRingAudioRef, true);
@@ -5012,6 +5290,7 @@ export default function DirectMessageChatView({
     remoteParticipantIdsRef.current = new Set();
     activeVoiceRoomIdRef.current = voiceRoomId;
     activeVoiceSessionTokenRef.current = null;
+    isStartingVoiceCallRef.current = false;
     hadRemoteParticipantInSessionRef.current = false;
     connectedRemoteParticipantsCountRef.current = 0;
 
@@ -5024,6 +5303,7 @@ export default function DirectMessageChatView({
     clearIncomingVoiceInviteTimer,
     clearOutgoingVoiceRingTimer,
     clearRejoinFallbackTimer,
+    clearVoiceCallStartTimeout,
     clearSuppressedIncomingVoiceInvite,
     clearSingleParticipantTimer,
     conversationId,
@@ -5036,6 +5316,7 @@ export default function DirectMessageChatView({
       clearSingleParticipantTimer();
       clearIncomingVoiceInviteTimer();
       clearRejoinFallbackTimer();
+      clearVoiceCallStartTimeout();
       clearSuppressedIncomingVoiceInvite();
       stopAudioCue(incomingVoiceRingAudioRef, true);
       stopAudioCue(outgoingVoiceRingAudioRef, true);
@@ -5046,6 +5327,7 @@ export default function DirectMessageChatView({
       const existingVoicePresenceClient = voicePresenceClientRef.current;
       voicePresenceClientRef.current = null;
       activeVoiceSessionTokenRef.current = null;
+      isStartingVoiceCallRef.current = false;
       remoteParticipantIdsRef.current = new Set();
       if (existingVoiceCallClient) {
         void existingVoiceCallClient.leave();
@@ -5058,6 +5340,7 @@ export default function DirectMessageChatView({
     clearIncomingVoiceInviteTimer,
     clearOutgoingVoiceRingTimer,
     clearRejoinFallbackTimer,
+    clearVoiceCallStartTimeout,
     clearSingleParticipantTimer,
     clearSuppressedIncomingVoiceInvite,
   ]);
@@ -5087,7 +5370,7 @@ export default function DirectMessageChatView({
       Boolean(incomingVoiceInviteFromUserId) &&
       !isVoiceCallActive &&
       !isVoiceCallConnecting;
-    if (!shouldPlayIncomingRingtone) {
+    if (!shouldPlayIncomingRingtone || !isChatWindowFocused) {
       stopAudioCue(incomingVoiceRingAudioRef, true);
       return;
     }
@@ -5100,7 +5383,7 @@ export default function DirectMessageChatView({
     return () => {
       stopAudioCue(incomingVoiceRingAudioRef, true);
     };
-  }, [incomingVoiceInviteFromUserId, isVoiceCallActive, isVoiceCallConnecting]);
+  }, [incomingVoiceInviteFromUserId, isChatWindowFocused, isVoiceCallActive, isVoiceCallConnecting]);
 
   useEffect(() => {
     const hasTransientVoiceUi =
@@ -6241,6 +6524,8 @@ export default function DirectMessageChatView({
     const existingVoiceCallClient = voiceCallClientRef.current;
     voiceCallClientRef.current = null;
     const activeRoomId = String(activeVoiceRoomIdRef.current ?? "").trim() || voiceRoomId;
+    isStartingVoiceCallRef.current = false;
+    clearVoiceCallStartTimeout();
     clearOutgoingVoiceRingTimer();
     clearSingleParticipantTimer();
     stopAudioCue(incomingVoiceRingAudioRef, true);
@@ -6270,6 +6555,7 @@ export default function DirectMessageChatView({
   }, [
     clearIncomingVoiceInviteState,
     clearOutgoingVoiceRingTimer,
+    clearVoiceCallStartTimeout,
     clearSingleParticipantTimer,
     emitVoiceRealtimeEvent,
     voiceRoomId,
@@ -6283,6 +6569,16 @@ export default function DirectMessageChatView({
   }, [stopVoiceCallSession]);
 
   const startVoiceCallWithRoomId = useCallback((roomIdOverride?: string | null, options?: { suppressInvite?: boolean; origin?: VoiceCallStartOrigin }) => {
+    if (
+      isStartingVoiceCallRef.current ||
+      voiceCallClientRef.current ||
+      isVoiceCallActiveRef.current ||
+      isVoiceCallConnectingRef.current
+    ) {
+      return;
+    }
+    isStartingVoiceCallRef.current = true;
+
     const suppressInviteSignal = options?.suppressInvite === true;
     const origin: VoiceCallStartOrigin = options?.origin ?? (suppressInviteSignal ? "incoming" : "outgoing");
     const localIdentity: VoiceUserIdentity = {
@@ -6291,6 +6587,7 @@ export default function DirectMessageChatView({
       avatarSrc: String(currentUser.avatarSrc ?? "").trim() || currentFallbackAvatar,
     };
     if (!localIdentity.userId) {
+      isStartingVoiceCallRef.current = false;
       setVoiceCallError("Nao foi possivel iniciar a chamada. Usuario local invalido.");
       return;
     }
@@ -6304,6 +6601,7 @@ export default function DirectMessageChatView({
     activeVoiceRoomIdRef.current = activeVoiceRoomId;
     hadRemoteParticipantInSessionRef.current = false;
     connectedRemoteParticipantsCountRef.current = 0;
+    clearVoiceCallStartTimeout();
     clearSuppressedIncomingVoiceInvite();
     stopAudioCue(incomingVoiceRingAudioRef, true);
     stopAudioCue(outgoingVoiceRingAudioRef, true);
@@ -6354,6 +6652,20 @@ export default function DirectMessageChatView({
     remoteParticipantIdsRef.current = new Set();
     const sessionToken = Symbol("voice-call-session");
     activeVoiceSessionTokenRef.current = sessionToken;
+    voiceCallStartTimeoutRef.current = window.setTimeout(() => {
+      if (activeVoiceSessionTokenRef.current !== sessionToken) {
+        return;
+      }
+      if (hadRemoteParticipantInSessionRef.current) {
+        return;
+      }
+      if (origin === "outgoing") {
+        const timeoutRoomId = String(activeVoiceRoomIdRef.current ?? "").trim() || activeVoiceRoomId;
+        void sendVoiceSignal("cancel", timeoutRoomId).catch(() => undefined);
+      }
+      setVoiceCallError("Tempo limite para conectar a chamada. Tente novamente.");
+      void stopVoiceCallSession();
+    }, VOICE_CALL_START_CONNECT_TIMEOUT_MS);
     if (origin === "outgoing") {
       outgoingVoiceRingTimerRef.current = window.setTimeout(() => {
         if (activeVoiceSessionTokenRef.current !== sessionToken) {
@@ -6423,6 +6735,7 @@ export default function DirectMessageChatView({
         const hasRemoteParticipant = nextRemoteParticipantIds.size > 0;
         if (hasRemoteParticipant) {
           stopAudioCue(outgoingVoiceRingAudioRef, true);
+          clearVoiceCallStartTimeout();
           emitVoiceRealtimeEvent("call:accepted", `${activeVoiceRoomId}:${remoteIdentity.userId || "remote"}`, {
             roomId: activeVoiceRoomId,
           });
@@ -6507,6 +6820,8 @@ export default function DirectMessageChatView({
         if (voiceCallClientRef.current !== voiceCallClient) {
           return;
         }
+        clearVoiceCallStartTimeout();
+        isStartingVoiceCallRef.current = false;
         setIsVoiceCallConnecting(false);
         setIsVoiceCallActive(true);
         if (hadRemoteParticipantInSessionRef.current) {
@@ -6523,6 +6838,12 @@ export default function DirectMessageChatView({
         if (voiceCallClientRef.current === voiceCallClient) {
           voiceCallClientRef.current = null;
         }
+        if (origin === "outgoing" && !suppressInviteSignal) {
+          const failedRoomId = String(activeVoiceRoomIdRef.current ?? "").trim() || activeVoiceRoomId;
+          void sendVoiceSignal("cancel", failedRoomId).catch(() => undefined);
+        }
+        clearVoiceCallStartTimeout();
+        isStartingVoiceCallRef.current = false;
         setVoiceCallError(String(error instanceof Error ? error.message : error ?? "").trim() || "Falha na chamada de voz.");
         clearVoiceCallRejoinFallback();
         void stopVoiceCallSession();
@@ -6536,6 +6857,7 @@ export default function DirectMessageChatView({
     currentUser.displayName,
     currentUser.firebaseUid,
     currentUser.userId,
+    clearVoiceCallStartTimeout,
     clearVoiceCallRejoinFallback,
     setVoiceCallRejoinFallbackWithTtl,
     clearSuppressedIncomingVoiceInvite,
@@ -6833,6 +7155,7 @@ export default function DirectMessageChatView({
                 participants={groupAvatarParticipants}
                 label={safeTargetDisplayName}
                 fallbackSrc={targetAvatarSrc}
+                fixedSrc={fixedGroupAvatarSrc}
               />
             ) : (
               <img
@@ -7071,6 +7394,7 @@ export default function DirectMessageChatView({
                   participants={groupAvatarParticipants}
                   label={safeTargetDisplayName}
                   fallbackSrc={targetAvatarSrc}
+                  fixedSrc={fixedGroupAvatarSrc}
                 />
               ) : (
                 <img
@@ -7658,6 +7982,9 @@ export default function DirectMessageChatView({
                     onClick={(event) => {
                       handleOpenMessageProfilePopover(event, member.lookupId);
                     }}
+                    onContextMenu={(event) => {
+                      handleOpenGroupMemberContextMenu(event, member);
+                    }}
                     aria-label={`Abrir mini perfil de ${member.displayName}`}
                   >
                     <span className="dm-chat__group-member-avatar-wrap">
@@ -7683,9 +8010,6 @@ export default function DirectMessageChatView({
                     <span className="dm-chat__group-member-body">
                       <span className="dm-chat__group-member-name" title={member.displayName}>
                         {member.displayName}
-                      </span>
-                      <span className="dm-chat__group-member-meta" title={member.isCurrentMember ? "Voce" : `@${member.username}`}>
-                        {member.isCurrentMember ? "Voce" : `@${member.username}`}
                       </span>
                     </span>
                   </button>
@@ -7918,6 +8242,57 @@ export default function DirectMessageChatView({
         onClose={() => setIsEmojiOpen(false)}
         onSelect={handleSelectEmoji}
       />
+
+      {groupMemberContextMenu && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              className="dm-chat__group-member-context-menu"
+              role="menu"
+              aria-label={`Acoes para ${groupMemberContextMenu.displayName}`}
+              style={{
+                left: `${Math.max(12, groupMemberContextMenu.x)}px`,
+                top: `${Math.max(12, groupMemberContextMenu.y)}px`,
+              }}
+              onClick={(event) => {
+                event.stopPropagation();
+              }}
+            >
+              <div className="dm-chat__group-member-context-menu-group" role="none">
+                {isCurrentUserGroupOwner && !groupMemberContextMenu.isCurrentMember ? (
+                  <>
+                    <button
+                      className="dm-chat__group-member-context-menu-item dm-chat__group-member-context-menu-item--danger"
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        void handleRemoveGroupMember();
+                      }}
+                      disabled={isGroupMemberActionPending}
+                    >
+                      <span>Remover do grupo</span>
+                    </button>
+                    <button
+                      className="dm-chat__group-member-context-menu-item"
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        void handleTransferGroupOwner();
+                      }}
+                      disabled={isGroupMemberActionPending}
+                    >
+                      <span>Tornar dono(a) do grupo</span>
+                    </button>
+                  </>
+                ) : (
+                  <div className="dm-chat__group-member-context-menu-note">
+                    Somente o dono do grupo pode gerenciar este membro.
+                  </div>
+                )}
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
 
       {openMessageProfileUserId && openMessageProfileParticipant && typeof document !== "undefined"
         ? createPortal(

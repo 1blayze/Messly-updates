@@ -20,6 +20,10 @@ interface ImportMetaEnv {
   readonly VITE_R2_PUBLIC_BASE_URL?: string;
   readonly VITE_CHAT_KEEP_ORIGINAL_UPLOADS?: string;
   readonly VITE_CHAT_E2EE_ENABLED?: string;
+  readonly VITE_VOICE_STUN_URLS?: string;
+  readonly VITE_VOICE_TURN_URLS?: string;
+  readonly VITE_VOICE_TURN_USERNAME?: string;
+  readonly VITE_VOICE_TURN_CREDENTIAL?: string;
 }
 
 interface ImportMeta {
