@@ -357,8 +357,16 @@ function canUseDirectSupabaseAuthFallback(): boolean {
   return String(import.meta.env.VITE_MESSLY_ALLOW_DIRECT_SUPABASE_AUTH_FALLBACK ?? "").trim().toLowerCase() === "true";
 }
 
+function canUseDirectSupabaseLoginFallback(): boolean {
+  if (isInstalledDesktopRuntime()) {
+    return false;
+  }
+
+  return true;
+}
+
 function shouldFallbackToDirectSupabaseLogin(error: unknown): boolean {
-  if (!canUseDirectSupabaseAuthFallback()) {
+  if (!canUseDirectSupabaseLoginFallback()) {
     return false;
   }
 
@@ -397,6 +405,9 @@ function isInstalledDesktopRuntime(): boolean {
 
 function shouldFallbackToDirectSupabaseSignup(error: unknown): boolean {
   if (isInstalledDesktopRuntime()) {
+    return false;
+  }
+  if (!canUseDirectSupabaseAuthFallback()) {
     return false;
   }
   return shouldFallbackToDirectSupabaseLogin(error);
