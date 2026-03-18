@@ -329,6 +329,7 @@ async function invokeEdgeRequest<TResponse>(
 
       if (isUnauthorizedEdgeError(error)) {
         activateEdgeUnauthorizedCooldown();
+        await authService.clearLocalSession().catch(() => undefined);
         if (options.signOutOnUnauthorized) {
           void supabase.auth.signOut({ scope: "local" }).catch(() => undefined);
         }

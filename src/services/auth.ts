@@ -403,6 +403,14 @@ function isInstalledDesktopRuntime(): boolean {
   return Boolean(window.electronAPI?.isPackaged);
 }
 
+function canTrustUnverifiedSupabaseSessionTemporarily(): boolean {
+  if (import.meta.env.DEV) {
+    return true;
+  }
+
+  return isDesktopRuntime();
+}
+
 function shouldFallbackToDirectSupabaseSignup(error: unknown): boolean {
   if (isInstalledDesktopRuntime()) {
     return false;
@@ -598,7 +606,7 @@ class AuthService {
     } catch (error) {
       if (isTransientNetworkFetchError(error)) {
         edgeAccessTokenValidationCooldownUntilMs = Date.now() + EDGE_ACCESS_TOKEN_VALIDATION_FAILURE_COOLDOWN_MS;
-        return session;
+        return canTrustUnverifiedSupabaseSessionTemporarily() ? session : null;
       }
 
       if (isSupabaseSessionCorruptedError(error)) {
@@ -740,7 +748,7 @@ class AuthService {
     try {
       remoteAccessTokenAccepted = await this.isAccessTokenAcceptedBySupabase(response.access_token);
     } catch (validationError) {
-      if (isTransientNetworkFetchError(validationError)) {
+      if (isTransientNetworkFetchError(validationError) && canTrustUnverifiedSupabaseSessionTemporarily()) {
         remoteAccessTokenAccepted = true;
       } else {
         throw validationError;
@@ -779,7 +787,8 @@ class AuthService {
         if (import.meta.env.DEV) {
           console.warn("[auth:login] validacao de token remota indisponivel", validationError);
         }
-        remoteAccessTokenAccepted = isTransientNetworkFetchError(validationError);
+        remoteAccessTokenAccepted =
+          isTransientNetworkFetchError(validationError) && canTrustUnverifiedSupabaseSessionTemporarily();
       }
 
       if (!remoteAccessTokenAccepted) {
@@ -857,7 +866,14 @@ class AuthService {
       await clearSessionState();
       return null;
     }
-    return nextSession;
+
+    const acceptedSession = await this.getAcceptedSessionCandidate(nextSession);
+    if (nextSession && !acceptedSession) {
+      await clearSessionState();
+      return null;
+    }
+
+    return acceptedSession;
   }
 
   async getCurrentSession(): Promise<Session | null> {
@@ -912,7 +928,11 @@ class AuthService {
         }
       }
 
-      if (Date.now() < edgeAccessTokenValidationCooldownUntilMs && isLikelyJwt(currentAccessToken)) {
+      if (
+        canTrustUnverifiedSupabaseSessionTemporarily() &&
+        Date.now() < edgeAccessTokenValidationCooldownUntilMs &&
+        isLikelyJwt(currentAccessToken)
+      ) {
         return currentAccessToken;
       }
 
@@ -931,14 +951,22 @@ class AuthService {
         if (import.meta.env.DEV) {
           console.warn("[auth] falha ao validar token renovado para Edge Function", error);
         }
-        if (isTransientNetworkFetchError(error) && isLikelyJwt(refreshedAccessToken)) {
+        if (
+          canTrustUnverifiedSupabaseSessionTemporarily() &&
+          isTransientNetworkFetchError(error) &&
+          isLikelyJwt(refreshedAccessToken)
+        ) {
           edgeAccessTokenValidationCooldownUntilMs = Date.now() + EDGE_ACCESS_TOKEN_VALIDATION_FAILURE_COOLDOWN_MS;
           return refreshedAccessToken;
         }
         return null;
       }
 
-      if (Date.now() < edgeAccessTokenValidationCooldownUntilMs && isLikelyJwt(refreshedAccessToken)) {
+      if (
+        canTrustUnverifiedSupabaseSessionTemporarily() &&
+        Date.now() < edgeAccessTokenValidationCooldownUntilMs &&
+        isLikelyJwt(refreshedAccessToken)
+      ) {
         return refreshedAccessToken;
       }
       return null;
