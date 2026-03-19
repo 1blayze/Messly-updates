@@ -27,10 +27,6 @@ const LEGACY_SESSION_STORAGE_KEY = "messly.auth.session";
 const SESSION_REFRESH_BUFFER_MS = 30_000;
 const EDGE_ACCESS_TOKEN_VALIDATION_TTL_MS = 5_000;
 const EDGE_ACCESS_TOKEN_VALIDATION_FAILURE_COOLDOWN_MS = 20_000;
-const AUTH_SESSION_READ_TIMEOUT_MS = 8_000;
-const AUTH_SESSION_REFRESH_TIMEOUT_MS = 10_000;
-const AUTH_LOGIN_TIMEOUT_MS = 12_000;
-const AUTH_TOKEN_VALIDATION_TIMEOUT_MS = 8_000;
 
 let refreshSessionPromise: Promise<Session | null> | null = null;
 let validatedEdgeAccessTokenPromise: Promise<string | null> | null = null;
@@ -86,23 +82,6 @@ function resolveLoginClientDescriptor(security?: LoginInputSecurity | null): Aut
     platform: platformOverride || descriptor.platform,
     userAgent: userAgent || undefined,
   };
-}
-
-async function withTimeout<T>(task: Promise<T>, timeoutMs: number, message: string): Promise<T> {
-  let timeoutId: ReturnType<typeof setTimeout> | null = null;
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timeoutId = setTimeout(() => {
-      reject(new Error(message));
-    }, Math.max(1_000, timeoutMs));
-  });
-
-  try {
-    return await Promise.race([task, timeoutPromise]);
-  } finally {
-    if (timeoutId !== null) {
-      clearTimeout(timeoutId);
-    }
-  }
 }
 
 async function setPendingVerificationState(state: PendingVerificationState | null): Promise<void> {
@@ -293,15 +272,14 @@ async function clearSessionState(): Promise<void> {
 
 async function readSupabaseClientSession(): Promise<Session | null> {
   try {
-    const result = await withTimeout(
-      supabase.auth.getSession(),
-      AUTH_SESSION_READ_TIMEOUT_MS,
-      "Tempo limite ao ler sessao local do Supabase.",
-    );
+    const result = await supabase.auth.getSession();
     if (result.error) {
       if (isSupabaseSessionCorruptedError(result.error)) {
         await clearSessionState();
         return null;
+      }
+      if (isTransientNetworkFetchError(result.error)) {
+        return getInMemorySession();
       }
       throw result.error;
     }
@@ -315,6 +293,9 @@ async function readSupabaseClientSession(): Promise<Session | null> {
     if (isSupabaseSessionCorruptedError(error)) {
       await clearSessionState();
       return null;
+    }
+    if (isTransientNetworkFetchError(error)) {
+      return getInMemorySession();
     }
     throw error;
   }
@@ -466,14 +447,10 @@ function shouldPreferDirectSupabaseSignup(): boolean {
 }
 
 async function applyRemoteSession(accessToken: string, refreshToken: string): Promise<Session> {
-  const sessionResult = await withTimeout(
-    supabase.auth.setSession({
-      access_token: accessToken,
-      refresh_token: refreshToken,
-    }),
-    AUTH_LOGIN_TIMEOUT_MS,
-    "Tempo limite ao aplicar sessao remota.",
-  );
+  const sessionResult = await supabase.auth.setSession({
+    access_token: accessToken,
+    refresh_token: refreshToken,
+  });
   if (sessionResult.error || !sessionResult.data.session) {
     throw sessionResult.error ?? new Error("Supabase session was not returned.");
   }
@@ -483,14 +460,10 @@ async function applyRemoteSession(accessToken: string, refreshToken: string): Pr
 }
 
 async function signInWithDirectSupabase(email: string, password: string): Promise<Session> {
-  const signInResult = await withTimeout(
-    supabase.auth.signInWithPassword({
-      email,
-      password,
-    }),
-    AUTH_LOGIN_TIMEOUT_MS,
-    "Tempo limite ao autenticar direto no Supabase.",
-  );
+  const signInResult = await supabase.auth.signInWithPassword({
+    email,
+    password,
+  });
 
   if (signInResult.error || !signInResult.data.session) {
     throw signInResult.error ?? new Error("Supabase session was not returned.");
@@ -544,17 +517,20 @@ async function refreshSessionWithStoredToken(refreshTokenRaw?: string | null): P
       return null;
     }
 
-    const result = await withTimeout(
-      supabase.auth.refreshSession({
-        refresh_token: fallbackRefreshToken,
-      }),
-      AUTH_SESSION_REFRESH_TIMEOUT_MS,
-      "Tempo limite ao renovar sessao.",
-    );
+    const result = await supabase.auth.refreshSession({
+      refresh_token: fallbackRefreshToken,
+    });
 
     if (result.error) {
       if (isInvalidRefreshTokenError(result.error)) {
         await clearSessionState();
+        return null;
+      }
+      if (isTransientNetworkFetchError(result.error)) {
+        const fallbackSession = getInMemorySession();
+        if (fallbackSession?.access_token && isLikelyJwt(fallbackSession.access_token)) {
+          return fallbackSession;
+        }
         return null;
       }
       throw result.error;
@@ -656,11 +632,7 @@ class AuthService {
 
     const validationPromise = (async () => {
       try {
-        const result = await withTimeout(
-          supabase.auth.getUser(accessToken),
-          AUTH_TOKEN_VALIDATION_TIMEOUT_MS,
-          "Tempo limite ao validar token no Supabase.",
-        );
+        const result = await supabase.auth.getUser(accessToken);
         const accepted = !result.error && Boolean(result.data.user?.id);
         if (accepted) {
           this.markValidatedEdgeAccessToken(accessToken);

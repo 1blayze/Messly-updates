@@ -5,6 +5,10 @@ export interface VoiceCallUiSnapshot {
   deafened: boolean;
   connectionState: VoiceCallUiConnectionState;
   stage: VoiceCallUiStage;
+  conversationId: string;
+  elapsedSeconds: number | null;
+  errorMessage: string;
+  microphoneWarning: string;
   peerDisplayName: string;
   peerAvatarSrc: string;
   diagnostics: VoiceCallUiDiagnosticsSummary;
@@ -131,6 +135,10 @@ const DEFAULT_SNAPSHOT: VoiceCallUiSnapshot = {
   deafened: storedControls.deafened,
   connectionState: "idle",
   stage: "IDLE",
+  conversationId: "",
+  elapsedSeconds: null,
+  errorMessage: "",
+  microphoneWarning: "",
   peerDisplayName: "",
   peerAvatarSrc: "",
   diagnostics: { ...DEFAULT_DIAGNOSTICS_SUMMARY },
@@ -151,6 +159,10 @@ function isSnapshotEqual(left: VoiceCallUiSnapshot, right: VoiceCallUiSnapshot):
     left.deafened === right.deafened &&
     left.connectionState === right.connectionState &&
     left.stage === right.stage &&
+    left.conversationId === right.conversationId &&
+    left.elapsedSeconds === right.elapsedSeconds &&
+    left.errorMessage === right.errorMessage &&
+    left.microphoneWarning === right.microphoneWarning &&
     left.peerDisplayName === right.peerDisplayName &&
     left.peerAvatarSrc === right.peerAvatarSrc &&
     leftDiagnostics.pingAverageMs === rightDiagnostics.pingAverageMs &&
@@ -181,6 +193,10 @@ function normalizeFiniteNumber(value: unknown): number | null {
 
 function normalizeSnapshot(snapshot: Partial<VoiceCallUiSnapshot>): VoiceCallUiSnapshot {
   const deafened = Boolean(snapshot.deafened);
+  const elapsedSecondsRaw = Number(snapshot.elapsedSeconds);
+  const elapsedSeconds = Number.isFinite(elapsedSecondsRaw) && elapsedSecondsRaw >= 0
+    ? Math.floor(elapsedSecondsRaw)
+    : null;
   const connectionStateRaw = String(snapshot.connectionState ?? "").trim().toLowerCase();
   const connectionState: VoiceCallUiConnectionState =
     connectionStateRaw === "connecting" ||
@@ -212,6 +228,10 @@ function normalizeSnapshot(snapshot: Partial<VoiceCallUiSnapshot>): VoiceCallUiS
     deafened,
     connectionState,
     stage,
+    conversationId: String(snapshot.conversationId ?? "").trim(),
+    elapsedSeconds,
+    errorMessage: String(snapshot.errorMessage ?? "").trim(),
+    microphoneWarning: String(snapshot.microphoneWarning ?? "").trim(),
     peerDisplayName: String(snapshot.peerDisplayName ?? "").trim(),
     peerAvatarSrc: String(snapshot.peerAvatarSrc ?? "").trim(),
     diagnostics: {
@@ -413,6 +433,10 @@ export function resetVoiceCallUiSnapshot(): void {
     callConnecting: false,
     connectionState: "idle",
     stage: "IDLE",
+    conversationId: "",
+    elapsedSeconds: null,
+    errorMessage: "",
+    microphoneWarning: "",
     peerDisplayName: "",
     peerAvatarSrc: "",
     diagnostics: { ...DEFAULT_DIAGNOSTICS_SUMMARY },

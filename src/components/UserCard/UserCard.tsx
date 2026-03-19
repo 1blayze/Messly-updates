@@ -107,6 +107,13 @@ function formatMemberSinceDate(timestamp: string | null | undefined): string {
   }).format(date);
 }
 
+function formatPingTooltipLabel(pingMs: number | null): string {
+  if (!Number.isFinite(pingMs) || pingMs == null) {
+    return "--";
+  }
+  return String(Math.round(pingMs));
+}
+
 function formatDiagnosticsMetric(value: number | null, suffix: string): string {
   if (!Number.isFinite(value) || value == null) {
     return `--${suffix}`;
@@ -115,11 +122,35 @@ function formatDiagnosticsMetric(value: number | null, suffix: string): string {
   return `${rounded}${suffix}`;
 }
 
-function formatAudioFlowMetric(value: number | null, fallback: string): string {
-  if (!Number.isFinite(value) || value == null || value <= 0) {
-    return fallback;
+function shortenVoiceStatusMessage(rawMessage: string): string {
+  const message = String(rawMessage ?? "").trim();
+  if (!message) {
+    return "";
   }
-  return `${Number(value.toFixed(1))} kbps`;
+
+  const normalized = message
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+
+  if (normalized.includes("falha ao conectar") || normalized.includes("conectar no servidor de voz")) {
+    return "Falha ao conectar";
+  }
+  if (normalized.includes("tempo limite") || normalized.includes("timeout")) {
+    return "Tempo esgotado";
+  }
+  if (normalized.includes("microfone")) {
+    return "Aviso de microfone";
+  }
+  if (normalized.includes("reconect")) {
+    return "Reconectando";
+  }
+
+  const compact = message.split(":").pop()?.trim() ?? message;
+  if (compact.length <= 32) {
+    return compact;
+  }
+  return `${compact.slice(0, 29).trimEnd()}...`;
 }
 
 export default function UserCard({
@@ -134,6 +165,7 @@ export default function UserCard({
   presenceState,
   onChangePresence,
   onOpenSettings,
+  onOpenConversation,
 }: UserCardProps) {
   const { user: authUser } = useAuthSession();
   const currentAuthUid = authUser?.uid ?? "";
@@ -206,7 +238,34 @@ export default function UserCard({
     () => String(voiceCallUiSnapshot.peerDisplayName ?? "").trim() || "Contato",
     [voiceCallUiSnapshot.peerDisplayName],
   );
+  const voiceConversationId = useMemo(
+    () => String(voiceCallUiSnapshot.conversationId ?? "").trim(),
+    [voiceCallUiSnapshot.conversationId],
+  );
+  const canOpenVoiceConversation = voiceConversationId.length > 0 && typeof onOpenConversation === "function";
+  const voicePingTooltipLabel = useMemo(() => {
+    const lastPing = voiceCallUiSnapshot.diagnostics.lastPingMs;
+    const avgPing = voiceCallUiSnapshot.diagnostics.pingAverageMs;
+    const normalizedPing = Number.isFinite(lastPing) && lastPing != null
+      ? lastPing
+      : (Number.isFinite(avgPing) && avgPing != null ? avgPing : null);
+    return formatPingTooltipLabel(normalizedPing);
+  }, [voiceCallUiSnapshot.diagnostics.lastPingMs, voiceCallUiSnapshot.diagnostics.pingAverageMs]);
+  const voiceCallErrorMessage = useMemo(
+    () => String(voiceCallUiSnapshot.errorMessage ?? "").trim(),
+    [voiceCallUiSnapshot.errorMessage],
+  );
+  const voiceCallWarningMessage = useMemo(
+    () => String(voiceCallUiSnapshot.microphoneWarning ?? "").trim(),
+    [voiceCallUiSnapshot.microphoneWarning],
+  );
   const voiceCallStatusTitle = useMemo(() => {
+    if (voiceCallErrorMessage) {
+      return shortenVoiceStatusMessage(voiceCallErrorMessage);
+    }
+    if (voiceCallWarningMessage) {
+      return shortenVoiceStatusMessage(voiceCallWarningMessage);
+    }
     if (voiceCallUiSnapshot.stage === "RECONNECTING" || voiceCallUiSnapshot.connectionState === "reconnecting") {
       return "Reconectando";
     }
@@ -222,35 +281,48 @@ export default function UserCard({
     voiceCallUiSnapshot.callConnecting,
     voiceCallUiSnapshot.connectionState,
     voiceCallUiSnapshot.stage,
+    voiceCallErrorMessage,
+    voiceCallWarningMessage,
   ]);
   const voiceCallStatusToneClass = useMemo(() => {
+    if (voiceCallErrorMessage) {
+      return styles.voiceCallStatusTitleError;
+    }
+    if (voiceCallWarningMessage) {
+      return styles.voiceCallStatusTitleWarning;
+    }
     if (voiceCallUiSnapshot.stage === "RECONNECTING" || voiceCallUiSnapshot.connectionState === "reconnecting") {
       return styles.voiceCallStatusTitleWarning;
     }
     return styles.voiceCallStatusTitleSuccess;
-  }, [voiceCallUiSnapshot.connectionState, voiceCallUiSnapshot.stage]);
-  const voiceDiagnostics = voiceCallUiSnapshot.diagnostics;
+  }, [voiceCallUiSnapshot.connectionState, voiceCallUiSnapshot.stage, voiceCallErrorMessage, voiceCallWarningMessage]);
+  const voiceCallStatusIconToneClass = useMemo(() => {
+    if (voiceCallErrorMessage) {
+      return styles.voiceCallStatusIconError;
+    }
+    if (voiceCallWarningMessage || voiceCallUiSnapshot.stage === "RECONNECTING" || voiceCallUiSnapshot.connectionState === "reconnecting") {
+      return styles.voiceCallStatusIconWarning;
+    }
+    return styles.voiceCallStatusIconSuccess;
+  }, [voiceCallUiSnapshot.connectionState, voiceCallUiSnapshot.stage, voiceCallErrorMessage, voiceCallWarningMessage]);
   const voicePingAverageLabel = useMemo(
-    () => formatDiagnosticsMetric(voiceDiagnostics.pingAverageMs, " ms"),
-    [voiceDiagnostics.pingAverageMs],
+    () => formatDiagnosticsMetric(voiceCallUiSnapshot.diagnostics.pingAverageMs, " ms"),
+    [voiceCallUiSnapshot.diagnostics.pingAverageMs],
   );
   const voiceLastPingLabel = useMemo(
-    () => formatDiagnosticsMetric(voiceDiagnostics.lastPingMs, " ms"),
-    [voiceDiagnostics.lastPingMs],
+    () => formatDiagnosticsMetric(voiceCallUiSnapshot.diagnostics.lastPingMs, " ms"),
+    [voiceCallUiSnapshot.diagnostics.lastPingMs],
   );
   const voicePacketLossLabel = useMemo(
-    () => formatDiagnosticsMetric(voiceDiagnostics.packetLossPercent, "%"),
-    [voiceDiagnostics.packetLossPercent],
+    () => formatDiagnosticsMetric(voiceCallUiSnapshot.diagnostics.packetLossPercent, "%"),
+    [voiceCallUiSnapshot.diagnostics.packetLossPercent],
   );
-  const voiceSendingAudioLabel = useMemo(
-    () => formatAudioFlowMetric(voiceDiagnostics.sendingAudioKbps, "Sem audio"),
-    [voiceDiagnostics.sendingAudioKbps],
-  );
-  const voiceReceivingAudioLabel = useMemo(
-    () => formatAudioFlowMetric(voiceDiagnostics.receivingAudioKbps, "Sem stream"),
-    [voiceDiagnostics.receivingAudioKbps],
-  );
-
+  const handleOpenVoiceConversation = (): void => {
+    if (!onOpenConversation || !voiceConversationId) {
+      return;
+    }
+    onOpenConversation(voiceConversationId);
+  };
   useEffect(() => {
     setProfileThemeState(readProfilePlusThemeState(authUser?.uid ?? currentUserId));
   }, [authUser?.uid, currentUserId, userId]);
@@ -364,6 +436,38 @@ export default function UserCard({
   }, [isProfileOpen]);
 
   useEffect(() => {
+    if (!isVoiceDiagnosticsOpen) {
+      return;
+    }
+
+    const handlePointerDown = (event: MouseEvent | TouchEvent): void => {
+      const target = event.target;
+      if (!(target instanceof Node)) {
+        return;
+      }
+      if (!rootRef.current?.contains(target)) {
+        setIsVoiceDiagnosticsOpen(false);
+      }
+    };
+
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") {
+        setIsVoiceDiagnosticsOpen(false);
+      }
+    };
+
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("touchstart", handlePointerDown, { passive: true });
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("touchstart", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [isVoiceDiagnosticsOpen]);
+
+  useEffect(() => {
     if (typeof window === "undefined") {
       return;
     }
@@ -405,68 +509,60 @@ export default function UserCard({
     <div className={styles.voiceCallCard} role="status" aria-live="polite">
       <div className={styles.voiceCallHeaderRow}>
         <div className={styles.voiceCallStatusWrap}>
-          <span className={styles.voiceCallStatusIcon} aria-hidden="true">
+          <button
+            type="button"
+            className={`${styles.voiceCallStatusIcon} ${voiceCallStatusIconToneClass}`}
+            data-tooltip={voicePingTooltipLabel}
+            data-tooltip-position="top"
+            aria-label={`Ping ${voicePingTooltipLabel}`}
+            onClick={() => setIsVoiceDiagnosticsOpen((current) => !current)}
+            title="Qualidade da chamada"
+          >
             <MaterialSymbolIcon name="wifi" size={16} />
-          </span>
+          </button>
           <div className={styles.voiceCallStatusTextWrap}>
             <span className={`${styles.voiceCallStatusTitle} ${voiceCallStatusToneClass}`}>{voiceCallStatusTitle}</span>
-            <span className={styles.voiceCallPeerName}>{voicePeerDisplayName}</span>
+            {canOpenVoiceConversation ? (
+              <button
+                type="button"
+                className={styles.voiceCallPeerLink}
+                onClick={handleOpenVoiceConversation}
+              >
+                {voicePeerDisplayName}
+              </button>
+            ) : (
+              <span className={styles.voiceCallPeerName}>{voicePeerDisplayName}</span>
+            )}
           </div>
         </div>
-        <button
-          type="button"
-          className={styles.voiceCallQualityButton}
-          aria-label={isVoiceDiagnosticsOpen ? "Ocultar qualidade da chamada" : "Mostrar qualidade da chamada"}
-          title="Qualidade da chamada"
-          onClick={() => setIsVoiceDiagnosticsOpen((current) => !current)}
-        >
-          <MaterialSymbolIcon name="network_check" size={18} />
-        </button>
       </div>
-
       {isVoiceDiagnosticsOpen ? (
         <section className={styles.voiceCallDiagnosticsPanel} aria-label="Qualidade da chamada">
           <p className={styles.voiceCallDiagnosticsTitle}>Qualidade da chamada</p>
-          <p className={styles.voiceCallDiagnosticsSubtitle}>Diagnostico em tempo real da conexao de voz.</p>
+          <p className={styles.voiceCallDiagnosticsSubtitle}>Diagnóstico em tempo real da conexão de voz.</p>
 
           <dl className={styles.voiceCallDiagnosticsList}>
             <div className={styles.voiceCallDiagnosticsItem}>
-              <dt>Ping medio</dt>
+              <dt>Ping médio</dt>
               <dd>{voicePingAverageLabel}</dd>
             </div>
             <div className={styles.voiceCallDiagnosticsItem}>
-              <dt>Ultimo ping</dt>
+              <dt>Último ping</dt>
               <dd>{voiceLastPingLabel}</dd>
             </div>
             <div className={styles.voiceCallDiagnosticsItem}>
               <dt>Perda de pacotes</dt>
               <dd>{voicePacketLossLabel}</dd>
             </div>
-            <div className={styles.voiceCallDiagnosticsItem}>
-              <dt>Enviando audio</dt>
-              <dd>{voiceSendingAudioLabel}</dd>
-            </div>
-            <div className={styles.voiceCallDiagnosticsItem}>
-              <dt>Recebendo audio</dt>
-              <dd>{voiceReceivingAudioLabel}</dd>
-            </div>
-            <div className={styles.voiceCallDiagnosticsItem}>
-              <dt>Track local</dt>
-              <dd>{voiceDiagnostics.localTrackActive ? "Ativa" : "Inativa"}</dd>
-            </div>
-            <div className={styles.voiceCallDiagnosticsItem}>
-              <dt>Track remota</dt>
-              <dd>{voiceDiagnostics.remoteTrackActive ? "Ativa" : "Ausente"}</dd>
-            </div>
-            <div className={styles.voiceCallDiagnosticsItem}>
-              <dt>Streams remotos</dt>
-              <dd>{voiceDiagnostics.remoteStreams}</dd>
-            </div>
           </dl>
+
+          <p className={styles.voiceCallDiagnosticsHint}>
+            Valores altos de ping ou de perda de pacotes podem causar atrasos, cortes e reconexões.
+          </p>
 
           <p className={styles.voiceCallDiagnosticsFooter}>
             <MaterialSymbolIcon name="lock" size={14} />
-            <span>Chamada criptografada em transito</span>
+            <span>Chamada criptografada em trânsito</span>
           </p>
         </section>
       ) : null}
