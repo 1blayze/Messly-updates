@@ -144,8 +144,9 @@ function buildVerificationResponse(deps: AuthDependencies, email: string): Verif
 function mapSignupProviderError(deps: AuthDependencies, error: unknown): AuthHttpError {
   const message = String((error as { message?: unknown } | null)?.message ?? "").trim();
   const normalized = message.toLowerCase();
-  deps.logger?.warn("signup_provider_error", {
+  deps.logger?.error("supabase_signup_error", {
     message: message || "unknown",
+    error,
   });
 
   if (
@@ -168,7 +169,7 @@ function mapSignupProviderError(deps: AuthDependencies, error: unknown): AuthHtt
     return new AuthHttpError(503, "REGISTRATION_EMAIL_UNAVAILABLE", REGISTRATION_EMAIL_UNAVAILABLE_MESSAGE);
   }
 
-  return new AuthHttpError(400, "REGISTRATION_UNABLE", REGISTRATION_ERROR_MESSAGE);
+  return new AuthHttpError(400, "REGISTRATION_UNABLE", message || REGISTRATION_ERROR_MESSAGE);
 }
 
 interface SignupProviderUser {
@@ -330,8 +331,16 @@ export async function handleSignup(
       password,
       options: {
         data: metadata,
+        captchaToken: turnstileToken ?? undefined,
       },
     });
+
+    if (process.env.NODE_ENV === "development") {
+      deps.logger?.info("supabase_signup_response", {
+        error: signupResult.error ?? null,
+        data: signupResult.data ?? null,
+      });
+    }
 
     if (signupResult.error) {
       try {
