@@ -124,7 +124,7 @@ function detectBrowserClientName(): string {
 
 function detectClientName(platform: PresencePlatform): string {
   if (typeof window !== "undefined" && window.electronAPI) {
-    return "Messly Desktop";
+    return "Azyoons Desktop";
   }
 
   const browserName = detectBrowserClientName();

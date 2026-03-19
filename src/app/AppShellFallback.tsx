@@ -4,7 +4,7 @@ interface AppShellFallbackProps {
 }
 
 export default function AppShellFallback({
-  statusText = "Carregando Messly",
+  statusText = "Carregando Azyoons",
   detailText = "Preparando aplicativo",
 }: AppShellFallbackProps) {
   return (

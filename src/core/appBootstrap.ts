@@ -80,7 +80,7 @@ function resolveErrorMessage(error: unknown): string {
       return message;
     }
   }
-  return "Falha ao inicializar o Messly.";
+  return "Falha ao inicializar o Azyoons.";
 }
 
 async function withTimeout<T>(task: Promise<T>, timeoutMs: number, message: string): Promise<T> {
@@ -311,8 +311,8 @@ class AppBootstrapController {
     this.commit({
       phase: "running",
       userId,
-      statusText: "Inicializando Messly",
-      detailText: "Inicializando Messly",
+      statusText: "Inicializando Azyoons",
+      detailText: "Inicializando Azyoons",
       progress: 0,
       error: null,
     });
@@ -364,7 +364,7 @@ class AppBootstrapController {
         }
       };
 
-      if (!updateRunning("Inicializando Messly", 0.03, "Validando sessao")) {
+      if (!updateRunning("Inicializando Azyoons", 0.03, "Validando sessao")) {
         return;
       }
 
@@ -458,8 +458,8 @@ class AppBootstrapController {
       this.commit({
         phase: "ready",
         userId,
-        statusText: "Messly pronto",
-        detailText: "Messly pronto",
+        statusText: "Azyoons pronto",
+        detailText: "Azyoons pronto",
         progress: 1,
         error: null,
       });

@@ -1,6 +1,7 @@
 /// <reference path="./edge-runtime.d.ts" />
 
 const DEV_ALLOWED_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"] as const;
+const SECURE_ALLOWED_ORIGINS = ["https://app.messly.com", "http://localhost:5173", "electron://app"] as const;
 const ALLOWED_HEADERS =
   "authorization, apikey, content-type, x-client-info, x-firebase-authorization, x-media-key, x-requested-with, x-presign-expires";
 const ALLOWED_METHODS = "GET, POST, OPTIONS";
@@ -73,7 +74,9 @@ function isDevelopmentEnvironment(): boolean {
 function parseCorsEnv(): ParsedCorsEnv {
   const configuredOrigins = parseCsvEnv("ALLOWED_ORIGINS");
   const legacyConfiguredOrigins = parseCsvEnv("CORS_ALLOWED_ORIGINS");
-  const combinedConfiguredOrigins = Array.from(new Set([...configuredOrigins, ...legacyConfiguredOrigins]));
+  const combinedConfiguredOrigins = Array.from(
+    new Set([...SECURE_ALLOWED_ORIGINS, ...configuredOrigins, ...legacyConfiguredOrigins]),
+  );
 
   const allowedOrigins = isDevelopmentEnvironment()
     ? Array.from(new Set([...DEV_ALLOWED_ORIGINS, ...combinedConfiguredOrigins]))
@@ -115,7 +118,7 @@ function isOriginAllowed(origin: string, env: ParsedCorsEnv): boolean {
   }
 
   if (env.allowedOrigins.length === 0) {
-    return true;
+    return false;
   }
 
   return env.allowedOrigins.includes(origin);

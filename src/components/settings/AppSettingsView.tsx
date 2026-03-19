@@ -1,4 +1,4 @@
-﻿import {
+import {
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -2061,7 +2061,7 @@ export default function AppSettingsView({
       NOISE_SUPPRESSION_MODE_OPTIONS[0]!,
     [noiseSuppressionMode],
   );
-  const settingsSidebarVersionPrimary = `Messly ${settingsVersion}`;
+  const settingsSidebarVersionPrimary = `Azyoons ${settingsVersion}`;
   const settingsSidebarVersionSecondary = `${releaseChannelLabel} · ${runtimePlatformLabel} · ${runtimeEngineLabel}`;
   const pendingProfile = useMemo(() => {
     if (!user?.uid || typeof window === "undefined") {
@@ -5859,7 +5859,7 @@ export default function AppSettingsView({
                     <p className={styles.connectionsDirectoryTitle}>Adicionar conexões ao perfil</p>
                     <p className={styles.connectionsDirectorySubtitle}>
                       Seus dados só serão usados com sua autorização, conforme a{" "}
-                      <span className={styles.connectionsDirectoryPolicyLink}>política de privacidade</span> do Messly.
+                      <span className={styles.connectionsDirectoryPolicyLink}>política de privacidade</span> do Azyoons.
                     </p>
                     <div className={styles.connectionsProviderGrid}>
                       <button
@@ -6379,13 +6379,13 @@ export default function AppSettingsView({
                             {
                               key: "launchAtStartup",
                               title: "Abrir na inicialização",
-                              description: "Inicia o Messly automaticamente quando o Windows ligar.",
+                              description: "Inicia o Azyoons automaticamente quando o Windows ligar.",
                             },
                             {
                               key: "hardwareAcceleration",
                               title: "Aceleração de hardware",
                               description:
-                                "Usa sua GPU para otimizar o Messly. Desative caso note problemas visuais.",
+                                "Usa sua GPU para otimizar o Azyoons. Desative caso note problemas visuais.",
                             },
                           ] as const
                         ).map((item) => {

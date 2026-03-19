@@ -1,10 +1,10 @@
 const packageJson = require("../../package.json");
 
-const APP_NAME = "Messly";
+const APP_NAME = "Azyoons";
 const APP_VERSION = String(packageJson.version ?? "0.0.5").trim() || "0.0.5";
 const APP_ID = "com.mackstony.messly";
 const WINDOWS_APP_USER_MODEL_ID = APP_ID;
-const EXECUTABLE_NAME = "Messly";
+const EXECUTABLE_NAME = "Azyoons";
 
 module.exports = {
   APP_NAME,

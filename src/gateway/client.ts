@@ -71,11 +71,13 @@ function parseGatewayFrame(raw: string): GatewayFrame | null {
 export class GatewayClient {
   private static readonly FAILURE_STREAK_SUSPEND_THRESHOLD = 8;
   private static readonly FAILURE_STREAK_SUSPEND_MS = 5 * 60_000;
+  private static readonly MAX_PENDING_FRAMES = 256;
   private readonly options: GatewayClientOptions;
   private ws: WebSocket | null = null;
   private activeSocketUrl: string | null = null;
   private heartbeat: GatewayHeartbeat | null = null;
   private reconnectTimerId: number | null = null;
+  private suspendedReconnectTimerId: number | null = null;
   private intentionalClose = false;
   private intentionalCloseStatus: GatewayClientStatus = "closed";
   private closeHandledByForcedReconnect = false;
@@ -97,6 +99,7 @@ export class GatewayClient {
   private resumeToken: string | null = null;
   private tokenHint: string | null = null;
   private preferredInstanceId: string | null = null;
+  private connectionEpoch = 0;
 
   constructor(options: GatewayClientOptions) {
     this.options = options;
@@ -136,6 +139,7 @@ export class GatewayClient {
   async connect(): Promise<void> {
     if (this.reconnectSuspendedUntil > Date.now()) {
       const remainingMs = this.reconnectSuspendedUntil - Date.now();
+      this.scheduleReconnectAfterSuspension(remainingMs);
       this.updateState({
         status: "error",
         lastError: "Gateway temporariamente pausado apos falhas consecutivas.",
@@ -206,18 +210,28 @@ export class GatewayClient {
       reconnectAttempt: this.state.reconnectAttempt,
     });
 
-    this.ws = new WebSocket(resolvedSocketUrl);
-    this.ws.onopen = () => {
+    const epoch = this.connectionEpoch + 1;
+    this.connectionEpoch = epoch;
+    const socket = new WebSocket(resolvedSocketUrl);
+    this.ws = socket;
+    socket.onopen = () => {
+      if (!this.isCurrentSocket(epoch, socket)) {
+        return;
+      }
       this.connectionFailureStreak = 0;
       this.reconnectSuspendedUntil = 0;
       this.closeHandledByForcedReconnect = false;
+      this.clearSuspendedReconnectTimer();
       this.log("info", "websocket conectado", {
         url: resolvedSocketUrl,
       });
     };
-    this.ws.onmessage = (event) => this.handleMessage(String(event.data ?? ""));
-    this.ws.onclose = (event) => this.handleClose(event);
-    this.ws.onerror = (event) => {
+    socket.onmessage = (event) => this.handleMessage(String(event.data ?? ""), epoch, socket);
+    socket.onclose = (event) => this.handleClose(event, epoch, socket);
+    socket.onerror = (event) => {
+      if (!this.isCurrentSocket(epoch, socket)) {
+        return;
+      }
       this.updateState({
         status: "error",
         lastError: "Falha na conexao WebSocket do gateway.",
@@ -235,6 +249,7 @@ export class GatewayClient {
     this.closeHandledByForcedReconnect = false;
     this.stopHeartbeat();
     this.clearReconnectTimer();
+    this.clearSuspendedReconnectTimer();
     this.resumeToken = null;
     this.tokenHint = null;
     this.preferredInstanceId = null;
@@ -328,7 +343,11 @@ export class GatewayClient {
     });
   }
 
-  private handleMessage(raw: string): void {
+  private handleMessage(raw: string, epoch: number, socket: WebSocket): void {
+    if (!this.isCurrentSocket(epoch, socket)) {
+      return;
+    }
+
     const frame = parseGatewayFrame(raw);
     if (!frame) {
       return;
@@ -418,7 +437,11 @@ export class GatewayClient {
     }
   }
 
-  private handleClose(event?: CloseEvent): void {
+  private handleClose(event: CloseEvent | undefined, epoch: number, socket: WebSocket): void {
+    if (!this.isCurrentSocket(epoch, socket)) {
+      return;
+    }
+
     this.stopHeartbeat();
     const closeCode = typeof event?.code === "number" ? event.code : null;
     const closeReason = String(event?.reason ?? "").trim() || null;
@@ -480,7 +503,7 @@ export class GatewayClient {
       return;
     }
 
-    this.pendingFrames.push(frame);
+    this.enqueuePendingFrame(frame);
   }
 
   private flushPendingFrames(): void {
@@ -595,9 +618,11 @@ export class GatewayClient {
   private scheduleReconnect(reason: string, delayOverrideMs: number | null = null): void {
     this.stopHeartbeat();
     this.clearReconnectTimer();
+    this.clearSuspendedReconnectTimer();
 
     if (this.connectionFailureStreak >= GatewayClient.FAILURE_STREAK_SUSPEND_THRESHOLD) {
       this.reconnectSuspendedUntil = Date.now() + GatewayClient.FAILURE_STREAK_SUSPEND_MS;
+      this.scheduleReconnectAfterSuspension(GatewayClient.FAILURE_STREAK_SUSPEND_MS);
       this.updateState({
         status: "error",
         lastError: "Gateway indisponivel no momento. Tentaremos novamente em alguns minutos.",
@@ -659,6 +684,46 @@ export class GatewayClient {
     }
   }
 
+  private clearSuspendedReconnectTimer(): void {
+    if (this.suspendedReconnectTimerId != null) {
+      window.clearTimeout(this.suspendedReconnectTimerId);
+      this.suspendedReconnectTimerId = null;
+    }
+  }
+
+  private scheduleReconnectAfterSuspension(remainingMs: number): void {
+    const delayMs = Math.max(1_000, Math.ceil(remainingMs));
+    this.clearSuspendedReconnectTimer();
+    this.suspendedReconnectTimerId = window.setTimeout(() => {
+      this.suspendedReconnectTimerId = null;
+      if (this.reconnectSuspendedUntil > Date.now()) {
+        this.scheduleReconnectAfterSuspension(this.reconnectSuspendedUntil - Date.now());
+        return;
+      }
+      void this.connect();
+    }, delayMs);
+  }
+
+  private isCurrentSocket(epoch: number, socket: WebSocket): boolean {
+    return this.connectionEpoch === epoch && this.ws === socket;
+  }
+
+  private enqueuePendingFrame(frame: GatewayFrame): void {
+    if (frame.op === "SUBSCRIBE") {
+      this.pendingFrames = this.pendingFrames.filter((queued) => queued.op !== "SUBSCRIBE");
+    }
+
+    if (this.pendingFrames.length >= GatewayClient.MAX_PENDING_FRAMES) {
+      const dropped = this.pendingFrames.shift() ?? null;
+      this.log("warn", "fila de frames pendentes atingiu limite; descartando frame antigo", {
+        maxPendingFrames: GatewayClient.MAX_PENDING_FRAMES,
+        droppedOp: dropped?.op ?? null,
+      });
+    }
+
+    this.pendingFrames.push(frame);
+  }
+
   private async resolveGatewayToken(): Promise<string | null> {
     const provided = String(await this.options.tokenProvider() ?? "").trim();
     if (this.isLikelyJwt(provided)) {
@@ -672,6 +737,7 @@ export class GatewayClient {
   private stopUnauthenticated(reason: string): void {
     this.stopHeartbeat();
     this.clearReconnectTimer();
+    this.clearSuspendedReconnectTimer();
     this.resumeToken = null;
     this.preferredInstanceId = null;
     this.pendingFrames = [];

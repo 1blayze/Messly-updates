@@ -2,6 +2,12 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { GatewayEnv } from "../infra/env";
 import type { RateLimiter } from "../edge/rateLimiter";
 
+const SECURE_ALLOWED_ORIGINS = new Set<string>([
+  "https://app.messly.com",
+  "http://localhost:5173",
+  "electron://app",
+]);
+
 export class AuthHttpError extends Error {
   readonly status: number;
   readonly code: string;
@@ -55,7 +61,7 @@ export function resolveCorsHeaders(origin: string | null, env: GatewayEnv): Reco
     return headers;
   }
 
-  if (env.allowedOrigins.includes(normalizedOrigin)) {
+  if (env.allowedOrigins.includes(normalizedOrigin) || SECURE_ALLOWED_ORIGINS.has(normalizedOrigin)) {
     headers["access-control-allow-origin"] = normalizedOrigin;
     return headers;
   }
@@ -66,7 +72,7 @@ export function resolveCorsHeaders(origin: string | null, env: GatewayEnv): Reco
   }
 
   if (env.allowElectronOrigin && isElectronOrigin(normalizedOrigin)) {
-    headers["access-control-allow-origin"] = "*";
+    headers["access-control-allow-origin"] = normalizedOrigin;
     return headers;
   }
 

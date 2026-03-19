@@ -12,7 +12,7 @@ const DEFAULT_NODE_ENV = "development";
 const DEFAULT_GATEWAY_PORT = "8788";
 const DEFAULT_GATEWAY_REDIS_URL = "redis://127.0.0.1:6379";
 const DEFAULT_ALLOWED_ORIGINS =
-  "https://messly.site,https://www.messly.site,http://localhost:5173,http://127.0.0.1:5173";
+  "https://app.messly.com,http://localhost:5173,electron://app";
 const DEFAULT_GATEWAY_HEARTBEAT_INTERVAL_MS = "15000";
 const DEFAULT_GATEWAY_CLIENT_TIMEOUT_MS = "45000";
 const DEFAULT_GATEWAY_RESUME_TTL_SECONDS = "180";

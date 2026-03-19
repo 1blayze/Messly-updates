@@ -135,7 +135,7 @@ function createNotificationManager(options = {}) {
 
 class NotificationManager {
   constructor(options = {}) {
-    this.appName = String(options.appName ?? "Messly").trim() || "Messly";
+    this.appName = String(options.appName ?? "Azyoons").trim() || "Azyoons";
     this.appId = sanitizeIdentifier(options.appId) || null;
     this.NotificationCtor = options.NotificationCtor;
     this.getAppNotificationIcon = options.getAppNotificationIcon;

@@ -4,7 +4,7 @@ const { promisify } = require("node:util");
 
 const execFileAsync = promisify(execFile);
 
-const DEFAULT_FIREWALL_RULE_NAME = "Messly Private Network Access";
+const DEFAULT_FIREWALL_RULE_NAME = "Azyoons Private Network Access";
 const DEFAULT_FIREWALL_PROFILE = "private";
 const DEFAULT_NETSH_TIMEOUT_MS = 15_000;
 
@@ -71,7 +71,7 @@ function isNoRuleMatchOutput(text) {
     normalized.includes("no rules match") ||
     normalized.includes("nenhuma regra corresponde") ||
     normalized.includes("nao ha regras") ||
-    normalized.includes("não há regras")
+    normalized.includes("nï¿½o hï¿½ regras")
   );
 }
 
@@ -237,7 +237,7 @@ function parseProfileTokens(rawProfileList) {
       tokens.add("public");
       continue;
     }
-    if (token.includes("domain") || token.includes("dominio") || token.includes("domínio")) {
+    if (token.includes("domain") || token.includes("dominio") || token.includes("domï¿½nio")) {
       tokens.add("domain");
     }
   }

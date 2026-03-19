@@ -97,7 +97,7 @@ function AuthSurface({ children }: { children: ReactNode }) {
 function AuthBootstrapSplash() {
   return (
     <div className="startup-auth-surface" data-messly-startup-surface="shell">
-      <AppStartupScreen statusText="Carregando Messly" detailText="Preparando aplicativo" progress={0.1} phase="running" />
+      <AppStartupScreen statusText="Carregando Azyoons" detailText="Preparando aplicativo" progress={0.1} phase="running" />
     </div>
   );
 }
@@ -207,7 +207,7 @@ function AppShellRoute() {
   return (
     <Suspense
       fallback={(
-        <AppStartupScreen statusText="Carregando Messly" detailText="Abrindo interface" progress={0.98} phase="ready" />
+        <AppStartupScreen statusText="Carregando Azyoons" detailText="Abrindo interface" progress={0.98} phase="ready" />
       )}
     >
       <AppShell />
