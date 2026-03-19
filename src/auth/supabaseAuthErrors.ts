@@ -20,6 +20,10 @@ export function toFriendlySupabaseAuthError(error: unknown): string {
     return "Nao foi possivel enviar o email de confirmacao agora. Tente novamente em instantes.";
   }
 
+  if (normalizedCode === "EMAIL_PROVIDER_FAILURE") {
+    return "Falha no envio do e-mail de confirmacao. Verifique a configuracao SMTP/Resend e tente novamente.";
+  }
+
   if (normalizedCode === "REGISTRATION_UNABLE") {
     return "Nao foi possivel concluir o cadastro. Tente novamente em instantes.";
   }

@@ -15,8 +15,8 @@ function normalizeVerifyInput(body: VerifyEmailRequestBody): {
   if (!EMAIL_REGEX.test(email)) {
     throw new AuthHttpError(400, "INVALID_EMAIL", "A valid email is required.");
   }
-  if (!/^\d{6}$/.test(code)) {
-    throw new AuthHttpError(400, "INVALID_VERIFICATION_CODE", "Verification code must contain 6 digits.");
+  if (!/^\d{8}$/.test(code)) {
+    throw new AuthHttpError(400, "INVALID_VERIFICATION_CODE", "Verification code must contain 8 digits.");
   }
   return { email, code };
 }

@@ -476,8 +476,8 @@ export default function RegisterPage() {
       setOtpError("Digite o código recebido por e-mail.");
       return;
     }
-    if (sanitizedCode.length !== 6) {
-      setOtpError("Digite os 6 dígitos do código.");
+    if (sanitizedCode.length !== 8) {
+      setOtpError("Digite os 8 dígitos do código.");
       return;
     }
 
@@ -792,7 +792,7 @@ export default function RegisterPage() {
                 id="register-otp"
                 className="auth-input auth-otp-input"
                 inputMode="numeric"
-                maxLength={6}
+                maxLength={8}
                 value={otpCode}
                 onChange={(event) => setOtpCode(event.target.value.replace(/\D/g, ""))}
                 autoComplete="one-time-code"
