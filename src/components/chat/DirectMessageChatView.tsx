@@ -2079,6 +2079,80 @@ export default function DirectMessageChatView({
   const currentAvatarSrc = (currentUser.avatarSrc || "").trim() || currentFallbackAvatar;
   const safeTargetDisplayName = targetDisplayNameForFallback;
   const safeTargetUsername = normalizedTargetUsername || "usuario";
+  const voiceCallRemoteParticipant = useMemo(
+    () => voiceCallParticipants.find((participant) => !participant.isLocal) ?? null,
+    [voiceCallParticipants],
+  );
+  const voiceCallPeerDisplayName = useMemo(
+    () =>
+      String(voiceCallRemoteParticipant?.displayName ?? "").trim() ||
+      safeTargetDisplayName,
+    [safeTargetDisplayName, voiceCallRemoteParticipant?.displayName],
+  );
+  const voiceCallPeerAvatarSrc = useMemo(
+    () =>
+      String(voiceCallRemoteParticipant?.avatarSrc ?? "").trim() ||
+      targetAvatarSrc,
+    [targetAvatarSrc, voiceCallRemoteParticipant?.avatarSrc],
+  );
+  const voiceCallUiDiagnosticsSummary = useMemo(() => {
+    const pingValues = voiceCallDiagnostics
+      .map((diagnostic) => diagnostic.pingMs)
+      .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+    const packetLossValues = voiceCallDiagnostics
+      .map((diagnostic) => diagnostic.packetLossPercent)
+      .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+    const outboundValues = voiceCallDiagnostics
+      .map((diagnostic) => diagnostic.outboundBitrateKbps)
+      .filter((value): value is number => typeof value === "number" && Number.isFinite(value) && value > 0);
+    const inboundValues = voiceCallDiagnostics
+      .map((diagnostic) => diagnostic.inboundBitrateKbps)
+      .filter((value): value is number => typeof value === "number" && Number.isFinite(value) && value > 0);
+
+    const remoteParticipantId = String(voiceCallRemoteParticipant?.userId ?? "").trim();
+    const preferredPingDiagnostic = remoteParticipantId
+      ? voiceCallDiagnostics.find((diagnostic) => String(diagnostic.userId ?? "").trim() === remoteParticipantId) ?? null
+      : null;
+    const lastPingCandidate = preferredPingDiagnostic?.pingMs ?? voiceCallDiagnostics[0]?.pingMs ?? null;
+    const lastPingMs =
+      typeof lastPingCandidate === "number" && Number.isFinite(lastPingCandidate)
+        ? Number(lastPingCandidate.toFixed(1))
+        : null;
+    const pingAverageMs = pingValues.length > 0
+      ? Number((pingValues.reduce((sum, value) => sum + value, 0) / pingValues.length).toFixed(1))
+      : null;
+    const packetLossPercent = packetLossValues.length > 0
+      ? Number((packetLossValues.reduce((sum, value) => sum + value, 0) / packetLossValues.length).toFixed(2))
+      : null;
+    const sendingAudioKbps = outboundValues.length > 0
+      ? Number((outboundValues.reduce((sum, value) => sum + value, 0) / outboundValues.length).toFixed(1))
+      : null;
+    const receivingAudioKbps = inboundValues.length > 0
+      ? Number((inboundValues.reduce((sum, value) => sum + value, 0) / inboundValues.length).toFixed(1))
+      : null;
+
+    const remoteStreams = voiceCallParticipants.reduce((count, participant) => {
+      if (participant.isLocal) {
+        return count;
+      }
+      return count + 1;
+    }, 0);
+
+    const remoteTrackActive = voiceCallParticipants.some(
+      (participant) => !participant.isLocal && participant.connectionState === "connected",
+    );
+
+    return {
+      pingAverageMs,
+      lastPingMs,
+      packetLossPercent,
+      sendingAudioKbps,
+      receivingAudioKbps,
+      localTrackActive: !isVoiceCallMuted,
+      remoteTrackActive,
+      remoteStreams,
+    };
+  }, [isVoiceCallMuted, voiceCallDiagnostics, voiceCallParticipants, voiceCallRemoteParticipant?.userId]);
   const voiceRoomId = useMemo(
     () => buildVoiceRoomId(currentUser.userId || currentUserId, targetUser.userId, conversationId),
     [conversationId, currentUser.userId, currentUserId, targetUser.userId],
@@ -4181,8 +4255,23 @@ export default function DirectMessageChatView({
       callConnecting: isVoiceCallConnecting,
       muted: isVoiceCallMuted,
       deafened: isVoiceCallDeafened,
+      connectionState: voiceCallConnectionState,
+      stage: voiceCallUiState,
+      peerDisplayName: voiceCallPeerDisplayName,
+      peerAvatarSrc: voiceCallPeerAvatarSrc,
+      diagnostics: voiceCallUiDiagnosticsSummary,
     });
-  }, [isVoiceCallActive, isVoiceCallConnecting, isVoiceCallMuted, isVoiceCallDeafened]);
+  }, [
+    isVoiceCallActive,
+    isVoiceCallConnecting,
+    isVoiceCallMuted,
+    isVoiceCallDeafened,
+    voiceCallConnectionState,
+    voiceCallUiState,
+    voiceCallPeerDisplayName,
+    voiceCallPeerAvatarSrc,
+    voiceCallUiDiagnosticsSummary,
+  ]);
 
   useEffect(() => {
     return () => {

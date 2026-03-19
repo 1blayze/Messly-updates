@@ -3,9 +3,27 @@ export interface VoiceCallUiSnapshot {
   callConnecting: boolean;
   muted: boolean;
   deafened: boolean;
+  connectionState: VoiceCallUiConnectionState;
+  stage: VoiceCallUiStage;
+  peerDisplayName: string;
+  peerAvatarSrc: string;
+  diagnostics: VoiceCallUiDiagnosticsSummary;
 }
 
 export type VoiceCallUiCommand = "toggle-mute" | "toggle-deafen";
+export type VoiceCallUiConnectionState = "idle" | "connecting" | "connected" | "reconnecting" | "closed";
+export type VoiceCallUiStage = "IDLE" | "RINGING" | "CONNECTED" | "RECONNECTING" | "ENDED";
+
+export interface VoiceCallUiDiagnosticsSummary {
+  pingAverageMs: number | null;
+  lastPingMs: number | null;
+  packetLossPercent: number | null;
+  sendingAudioKbps: number | null;
+  receivingAudioKbps: number | null;
+  localTrackActive: boolean;
+  remoteTrackActive: boolean;
+  remoteStreams: number;
+}
 
 const VOICE_CALL_UI_STORAGE_KEY = "messly:voice-ui-controls:v1";
 const VOICE_CALL_UI_SYNC_STORAGE_KEY = "messly:voice-ui-sync:v1";
@@ -95,12 +113,27 @@ function persistControls(snapshot: VoiceCallUiSnapshot): void {
 }
 
 const storedControls = readStoredControls();
+const DEFAULT_DIAGNOSTICS_SUMMARY: VoiceCallUiDiagnosticsSummary = {
+  pingAverageMs: null,
+  lastPingMs: null,
+  packetLossPercent: null,
+  sendingAudioKbps: null,
+  receivingAudioKbps: null,
+  localTrackActive: false,
+  remoteTrackActive: false,
+  remoteStreams: 0,
+};
 
 const DEFAULT_SNAPSHOT: VoiceCallUiSnapshot = {
   callActive: false,
   callConnecting: false,
   muted: storedControls.muted,
   deafened: storedControls.deafened,
+  connectionState: "idle",
+  stage: "IDLE",
+  peerDisplayName: "",
+  peerAvatarSrc: "",
+  diagnostics: { ...DEFAULT_DIAGNOSTICS_SUMMARY },
 };
 
 let currentSnapshot: VoiceCallUiSnapshot = { ...DEFAULT_SNAPSHOT };
@@ -109,11 +142,25 @@ const snapshotListeners = new Set<(snapshot: VoiceCallUiSnapshot) => void>();
 const commandListeners = new Set<(command: VoiceCallUiCommand) => void>();
 
 function isSnapshotEqual(left: VoiceCallUiSnapshot, right: VoiceCallUiSnapshot): boolean {
+  const leftDiagnostics = left.diagnostics;
+  const rightDiagnostics = right.diagnostics;
   return (
     left.callActive === right.callActive &&
     left.callConnecting === right.callConnecting &&
     left.muted === right.muted &&
-    left.deafened === right.deafened
+    left.deafened === right.deafened &&
+    left.connectionState === right.connectionState &&
+    left.stage === right.stage &&
+    left.peerDisplayName === right.peerDisplayName &&
+    left.peerAvatarSrc === right.peerAvatarSrc &&
+    leftDiagnostics.pingAverageMs === rightDiagnostics.pingAverageMs &&
+    leftDiagnostics.lastPingMs === rightDiagnostics.lastPingMs &&
+    leftDiagnostics.packetLossPercent === rightDiagnostics.packetLossPercent &&
+    leftDiagnostics.sendingAudioKbps === rightDiagnostics.sendingAudioKbps &&
+    leftDiagnostics.receivingAudioKbps === rightDiagnostics.receivingAudioKbps &&
+    leftDiagnostics.localTrackActive === rightDiagnostics.localTrackActive &&
+    leftDiagnostics.remoteTrackActive === rightDiagnostics.remoteTrackActive &&
+    leftDiagnostics.remoteStreams === rightDiagnostics.remoteStreams
   );
 }
 
@@ -124,13 +171,59 @@ function emitSnapshot(): void {
   }
 }
 
-function normalizeSnapshot(snapshot: VoiceCallUiSnapshot): VoiceCallUiSnapshot {
+function normalizeFiniteNumber(value: unknown): number | null {
+  const casted = Number(value);
+  if (!Number.isFinite(casted)) {
+    return null;
+  }
+  return casted;
+}
+
+function normalizeSnapshot(snapshot: Partial<VoiceCallUiSnapshot>): VoiceCallUiSnapshot {
   const deafened = Boolean(snapshot.deafened);
+  const connectionStateRaw = String(snapshot.connectionState ?? "").trim().toLowerCase();
+  const connectionState: VoiceCallUiConnectionState =
+    connectionStateRaw === "connecting" ||
+    connectionStateRaw === "connected" ||
+    connectionStateRaw === "reconnecting" ||
+    connectionStateRaw === "closed"
+      ? connectionStateRaw
+      : "idle";
+
+  const stageRaw = String(snapshot.stage ?? "").trim().toUpperCase();
+  const stage: VoiceCallUiStage =
+    stageRaw === "RINGING" ||
+    stageRaw === "CONNECTED" ||
+    stageRaw === "RECONNECTING" ||
+    stageRaw === "ENDED"
+      ? stageRaw
+      : "IDLE";
+
+  const diagnosticsRaw = snapshot.diagnostics ?? DEFAULT_DIAGNOSTICS_SUMMARY;
+  const remoteStreamsCasted = Number(diagnosticsRaw.remoteStreams ?? 0);
+  const remoteStreams = Number.isFinite(remoteStreamsCasted)
+    ? Math.max(0, Math.round(remoteStreamsCasted))
+    : 0;
+
   return {
     callActive: Boolean(snapshot.callActive),
     callConnecting: Boolean(snapshot.callConnecting),
     muted: deafened ? true : Boolean(snapshot.muted),
     deafened,
+    connectionState,
+    stage,
+    peerDisplayName: String(snapshot.peerDisplayName ?? "").trim(),
+    peerAvatarSrc: String(snapshot.peerAvatarSrc ?? "").trim(),
+    diagnostics: {
+      pingAverageMs: normalizeFiniteNumber(diagnosticsRaw.pingAverageMs),
+      lastPingMs: normalizeFiniteNumber(diagnosticsRaw.lastPingMs),
+      packetLossPercent: normalizeFiniteNumber(diagnosticsRaw.packetLossPercent),
+      sendingAudioKbps: normalizeFiniteNumber(diagnosticsRaw.sendingAudioKbps),
+      receivingAudioKbps: normalizeFiniteNumber(diagnosticsRaw.receivingAudioKbps),
+      localTrackActive: Boolean(diagnosticsRaw.localTrackActive),
+      remoteTrackActive: Boolean(diagnosticsRaw.remoteTrackActive),
+      remoteStreams,
+    },
   };
 }
 
@@ -318,6 +411,11 @@ export function resetVoiceCallUiSnapshot(): void {
     ...currentSnapshot,
     callActive: false,
     callConnecting: false,
+    connectionState: "idle",
+    stage: "IDLE",
+    peerDisplayName: "",
+    peerAvatarSrc: "",
+    diagnostics: { ...DEFAULT_DIAGNOSTICS_SUMMARY },
   };
   applySnapshot(nextSnapshot, {
     broadcast: true,

@@ -49,3 +49,174 @@
     justify-content: center;
   }
 }
+
+.voiceCallCard {
+  position: relative;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(72, 232, 127, 0.08), rgba(13, 17, 24, 0.92));
+  padding: 10px 12px;
+}
+
+.voiceCallHeaderRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.voiceCallStatusWrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.voiceCallStatusIcon {
+  width: 30px;
+  height: 30px;
+  border-radius: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(72, 232, 127, 0.18);
+  color: #48e87f;
+  flex-shrink: 0;
+}
+
+.voiceCallStatusTextWrap {
+  display: grid;
+  min-width: 0;
+}
+
+.voiceCallStatusTitle {
+  font-size: 22px;
+  font-weight: 800;
+  line-height: 1.1;
+}
+
+.voiceCallStatusTitleSuccess {
+  color: #48e87f;
+}
+
+.voiceCallStatusTitleWarning {
+  color: #f6cb6b;
+}
+
+.voiceCallPeerName {
+  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.voiceCallQualityButton {
+  width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #d8dde8;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+
+.voiceCallQualityButton:hover,
+.voiceCallQualityButton:focus-visible {
+  background: rgba(255, 255, 255, 0.18);
+  color: #ffffff;
+}
+
+.voiceCallDiagnosticsPanel {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 45;
+  width: min(320px, calc(100vw - 40px));
+  border-radius: 14px;
+  border: 1px solid rgba(26, 31, 40, 0.2);
+  background: #f3f4f6;
+  color: #1a202c;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.35);
+  padding: 14px 14px 12px;
+}
+
+.voiceCallDiagnosticsTitle {
+  margin: 0;
+  color: #111827;
+  font-size: 25px;
+  font-weight: 800;
+  line-height: 1.1;
+}
+
+.voiceCallDiagnosticsSubtitle {
+  margin: 6px 0 0;
+  color: #4b5563;
+  font-size: 16px;
+  line-height: 1.3;
+}
+
+.voiceCallDiagnosticsList {
+  margin: 14px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.voiceCallDiagnosticsItem {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 16px;
+}
+
+.voiceCallDiagnosticsItem dt,
+.voiceCallDiagnosticsItem dd {
+  margin: 0;
+}
+
+.voiceCallDiagnosticsItem dt {
+  color: #374151;
+  font-size: 17px;
+}
+
+.voiceCallDiagnosticsItem dd {
+  color: #111827;
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.voiceCallDiagnosticsFooter {
+  margin: 12px 0 0;
+  padding-top: 10px;
+  border-top: 1px solid rgba(55, 65, 81, 0.25);
+  color: #4b5563;
+  font-size: 15px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+@media (max-width: 920px) {
+  .voiceCallStatusTitle {
+    font-size: 19px;
+  }
+
+  .voiceCallDiagnosticsTitle {
+    font-size: 21px;
+  }
+
+  .voiceCallDiagnosticsSubtitle {
+    font-size: 14px;
+  }
+
+  .voiceCallDiagnosticsItem dt,
+  .voiceCallDiagnosticsItem dd {
+    font-size: 15px;
+  }
+}

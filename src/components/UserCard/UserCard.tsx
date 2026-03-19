@@ -18,6 +18,7 @@ import {
   publishVoiceCallUiSnapshot,
   subscribeVoiceCallUiSnapshot,
 } from "../../voice/client/uiState";
+import MaterialSymbolIcon from "../ui/MaterialSymbolIcon";
 import UserCardMini from "../UserCardMini/UserCardMini";
 import UserProfilePopover from "../UserProfilePopover/UserProfilePopover";
 import styles from "./UserCard.module.css";
@@ -106,6 +107,21 @@ function formatMemberSinceDate(timestamp: string | null | undefined): string {
   }).format(date);
 }
 
+function formatDiagnosticsMetric(value: number | null, suffix: string): string {
+  if (!Number.isFinite(value) || value == null) {
+    return `--${suffix}`;
+  }
+  const rounded = Math.abs(value) >= 10 ? Math.round(value) : Number(value.toFixed(1));
+  return `${rounded}${suffix}`;
+}
+
+function formatAudioFlowMetric(value: number | null, fallback: string): string {
+  if (!Number.isFinite(value) || value == null || value <= 0) {
+    return fallback;
+  }
+  return `${Number(value.toFixed(1))} kbps`;
+}
+
 export default function UserCard({
   userId = null,
   currentUserId = null,
@@ -130,6 +146,7 @@ export default function UserCard({
   );
   const [spotifyConnection, setSpotifyConnection] = useState<SpotifyConnectionState>(() => readSpotifyConnection(userId));
   const [voiceCallUiSnapshot, setVoiceCallUiSnapshot] = useState(() => getVoiceCallUiSnapshot());
+  const [isVoiceDiagnosticsOpen, setIsVoiceDiagnosticsOpen] = useState(false);
   const fallbackMemberSinceLabel = useMemo(
     () => formatMemberSinceDate(currentAuthCreationTime) || "Data nao disponivel",
     [currentAuthCreationTime, currentAuthUid],
@@ -184,12 +201,67 @@ export default function UserCard({
     const trackTitle = String(spotifyConnection.playback.trackTitle ?? "").trim();
     return artistNames || trackTitle;
   }, [hasActiveSpotifyPlayback, spotifyConnection.connected, spotifyConnection.playback, spotifyConnection.showAsStatus]);
+  const shouldShowVoiceCallCard = voiceCallUiSnapshot.callActive || voiceCallUiSnapshot.callConnecting;
+  const voicePeerDisplayName = useMemo(
+    () => String(voiceCallUiSnapshot.peerDisplayName ?? "").trim() || "Contato",
+    [voiceCallUiSnapshot.peerDisplayName],
+  );
+  const voiceCallStatusTitle = useMemo(() => {
+    if (voiceCallUiSnapshot.stage === "RECONNECTING" || voiceCallUiSnapshot.connectionState === "reconnecting") {
+      return "Reconectando";
+    }
+    if (voiceCallUiSnapshot.stage === "CONNECTED" || voiceCallUiSnapshot.connectionState === "connected" || voiceCallUiSnapshot.callActive) {
+      return "Voz conectada";
+    }
+    if (voiceCallUiSnapshot.stage === "RINGING" || voiceCallUiSnapshot.connectionState === "connecting" || voiceCallUiSnapshot.callConnecting) {
+      return "Conectando voz";
+    }
+    return "Chamada de voz";
+  }, [
+    voiceCallUiSnapshot.callActive,
+    voiceCallUiSnapshot.callConnecting,
+    voiceCallUiSnapshot.connectionState,
+    voiceCallUiSnapshot.stage,
+  ]);
+  const voiceCallStatusToneClass = useMemo(() => {
+    if (voiceCallUiSnapshot.stage === "RECONNECTING" || voiceCallUiSnapshot.connectionState === "reconnecting") {
+      return styles.voiceCallStatusTitleWarning;
+    }
+    return styles.voiceCallStatusTitleSuccess;
+  }, [voiceCallUiSnapshot.connectionState, voiceCallUiSnapshot.stage]);
+  const voiceDiagnostics = voiceCallUiSnapshot.diagnostics;
+  const voicePingAverageLabel = useMemo(
+    () => formatDiagnosticsMetric(voiceDiagnostics.pingAverageMs, " ms"),
+    [voiceDiagnostics.pingAverageMs],
+  );
+  const voiceLastPingLabel = useMemo(
+    () => formatDiagnosticsMetric(voiceDiagnostics.lastPingMs, " ms"),
+    [voiceDiagnostics.lastPingMs],
+  );
+  const voicePacketLossLabel = useMemo(
+    () => formatDiagnosticsMetric(voiceDiagnostics.packetLossPercent, "%"),
+    [voiceDiagnostics.packetLossPercent],
+  );
+  const voiceSendingAudioLabel = useMemo(
+    () => formatAudioFlowMetric(voiceDiagnostics.sendingAudioKbps, "Sem audio"),
+    [voiceDiagnostics.sendingAudioKbps],
+  );
+  const voiceReceivingAudioLabel = useMemo(
+    () => formatAudioFlowMetric(voiceDiagnostics.receivingAudioKbps, "Sem stream"),
+    [voiceDiagnostics.receivingAudioKbps],
+  );
 
   useEffect(() => {
     setProfileThemeState(readProfilePlusThemeState(authUser?.uid ?? currentUserId));
   }, [authUser?.uid, currentUserId, userId]);
 
   useEffect(() => subscribeVoiceCallUiSnapshot(setVoiceCallUiSnapshot), []);
+
+  useEffect(() => {
+    if (!shouldShowVoiceCallCard) {
+      setIsVoiceDiagnosticsOpen(false);
+    }
+  }, [shouldShowVoiceCallCard]);
 
   useEffect(() => {
     setSpotifyConnection(readSpotifyConnection(spotifyScope));
@@ -329,6 +401,78 @@ export default function UserCard({
     };
   }, [isFullProfileOpen]);
 
+  const voiceCallContent = shouldShowVoiceCallCard ? (
+    <div className={styles.voiceCallCard} role="status" aria-live="polite">
+      <div className={styles.voiceCallHeaderRow}>
+        <div className={styles.voiceCallStatusWrap}>
+          <span className={styles.voiceCallStatusIcon} aria-hidden="true">
+            <MaterialSymbolIcon name="wifi" size={16} />
+          </span>
+          <div className={styles.voiceCallStatusTextWrap}>
+            <span className={`${styles.voiceCallStatusTitle} ${voiceCallStatusToneClass}`}>{voiceCallStatusTitle}</span>
+            <span className={styles.voiceCallPeerName}>{voicePeerDisplayName}</span>
+          </div>
+        </div>
+        <button
+          type="button"
+          className={styles.voiceCallQualityButton}
+          aria-label={isVoiceDiagnosticsOpen ? "Ocultar qualidade da chamada" : "Mostrar qualidade da chamada"}
+          title="Qualidade da chamada"
+          onClick={() => setIsVoiceDiagnosticsOpen((current) => !current)}
+        >
+          <MaterialSymbolIcon name="network_check" size={18} />
+        </button>
+      </div>
+
+      {isVoiceDiagnosticsOpen ? (
+        <section className={styles.voiceCallDiagnosticsPanel} aria-label="Qualidade da chamada">
+          <p className={styles.voiceCallDiagnosticsTitle}>Qualidade da chamada</p>
+          <p className={styles.voiceCallDiagnosticsSubtitle}>Diagnostico em tempo real da conexao de voz.</p>
+
+          <dl className={styles.voiceCallDiagnosticsList}>
+            <div className={styles.voiceCallDiagnosticsItem}>
+              <dt>Ping medio</dt>
+              <dd>{voicePingAverageLabel}</dd>
+            </div>
+            <div className={styles.voiceCallDiagnosticsItem}>
+              <dt>Ultimo ping</dt>
+              <dd>{voiceLastPingLabel}</dd>
+            </div>
+            <div className={styles.voiceCallDiagnosticsItem}>
+              <dt>Perda de pacotes</dt>
+              <dd>{voicePacketLossLabel}</dd>
+            </div>
+            <div className={styles.voiceCallDiagnosticsItem}>
+              <dt>Enviando audio</dt>
+              <dd>{voiceSendingAudioLabel}</dd>
+            </div>
+            <div className={styles.voiceCallDiagnosticsItem}>
+              <dt>Recebendo audio</dt>
+              <dd>{voiceReceivingAudioLabel}</dd>
+            </div>
+            <div className={styles.voiceCallDiagnosticsItem}>
+              <dt>Track local</dt>
+              <dd>{voiceDiagnostics.localTrackActive ? "Ativa" : "Inativa"}</dd>
+            </div>
+            <div className={styles.voiceCallDiagnosticsItem}>
+              <dt>Track remota</dt>
+              <dd>{voiceDiagnostics.remoteTrackActive ? "Ativa" : "Ausente"}</dd>
+            </div>
+            <div className={styles.voiceCallDiagnosticsItem}>
+              <dt>Streams remotos</dt>
+              <dd>{voiceDiagnostics.remoteStreams}</dd>
+            </div>
+          </dl>
+
+          <p className={styles.voiceCallDiagnosticsFooter}>
+            <MaterialSymbolIcon name="lock" size={14} />
+            <span>Chamada criptografada em transito</span>
+          </p>
+        </section>
+      ) : null}
+    </div>
+  ) : null;
+
   return (
     <div className={styles.wrap} ref={rootRef} style={profileThemeInlineStyle}>
       {isProfileOpen ? (
@@ -364,9 +508,31 @@ export default function UserCard({
         spotifyStatusText={miniSpotifyStatusText}
         isMicEnabled={!voiceCallUiSnapshot.muted}
         isSoundEnabled={!voiceCallUiSnapshot.deafened}
+        callContent={voiceCallContent}
         onToggleMic={() => {
+          const isCurrentlyMuted = Boolean(voiceCallUiSnapshot.muted);
+          const isCurrentlyDeafened = Boolean(voiceCallUiSnapshot.deafened);
+
+          if (!isCurrentlyMuted && !isCurrentlyDeafened) {
+            // Manter comportamento sincronizado: desativar microfone tambem ativa ensurdecer.
+            publishVoiceCallUiSnapshot({
+              muted: true,
+              deafened: true,
+            });
+            emitVoiceCallUiCommand("toggle-deafen");
+            return;
+          }
+
+          if (isCurrentlyDeafened) {
+            publishVoiceCallUiSnapshot({
+              deafened: false,
+            });
+            emitVoiceCallUiCommand("toggle-deafen");
+            return;
+          }
+
           publishVoiceCallUiSnapshot({
-            muted: voiceCallUiSnapshot.deafened ? true : !voiceCallUiSnapshot.muted,
+            muted: !isCurrentlyMuted,
           });
           emitVoiceCallUiCommand("toggle-mute");
         }}
