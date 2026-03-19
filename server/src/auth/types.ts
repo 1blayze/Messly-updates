@@ -43,6 +43,8 @@ export interface ResendVerificationRequestBody {
 export interface LoginRequestBody {
   email?: string;
   password?: string;
+  turnstileToken?: string;
+  loginFingerprint?: string;
   client?: SessionClientInfo | null;
 }
 

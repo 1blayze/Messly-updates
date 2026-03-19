@@ -16,6 +16,18 @@ export function toFriendlySupabaseAuthError(error: unknown): string {
     return "Cadastro temporariamente indisponivel. Tente novamente em instantes.";
   }
 
+  if (normalizedCode === "REGISTRATION_EMAIL_UNAVAILABLE") {
+    return "Nao foi possivel enviar o email de confirmacao agora. Tente novamente em instantes.";
+  }
+
+  if (normalizedCode === "REGISTRATION_UNABLE") {
+    return "Nao foi possivel concluir o cadastro. Tente novamente em instantes.";
+  }
+
+  if (normalizedCode === "INVALID_AUTH_RESPONSE") {
+    return "Falha temporaria ao autenticar. Tente novamente em instantes.";
+  }
+
   if (normalizedCode === "WEAK_PASSWORD") {
     return "A senha deve ter no minimo 8 caracteres, com numero e simbolo.";
   }

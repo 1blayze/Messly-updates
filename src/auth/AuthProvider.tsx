@@ -69,6 +69,15 @@ interface SignUpSecurityInput {
   registrationFingerprint: string;
 }
 
+interface SignInSecurityInput {
+  turnstileToken?: string | null;
+  loginFingerprint?: string | null;
+  client?: {
+    userAgent?: string | null;
+    platform?: string | null;
+  } | null;
+}
+
 interface AuthContextValue {
   session: Session | null;
   user: AuthUser | null;
@@ -89,7 +98,11 @@ interface AuthContextValue {
   ) => Promise<{ user: AuthUser | null; profile: ProfileRow | null; needsEmailConfirmation: boolean }>;
   verifyEmailCode: (email: string, code: string) => Promise<{ user: AuthUser; profile: ProfileRow | null }>;
   resendVerificationCode: (email: string) => Promise<void>;
-  signIn: (email: string, password: string) => Promise<{ user: AuthUser; profile: ProfileRow | null }>;
+  signIn: (
+    email: string,
+    password: string,
+    security?: SignInSecurityInput,
+  ) => Promise<{ user: AuthUser; profile: ProfileRow | null }>;
   signOut: () => Promise<void>;
   refreshSession: () => Promise<Session | null>;
   getCurrentSession: () => Promise<Session | null>;
@@ -785,17 +798,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [applySessionAndProfile, authReady, hasSessionHint, isLoading, sessionHintResolved, user]);
 
   const signIn = useCallback(
-    async (email: string, password: string): Promise<{ user: AuthUser; profile: ProfileRow | null }> => {
+    async (
+      email: string,
+      password: string,
+      securityInput?: SignInSecurityInput,
+    ): Promise<{ user: AuthUser; profile: ProfileRow | null }> => {
       const normalizedUserEmail = normalizeEmail(email);
       const normalizedPassword = String(password ?? "");
-      if (!normalizedUserEmail || !normalizedPassword) {
+      if (!normalizedUserEmail || normalizedPassword.length < 8) {
         throw new Error("Informe e-mail e senha para continuar.");
       }
 
-      const nextSession = await authService.login(normalizedUserEmail, normalizedPassword);
+      const nextSession = await authService.login(normalizedUserEmail, normalizedPassword, {
+        turnstileToken: String(securityInput?.turnstileToken ?? "").trim() || null,
+        loginFingerprint: String(securityInput?.loginFingerprint ?? "").trim() || null,
+        client: {
+          userAgent: String(securityInput?.client?.userAgent ?? "").trim() || null,
+          platform: String(securityInput?.client?.platform ?? "").trim() || null,
+        },
+      });
       const signedUser = mapSupabaseUser(nextSession.user ?? null);
       if (!signedUser) {
-        throw new Error("Sessão não retornada pelo Supabase.");
+        throw new Error("Sessao nao retornada pelo Supabase.");
       }
 
       await applySessionAndProfile(nextSession);
@@ -837,20 +861,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       const turnstileToken = String(securityInput?.turnstileToken ?? "").trim();
       const registrationFingerprint = String(securityInput?.registrationFingerprint ?? "").trim();
-      if (requiresSignupSecurityVerification) {
-        if (!turnstileToken) {
-          throw new Error("Verificação de segurança obrigatória.");
-        }
-        if (!registrationFingerprint) {
-          throw new Error("Não foi possível validar este dispositivo.");
-        }
+      if (!turnstileToken) {
+        throw new Error("Verificacao de seguranca obrigatoria.");
+      }
+      if (!registrationFingerprint) {
+        throw new Error("Nao foi possivel validar este dispositivo.");
       }
 
       await authService.signup({
         email: normalizedUserEmail,
         password: normalizedPassword,
-        turnstileToken: turnstileToken || "desktop-direct-signup",
-        registrationFingerprint: registrationFingerprint || `desktop:${Date.now()}`,
+        turnstileToken,
+        registrationFingerprint,
         profile: {
           displayName,
           username,
@@ -880,11 +902,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           needsEmailConfirmation: false,
         };
       }
-
-      if (!requiresSignupSecurityVerification) {
-        throw new Error("Cadastro criado. Confirme seu e-mail pelo link recebido e depois faça login.");
-      }
-
       setError(null);
       dispatch(authActions.authErrorChanged(null));
       dispatch(authActions.authVerificationRequired({ email: normalizedUserEmail }));
@@ -895,7 +912,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         needsEmailConfirmation: true,
       };
     },
-    [applySessionAndProfile, dispatch, requiresSignupSecurityVerification, syncKnownAccount],
+    [applySessionAndProfile, dispatch, syncKnownAccount],
   );
 
   const verifyEmailCode = useCallback(

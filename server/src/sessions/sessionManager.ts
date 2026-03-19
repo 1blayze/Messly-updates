@@ -9,6 +9,7 @@ export interface SessionClientInfo {
   platform?: string | null;
   clientType?: string | null;
   deviceId?: string | null;
+  userAgent?: string | null;
 }
 
 interface UserSessionRow {

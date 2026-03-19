@@ -182,9 +182,9 @@ function BirthSelect({
 
 export default function RegisterPage() {
   const navigate = useNavigate();
-  const { signUp, verifyEmailCode, resendVerificationCode, requiresSignupSecurityVerification } = useAuthSession();
+  const { signUp, verifyEmailCode, resendVerificationCode } = useAuthSession();
   const turnstileSiteKey = String(import.meta.env.VITE_TURNSTILE_SITE_KEY ?? "").trim();
-  const shouldRenderCaptcha = requiresSignupSecurityVerification || Boolean(turnstileSiteKey);
+  const shouldRenderCaptcha = true;
   const currentYear = new Date().getFullYear();
   const birthGridRef = useRef<HTMLDivElement | null>(null);
   const usernameCheckRef = useRef<number | null>(null);
@@ -360,20 +360,20 @@ export default function RegisterPage() {
       return;
     }
 
-    if (requiresSignupSecurityVerification && !turnstileSiteKey) {
+    if (!turnstileSiteKey) {
       setFormMessageTone("error");
       setFormMessage("Não foi possível iniciar a verificação de segurança. Tente novamente em instantes.");
       return;
     }
 
-    if (requiresSignupSecurityVerification && !turnstileToken) {
+    if (!turnstileToken) {
       setVerificationState("error");
       setCaptchaError("Conclua a verificação de segurança antes de continuar.");
       turnstileRef.current?.reset();
       return;
     }
 
-    if (requiresSignupSecurityVerification && !registrationFingerprint) {
+    if (!registrationFingerprint) {
       setFormMessageTone("error");
       setFormMessage("Não foi possível validar este dispositivo. Recarregue a tela e tente novamente.");
       return;
@@ -430,7 +430,7 @@ export default function RegisterPage() {
       }
 
       const errorCode = resolveAuthApiErrorCode(error);
-      if (requiresSignupSecurityVerification && CAPTCHA_RESET_ERROR_CODES.has(errorCode)) {
+      if (CAPTCHA_RESET_ERROR_CODES.has(errorCode)) {
         setTurnstileToken("");
         setVerificationState(errorCode === "CAPTCHA_EXPIRED" ? "expired" : "error");
         setCaptchaError("A verificação de segurança expirou ou falhou. Confirme novamente.");
@@ -526,7 +526,7 @@ export default function RegisterPage() {
 
   const normalizedUsernamePreview = formatUsernameForDisplay(username);
   const canSubmitRegistration =
-    !isSubmitting;
+    !isSubmitting && Boolean(turnstileSiteKey) && Boolean(turnstileToken) && Boolean(registrationFingerprint);
   const shouldShowCaptchaDiagnostic = import.meta.env.DEV && Boolean(captchaDiagnostic);
 
   const title = stage === "form" ? "Criar conta" : "Confirme seu e-mail";
@@ -663,8 +663,8 @@ export default function RegisterPage() {
                   }}
                 />
                 <BirthSelect
-                  ariaLabel="Mês de nascimento"
-                  placeholder="Mês"
+                  ariaLabel="Mes de nascimento"
+                  placeholder="Mes"
                   value={birthMonth}
                   options={MONTH_OPTIONS}
                   disabled={isSubmitting}
@@ -689,7 +689,7 @@ export default function RegisterPage() {
                   }}
                 />
               </div>
-              <p className="auth-note">É necessário ter pelo menos 13 anos para criar uma conta.</p>
+              <p className="auth-note">E necessario ter pelo menos 13 anos para criar uma conta.</p>
               {fieldErrors.birthDate ? (
                 <p className="auth-feedback auth-feedback--error">{fieldErrors.birthDate}</p>
               ) : null}
@@ -697,57 +697,52 @@ export default function RegisterPage() {
 
             {shouldRenderCaptcha ? (
               <div className="auth-field auth-field--captcha" aria-live="polite">
-                <TurnstileWidget
-                  ref={turnstileRef}
-                  className="auth-turnstile"
-                  siteKey={turnstileSiteKey}
-                  showErrors={requiresSignupSecurityVerification}
-                  onVerify={(token) => {
-                    setTurnstileToken(token);
-                    setVerificationState("verified");
-                    setCaptchaDiagnostic(null);
-                    if (requiresSignupSecurityVerification) {
+                {turnstileSiteKey ? (
+                  <TurnstileWidget
+                    ref={turnstileRef}
+                    className="auth-turnstile"
+                    siteKey={turnstileSiteKey}
+                    showErrors
+                    onVerify={(token) => {
+                      setTurnstileToken(token);
+                      setVerificationState("verified");
+                      setCaptchaDiagnostic(null);
                       setCaptchaError(null);
-                    }
-                  }}
-                  onError={() => {
-                    setTurnstileToken("");
-                    if (requiresSignupSecurityVerification) {
+                    }}
+                    onError={() => {
+                      setTurnstileToken("");
                       setVerificationState("error");
                       setCaptchaError("A verificação de segurança falhou. Tente novamente.");
-                    }
-                  }}
-                  onExpire={() => {
-                    setTurnstileToken("");
-                    if (requiresSignupSecurityVerification) {
+                    }}
+                    onExpire={() => {
+                      setTurnstileToken("");
                       setVerificationState("expired");
                       setCaptchaError("A verificação expirou. Confirme novamente para continuar.");
                       turnstileRef.current?.reset();
-                    }
-                  }}
-                  onTimeout={() => {
-                    setTurnstileToken("");
-                    if (requiresSignupSecurityVerification) {
+                    }}
+                    onTimeout={() => {
+                      setTurnstileToken("");
                       setVerificationState("timeout");
                       setCaptchaError("Tempo esgotado na verificação. Tente novamente.");
                       turnstileRef.current?.reset();
-                    }
-                  }}
-                  onDiagnostic={(event) => {
-                    const parts = [
-                      event.code,
-                      `tentativa=${event.attempt}`,
-                      `online=${event.online ? "1" : "0"}`,
-                      event.rawError ? `erro=${event.rawError}` : "",
-                    ].filter(Boolean);
-                    setCaptchaDiagnostic(parts.join(" | "));
-                  }}
-                />
-                {!registrationFingerprint && requiresSignupSecurityVerification ? (
+                    }}
+                    onDiagnostic={(event) => {
+                      const parts = [
+                        event.code,
+                        `tentativa=${event.attempt}`,
+                        `online=${event.online ? "1" : "0"}`,
+                        event.rawError ? `erro=${event.rawError}` : "",
+                      ].filter(Boolean);
+                      setCaptchaDiagnostic(parts.join(" | "));
+                    }}
+                  />
+                ) : (
+                  <p className="auth-feedback auth-feedback--error">
+                    Chave do Turnstile não configurada. Defina VITE_TURNSTILE_SITE_KEY.
+                  </p>
+                )}
+                {!registrationFingerprint ? (
                   <p className="auth-note">Preparando verificação do dispositivo...</p>
-                ) : null}
-                {!requiresSignupSecurityVerification ? (
-                  <p className="auth-note">Verificação de segurança opcional no aplicativo instalado.</p>
                 ) : null}
                 {shouldShowCaptchaDiagnostic ? (
                   <p className="auth-note auth-note--diagnostic">Diagnóstico do captcha: {captchaDiagnostic}</p>

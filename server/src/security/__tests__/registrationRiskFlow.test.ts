@@ -813,22 +813,16 @@ test("rejects oversized turnstile token", async () => {
   );
 });
 
-test("rejects missing turnstile token", async () => {
+test("allows missing turnstile token on low-risk path", async () => {
   const { deps } = buildDeps();
-  await assert.rejects(
-    () =>
-      handleSignup(
-        deps,
-        buildContext(),
-        buildBody({
-          turnstileToken: "",
-        }),
-      ),
-    (error: unknown) => {
-      expectAuthError(error, "REGISTER_PAYLOAD_INVALID", 400);
-      return true;
-    },
+  const response = await handleSignup(
+    deps,
+    buildContext(),
+    buildBody({
+      turnstileToken: "",
+    }),
   );
+  assert.equal(response.status, "verification_required");
 });
 
 test("releases lease when captcha token is expired", async () => {

@@ -27,6 +27,7 @@ export interface AuthClientDescriptor {
   platform: string;
   clientType: SessionClientDescriptor["clientType"];
   deviceId: string;
+  userAgent?: string;
 }
 
 export interface SignupApiRequest {
@@ -51,6 +52,8 @@ export interface SignupApiResponse {
 export interface LoginApiRequest {
   email: string;
   password: string;
+  turnstileToken?: string;
+  loginFingerprint?: string;
   client: AuthClientDescriptor;
 }
 

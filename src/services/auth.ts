@@ -58,11 +58,33 @@ export interface SignupInput {
   };
 }
 
+export interface LoginInputSecurity {
+  turnstileToken?: string | null;
+  loginFingerprint?: string | null;
+  client?: {
+    userAgent?: string | null;
+    platform?: string | null;
+  } | null;
+}
+
 function resolveClientDescriptor(): AuthClientDescriptor {
   const descriptor = buildAuthClientDescriptor();
   return {
     ...descriptor,
     version: String(descriptor.version || appPackage.version || "0.0.5"),
+  };
+}
+
+function resolveLoginClientDescriptor(security?: LoginInputSecurity | null): AuthClientDescriptor {
+  const descriptor = resolveClientDescriptor();
+  const userAgent = String(
+    security?.client?.userAgent ?? (typeof navigator !== "undefined" ? navigator.userAgent : ""),
+  ).trim();
+  const platformOverride = String(security?.client?.platform ?? "").trim();
+  return {
+    ...descriptor,
+    platform: platformOverride || descriptor.platform,
+    userAgent: userAgent || undefined,
   };
 }
 
@@ -765,7 +787,7 @@ class AuthService {
     return session;
   }
 
-  async login(email: string, password: string): Promise<Session> {
+  async login(email: string, password: string, security?: LoginInputSecurity): Promise<Session> {
     if (shouldPreferDirectSupabaseLogin()) {
       const session = await signInWithDirectSupabase(email, password);
       await setPendingVerificationState(null);
@@ -777,7 +799,9 @@ class AuthService {
       const response = await loginRequest({
         email,
         password,
-        client: resolveClientDescriptor(),
+        turnstileToken: String(security?.turnstileToken ?? "").trim() || undefined,
+        loginFingerprint: String(security?.loginFingerprint ?? "").trim() || undefined,
+        client: resolveLoginClientDescriptor(security),
       });
 
       let remoteAccessTokenAccepted = true;

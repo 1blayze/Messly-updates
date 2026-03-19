@@ -25,6 +25,8 @@ const RESEND_WINDOW_MS = 10 * 60_000;
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const USERNAME_REGEX = /^[a-z0-9_.]{2,32}$/;
 const REGISTRATION_ERROR_MESSAGE = "Unable to complete registration. Please try again later.";
+const REGISTRATION_EMAIL_UNAVAILABLE_MESSAGE =
+  "Unable to send confirmation email right now. Please try again later.";
 const REGISTRATION_RATE_LIMIT_MESSAGE = "Too many registration attempts. Please try again later.";
 const EMAIL_MAX_LENGTH = 254;
 const TURNSTILE_TOKEN_MAX_LENGTH = 2_048;
@@ -94,7 +96,7 @@ function buildUserMetadata(profile: SignupProfileInput | null | undefined): Reco
 function normalizeSignupInput(body: SignupRequestBody): {
   email: string;
   password: string;
-  turnstileToken: string;
+  turnstileToken: string | null;
   registrationFingerprint: string;
   metadata: Record<string, string>;
 } {
@@ -102,14 +104,11 @@ function normalizeSignupInput(body: SignupRequestBody): {
   if (!EMAIL_REGEX.test(email) || email.length > EMAIL_MAX_LENGTH) {
     throw new AuthHttpError(400, "REGISTER_PAYLOAD_INVALID", REGISTRATION_ERROR_MESSAGE);
   }
-  const turnstileToken = String(body.turnstileToken ?? "").trim();
-  if (
-    !turnstileToken ||
-    turnstileToken.length > TURNSTILE_TOKEN_MAX_LENGTH ||
-    /\s/.test(turnstileToken)
-  ) {
+  const turnstileTokenRaw = String(body.turnstileToken ?? "").trim();
+  if (turnstileTokenRaw.length > TURNSTILE_TOKEN_MAX_LENGTH || /\s/.test(turnstileTokenRaw)) {
     throw new AuthHttpError(400, "REGISTER_PAYLOAD_INVALID", REGISTRATION_ERROR_MESSAGE);
   }
+  const turnstileToken = turnstileTokenRaw || null;
   const registrationFingerprint = String(body.registrationFingerprint ?? "").trim();
   if (!registrationFingerprint) {
     throw new AuthHttpError(400, "REGISTER_PAYLOAD_INVALID", REGISTRATION_ERROR_MESSAGE);
@@ -159,6 +158,14 @@ function mapSignupProviderError(deps: AuthDependencies, error: unknown): AuthHtt
 
   if (normalized.includes("rate limit") || normalized.includes("too many")) {
     return new AuthHttpError(429, "REGISTRATION_TOO_MANY_ATTEMPTS", REGISTRATION_RATE_LIMIT_MESSAGE);
+  }
+
+  if (
+    normalized.includes("error sending confirmation email") ||
+    normalized.includes("confirmation email") ||
+    normalized.includes("smtp")
+  ) {
+    return new AuthHttpError(503, "REGISTRATION_EMAIL_UNAVAILABLE", REGISTRATION_EMAIL_UNAVAILABLE_MESSAGE);
   }
 
   return new AuthHttpError(400, "REGISTRATION_UNABLE", REGISTRATION_ERROR_MESSAGE);
@@ -227,7 +234,7 @@ export async function handleSignup(
       | {
           email: string;
           password: string;
-          turnstileToken: string;
+          turnstileToken: string | null;
           registrationFingerprint: string;
           metadata: Record<string, string>;
         }
@@ -256,43 +263,65 @@ export async function handleSignup(
       email,
       registrationFingerprint,
     };
+    deps.logger?.info("signup_payload_received", {
+      emailDomain: preparedRiskInput.emailDomain,
+      hasTurnstileToken: Boolean(turnstileToken),
+      fingerprintHashPrefix: preparedRiskInput.fingerprintHash.slice(0, 12),
+      hasDisplayName: Boolean(metadata.display_name),
+      hasUsername: Boolean(metadata.username),
+      ipAddress: context.ipAddress,
+      origin: context.origin ?? null,
+    });
 
     await evaluateRegistrationRisk(deps, context, preparedRiskInput);
     const lease = await reserveRegistrationLease(deps, context, preparedRiskInput);
     leaseId = lease.leaseId;
 
-    const turnstileVerification = await verifyTurnstile({
-      token: turnstileToken,
-      secretKey: deps.env.turnstileSecretKey,
-      remoteIp: context.ipAddress,
-      logger: deps.logger,
-    });
-
-    if (!turnstileVerification.success) {
-      const failureReason = turnstileVerification.reason ?? "captcha_invalid";
-      try {
-        await releaseRegistrationLease(deps, leaseId, failureReason);
-      } catch (leaseReleaseError) {
-        deps.logger?.warn("registration_lease_release_failed", {
-          stage: "captcha_failed",
-          leaseId,
-          reason: leaseReleaseError instanceof Error ? leaseReleaseError.message : String(leaseReleaseError),
-        });
-      }
-      leaseId = null;
-
-      await recordCaptchaFailure(deps, {
-        event: mapCaptchaFailureEvent({
-          reason: failureReason,
-        }),
-        context: riskContext,
-        prepared: preparedRiskInput,
-        details: {
-          errorCodes: turnstileVerification.errorCodes,
-          hostname: turnstileVerification.hostname,
-        },
+    if (turnstileToken) {
+      const turnstileVerification = await verifyTurnstile({
+        token: turnstileToken,
+        secretKey: deps.env.turnstileSecretKey,
+        remoteIp: context.ipAddress,
+        logger: deps.logger,
       });
-      throw buildCaptchaHttpError(failureReason);
+
+      deps.logger?.info("signup_captcha_status", {
+        status: turnstileVerification.success ? "verified" : "failed",
+        reason: turnstileVerification.reason ?? null,
+        hasErrorCodes: Array.isArray(turnstileVerification.errorCodes) && turnstileVerification.errorCodes.length > 0,
+      });
+
+      if (!turnstileVerification.success) {
+        const failureReason = turnstileVerification.reason ?? "captcha_invalid";
+        try {
+          await releaseRegistrationLease(deps, leaseId, failureReason);
+        } catch (leaseReleaseError) {
+          deps.logger?.warn("registration_lease_release_failed", {
+            stage: "captcha_failed",
+            leaseId,
+            reason: leaseReleaseError instanceof Error ? leaseReleaseError.message : String(leaseReleaseError),
+          });
+        }
+        leaseId = null;
+
+        await recordCaptchaFailure(deps, {
+          event: mapCaptchaFailureEvent({
+            reason: failureReason,
+          }),
+          context: riskContext,
+          prepared: preparedRiskInput,
+          details: {
+            errorCodes: turnstileVerification.errorCodes,
+            hostname: turnstileVerification.hostname,
+          },
+        });
+        throw buildCaptchaHttpError(failureReason);
+      }
+    } else {
+      deps.logger?.info("signup_captcha_status", {
+        status: "skipped",
+        reason: "token_missing_low_risk_path",
+      });
     }
 
     const publicSupabase = deps.createPublicSupabase();
@@ -391,6 +420,17 @@ export async function handleSignup(
           reason: leaseReleaseError instanceof Error ? leaseReleaseError.message : String(leaseReleaseError),
         });
       }
+    }
+    if (error instanceof AuthHttpError) {
+      deps.logger?.warn("signup_rejected", {
+        code: error.code,
+        status: error.status,
+        message: error.message,
+      });
+    } else {
+      deps.logger?.error("signup_rejected_unexpected", {
+        reason: error instanceof Error ? error.message : String(error),
+      });
     }
     throw error;
   }

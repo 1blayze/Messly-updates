@@ -1,7 +1,10 @@
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuthSession } from "./AuthProvider";
 import { toFriendlySupabaseAuthError } from "./supabaseAuthErrors";
+import { AuthApiError } from "../api/authApi";
+import TurnstileWidget, { type TurnstileWidgetHandle } from "../components/security/TurnstileWidget";
+import { createRegistrationFingerprint } from "../security/createRegistrationFingerprint";
 import MaterialSymbolIcon from "../components/ui/MaterialSymbolIcon";
 import mewsLogo from "../assets/icons/ui/messly.svg";
 import "./auth.css";
@@ -31,19 +34,59 @@ function isExpectedAuthFailure(error: unknown): boolean {
   );
 }
 
+const CAPTCHA_ERROR_CODES = new Set([
+  "CAPTCHA_REQUIRED",
+  "CAPTCHA_INVALID",
+  "CAPTCHA_EXPIRED",
+  "CAPTCHA_TIMEOUT",
+  "CAPTCHA_NETWORK_ERROR",
+]);
+
 export default function LoginPage() {
   const navigate = useNavigate();
+  const turnstileRef = useRef<TurnstileWidgetHandle | null>(null);
   const { signIn } = useAuthSession();
+  const turnstileSiteKey = String(import.meta.env.VITE_TURNSTILE_SITE_KEY ?? "").trim();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
+  const [turnstileToken, setTurnstileToken] = useState("");
+  const [loginFingerprint, setLoginFingerprint] = useState("");
+  const [failedAttempts, setFailedAttempts] = useState(0);
+  const [showCaptcha, setShowCaptcha] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void createRegistrationFingerprint()
+      .then((fingerprint) => {
+        if (cancelled) {
+          return;
+        }
+        setLoginFingerprint(fingerprint);
+      })
+      .catch(() => {
+        if (cancelled) {
+          return;
+        }
+        setLoginFingerprint("");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const canSubmit = useMemo(() => {
-    return isValidEmail(email) && password.length >= 8 && !isSubmitting;
-  }, [email, password, isSubmitting]);
+    if (!isValidEmail(email) || password.length < 8 || isSubmitting) {
+      return false;
+    }
+    if (showCaptcha) {
+      return Boolean(turnstileSiteKey) && Boolean(turnstileToken);
+    }
+    return true;
+  }, [email, password, isSubmitting, showCaptcha, turnstileSiteKey, turnstileToken]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
@@ -60,13 +103,46 @@ export default function LoginPage() {
       return;
     }
 
+    if (showCaptcha && !turnstileToken) {
+      setErrorMessage("Conclua a verificacao de seguranca para continuar.");
+      return;
+    }
+
     setIsSubmitting(true);
     try {
-      await signIn(email, password);
+      await signIn(email, password, {
+        turnstileToken: turnstileToken || null,
+        loginFingerprint: loginFingerprint || null,
+        client: {
+          userAgent: typeof navigator !== "undefined" ? navigator.userAgent : null,
+          platform: typeof navigator !== "undefined" ? navigator.platform : null,
+        },
+      });
+      setFailedAttempts(0);
+      setShowCaptcha(false);
+      setTurnstileToken("");
       navigate("/app", { replace: true });
     } catch (error) {
       if (import.meta.env.DEV && !isExpectedAuthFailure(error)) {
         console.error("[auth:sign-in]", error);
+      }
+      const errorCode =
+        error instanceof AuthApiError
+          ? String(error.code ?? "").trim().toUpperCase()
+          : String((error as { code?: unknown } | null)?.code ?? "").trim().toUpperCase();
+      if (CAPTCHA_ERROR_CODES.has(errorCode)) {
+        setShowCaptcha(true);
+        setTurnstileToken("");
+        turnstileRef.current?.reset();
+      }
+      if (isExpectedAuthFailure(error)) {
+        setFailedAttempts((current) => {
+          const next = current + 1;
+          if (next >= 2) {
+            setShowCaptcha(true);
+          }
+          return next;
+        });
       }
       setErrorMessage(toFriendlySupabaseAuthError(error));
     } finally {
@@ -136,6 +212,38 @@ export default function LoginPage() {
               </button>
             </div>
           </div>
+
+          {showCaptcha ? (
+            <div className="auth-field auth-field--captcha" aria-live="polite">
+              {turnstileSiteKey ? (
+                <TurnstileWidget
+                  ref={turnstileRef}
+                  className="auth-turnstile"
+                  siteKey={turnstileSiteKey}
+                  showErrors
+                  onVerify={(token) => {
+                    setTurnstileToken(token);
+                    setErrorMessage(null);
+                  }}
+                  onError={() => {
+                    setTurnstileToken("");
+                  }}
+                  onExpire={() => {
+                    setTurnstileToken("");
+                    turnstileRef.current?.reset();
+                  }}
+                  onTimeout={() => {
+                    setTurnstileToken("");
+                    turnstileRef.current?.reset();
+                  }}
+                />
+              ) : (
+                <p className="auth-feedback auth-feedback--error">
+                  Chave do Turnstile nao configurada. Defina VITE_TURNSTILE_SITE_KEY.
+                </p>
+              )}
+            </div>
+          ) : null}
 
           {errorMessage ? <p className="auth-feedback auth-feedback--error">{errorMessage}</p> : null}
           {infoMessage ? <p className="auth-feedback auth-feedback--success">{infoMessage}</p> : null}
