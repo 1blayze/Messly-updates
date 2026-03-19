@@ -25,7 +25,7 @@ import { getSecureJson, removeSecureItem, setSecureJson } from "./auth/secureSto
 const PENDING_VERIFICATION_KEY = "messly.auth.pending-verification";
 const LEGACY_SESSION_STORAGE_KEY = "messly.auth.session";
 const SESSION_REFRESH_BUFFER_MS = 30_000;
-const EDGE_ACCESS_TOKEN_VALIDATION_TTL_MS = 60_000;
+const EDGE_ACCESS_TOKEN_VALIDATION_TTL_MS = 5_000;
 const EDGE_ACCESS_TOKEN_VALIDATION_FAILURE_COOLDOWN_MS = 20_000;
 const AUTH_SESSION_READ_TIMEOUT_MS = 8_000;
 const AUTH_SESSION_REFRESH_TIMEOUT_MS = 10_000;

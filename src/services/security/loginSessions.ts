@@ -349,9 +349,10 @@ function clearLocalSessionIfInvalid(error: unknown, uidRaw?: string | null): voi
     clearStoredSessionId(uid);
     invalidateListSessionsCache(uid);
   }
-  // Session registry checks are optional hardening. Do not force a global sign-out
-  // when this subsystem detects auth/session inconsistencies, because transient
-  // edge/RLS/config issues here can otherwise eject valid users from the app.
+
+  // Invalid JWT/session_not_found means local auth is out of sync with Supabase.
+  // Clear local session so the app can recover cleanly instead of retry loops.
+  void authService.clearLocalSession().catch(() => undefined);
 }
 
 function shouldFallbackToEdgeSessionsList(error: unknown): boolean {
