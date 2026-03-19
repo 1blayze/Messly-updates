@@ -30,6 +30,14 @@ const REGISTRATION_EMAIL_UNAVAILABLE_MESSAGE =
 const REGISTRATION_RATE_LIMIT_MESSAGE = "Too many registration attempts. Please try again later.";
 const EMAIL_MAX_LENGTH = 254;
 const TURNSTILE_TOKEN_MAX_LENGTH = 2_048;
+const DEFAULT_AUTH_EMAIL_SENDER = "noreply@messly.site";
+const DEFAULT_AUTH_EMAIL_VERIFIED_DOMAIN = "messly.site";
+
+interface ProviderEmailConfig {
+  senderEmail: string;
+  senderDomain: string;
+  verifiedDomain: string;
+}
 
 interface VerificationIssueResult {
   email: string;
@@ -141,12 +149,78 @@ function buildVerificationResponse(deps: AuthDependencies, email: string): Verif
   };
 }
 
+function normalizeDomain(valueRaw: unknown): string | null {
+  const normalized = String(valueRaw ?? "").trim().toLowerCase().replace(/^@+/, "");
+  return normalized || null;
+}
+
+function extractDomainFromEmail(valueRaw: unknown): string | null {
+  const value = String(valueRaw ?? "").trim().toLowerCase();
+  const atIndex = value.lastIndexOf("@");
+  if (atIndex <= 0 || atIndex >= value.length - 1) {
+    return null;
+  }
+  return normalizeDomain(value.slice(atIndex + 1));
+}
+
+function readProviderEmailConfig(): ProviderEmailConfig {
+  const senderEmailRaw =
+    process.env.MESSLY_AUTH_EMAIL_SENDER ??
+    process.env.AUTH_EMAIL_SENDER ??
+    DEFAULT_AUTH_EMAIL_SENDER;
+  const senderEmail = String(senderEmailRaw ?? "").trim().toLowerCase() || DEFAULT_AUTH_EMAIL_SENDER;
+  const senderDomain = extractDomainFromEmail(senderEmail) ?? normalizeDomain(DEFAULT_AUTH_EMAIL_VERIFIED_DOMAIN) ?? "messly.site";
+
+  const verifiedDomainRaw =
+    process.env.MESSLY_AUTH_EMAIL_VERIFIED_DOMAIN ??
+    process.env.AUTH_EMAIL_VERIFIED_DOMAIN ??
+    DEFAULT_AUTH_EMAIL_VERIFIED_DOMAIN;
+  const verifiedDomain = normalizeDomain(verifiedDomainRaw) ?? "messly.site";
+
+  return {
+    senderEmail,
+    senderDomain,
+    verifiedDomain,
+  };
+}
+
+function assertProviderEmailConfig(deps: AuthDependencies): ProviderEmailConfig {
+  const config = readProviderEmailConfig();
+  if (config.senderDomain !== config.verifiedDomain) {
+    deps.logger?.error("signup_email_provider_domain_mismatch", {
+      senderEmail: config.senderEmail,
+      senderDomain: config.senderDomain,
+      verifiedDomain: config.verifiedDomain,
+      expectedSenderExample: `noreply@${config.verifiedDomain}`,
+    });
+    throw new AuthHttpError(
+      503,
+      "EMAIL_PROVIDER_FAILURE",
+      `Email provider misconfigured: sender domain "${config.senderDomain}" must match verified domain "${config.verifiedDomain}".`,
+    );
+  }
+  return config;
+}
+
 function mapSignupProviderError(deps: AuthDependencies, error: unknown): AuthHttpError {
   const message = String((error as { message?: unknown } | null)?.message ?? "").trim();
+  const stack = String((error as { stack?: unknown } | null)?.stack ?? "").trim() || null;
+  const code = String((error as { code?: unknown } | null)?.code ?? "").trim() || null;
+  const name = String((error as { name?: unknown } | null)?.name ?? "").trim() || null;
+  const details = (error as { details?: unknown } | null)?.details ?? null;
+  const status =
+    typeof (error as { status?: unknown } | null)?.status === "number"
+      ? ((error as { status?: number } | null)?.status ?? null)
+      : null;
   const normalized = message.toLowerCase();
-  deps.logger?.error("supabase_signup_error", {
+  deps.logger?.error("signup_provider_error_full", {
+    raw: error,
     message: message || "unknown",
-    error,
+    code,
+    name,
+    status,
+    stack,
+    details,
   });
 
   if (
@@ -164,9 +238,12 @@ function mapSignupProviderError(deps: AuthDependencies, error: unknown): AuthHtt
   if (
     normalized.includes("error sending confirmation email") ||
     normalized.includes("confirmation email") ||
-    normalized.includes("smtp")
+    normalized.includes("smtp") ||
+    normalized.includes("sender") ||
+    normalized.includes("from address") ||
+    normalized.includes("domain")
   ) {
-    return new AuthHttpError(503, "REGISTRATION_EMAIL_UNAVAILABLE", REGISTRATION_EMAIL_UNAVAILABLE_MESSAGE);
+    return new AuthHttpError(503, "EMAIL_PROVIDER_FAILURE", message || REGISTRATION_EMAIL_UNAVAILABLE_MESSAGE);
   }
 
   return new AuthHttpError(400, "REGISTRATION_UNABLE", message || REGISTRATION_ERROR_MESSAGE);
@@ -273,6 +350,12 @@ export async function handleSignup(
       ipAddress: context.ipAddress,
       origin: context.origin ?? null,
     });
+    const providerEmailConfig = assertProviderEmailConfig(deps);
+    deps.logger?.info("signup_email_provider_config", {
+      senderEmail: providerEmailConfig.senderEmail,
+      senderDomain: providerEmailConfig.senderDomain,
+      verifiedDomain: providerEmailConfig.verifiedDomain,
+    });
 
     await evaluateRegistrationRisk(deps, context, preparedRiskInput);
     const lease = await reserveRegistrationLease(deps, context, preparedRiskInput);
@@ -326,6 +409,12 @@ export async function handleSignup(
     }
 
     const publicSupabase = deps.createPublicSupabase();
+    deps.logger?.info("supabase_signup_request_started", {
+      emailDomain: preparedRiskInput.emailDomain,
+      hasTurnstileToken: Boolean(turnstileToken),
+      metadataKeys: Object.keys(metadata),
+      ipAddress: context.ipAddress,
+    });
     const signupResult = await publicSupabase.auth.signUp({
       email,
       password,
@@ -334,11 +423,17 @@ export async function handleSignup(
         captchaToken: turnstileToken ?? undefined,
       },
     });
+    deps.logger?.info("supabase_signup_request_finished", {
+      hasError: Boolean(signupResult.error),
+      userId: signupResult.data?.user?.id ?? null,
+      confirmationSentAt: signupResult.data?.user?.confirmation_sent_at ?? null,
+      emailConfirmedAt:
+        signupResult.data?.user?.email_confirmed_at ?? signupResult.data?.user?.confirmed_at ?? null,
+    });
 
     if (process.env.NODE_ENV === "development") {
       deps.logger?.info("supabase_signup_response", {
-        error: signupResult.error ?? null,
-        data: signupResult.data ?? null,
+        result: signupResult,
       });
     }
 
