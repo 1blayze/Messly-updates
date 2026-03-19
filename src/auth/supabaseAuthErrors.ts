@@ -12,6 +12,14 @@ export function toFriendlySupabaseAuthError(error: unknown): string {
         : "";
   const normalizedCode = code.toUpperCase();
 
+  if (normalizedCode === "REGISTRATION_SECURITY_UNAVAILABLE") {
+    return "Cadastro temporariamente indisponivel. Tente novamente em instantes.";
+  }
+
+  if (normalizedCode === "WEAK_PASSWORD") {
+    return "A senha deve ter no minimo 8 caracteres, com numero e simbolo.";
+  }
+
   if (normalized.includes("blocked_by_client") || normalized.includes("err_blocked_by_client")) {
     return "A requisição foi bloqueada por um ad-blocker ou extensão. Desative para prosseguir.";
   }
@@ -21,7 +29,13 @@ export function toFriendlySupabaseAuthError(error: unknown): string {
     if (normalizedCode === "EMAIL_VERIFICATION_REQUIRED" || normalized.includes("email not confirmed")) {
       return "Confirme seu e-mail para continuar.";
     }
-    return "Email ou senha incorretos.";
+    if (
+      normalizedCode === "INVALID_CREDENTIALS" ||
+      normalized.includes("invalid login credentials") ||
+      normalized.includes("invalid credentials")
+    ) {
+      return "Email ou senha incorretos.";
+    }
   }
 
   if (normalizedCode === "EMAIL_ALREADY_REGISTERED") {

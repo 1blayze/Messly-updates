@@ -397,7 +397,7 @@ function TurnstileWidgetInner(
           const widgetId = turnstileApi.render(targetContainer, {
             sitekey: normalizedSiteKey,
             theme: "dark",
-            language: "pt-BR",
+            language: "pt-br",
             // Keep the verification card visible on register screen.
             appearance: "always",
             size: isCompactSize ? "compact" : "normal",
