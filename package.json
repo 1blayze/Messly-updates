@@ -2,7 +2,7 @@
   "name": "messly",
   "private": true,
   "productName": "Azyoon",
-  "version": "0.0.35",
+  "version": "0.0.36",
   "author": "Mackstony Labs",
   "type": "module",
   "main": "electron/main.cjs",
