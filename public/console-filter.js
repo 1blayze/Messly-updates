@@ -19,11 +19,23 @@
     /normal\?lang=auto/i,
     /font-size:0;color:transparent\s+nan/i,
     /^nan$/i,
+    /^:\s*\d+$/i,
+    /^a$/i,
   ];
+
+  function isTurnstileNoiseStack(stack) {
+    return /normal\?lang=auto|flexible\?lang=auto/i.test(String(stack || ""));
+  }
 
   function normalizeLogPart(value) {
     if (typeof value === "string") {
       return value;
+    }
+    if (typeof value === "number") {
+      return Number.isNaN(value) ? "NaN" : String(value);
+    }
+    if (typeof value === "function") {
+      return String(value);
     }
     if (value instanceof Error) {
       return value.name + ": " + value.message;
@@ -36,6 +48,14 @@
   }
 
   function shouldSuppress(args) {
+    try {
+      if (isTurnstileNoiseStack(new Error().stack)) {
+        return true;
+      }
+    } catch (_) {
+      // ignore stack extraction issues
+    }
+
     var message = Array.prototype.map.call(args, normalizeLogPart).join(" ").trim();
     if (!message) {
       return false;
@@ -62,6 +82,7 @@
   }
 
   patch("log");
+  patch("debug");
   patch("info");
   patch("warn");
   patch("error");

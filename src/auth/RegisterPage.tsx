@@ -639,7 +639,7 @@ export default function RegisterPage() {
                   <MaterialSymbolIcon name={showPassword ? "visibility_off" : "visibility"} size={18} />
                 </button>
               </div>
-              <p className="auth-note">Use no mínimo 8 caracteres, com pelo menos 1 número e 1 símbolo.</p>
+              <p className="auth-note">Use no minimo 8 caracteres, com pelo menos 1 numero e 1 simbolo.</p>
               {fieldErrors.password ? (
                 <p className="auth-feedback auth-feedback--error">{fieldErrors.password}</p>
               ) : null}

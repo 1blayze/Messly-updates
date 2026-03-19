@@ -19,6 +19,7 @@ const TURNSTILE_COMPACT_BREAKPOINT_PX = 420;
 interface TurnstileRenderOptions {
   sitekey: string;
   theme?: "auto" | "light" | "dark";
+  language?: string;
   appearance?: "always" | "interaction-only" | "execute";
   size?: "normal" | "compact" | "flexible";
   callback?: (token: string) => void;
@@ -396,6 +397,7 @@ function TurnstileWidgetInner(
           const widgetId = turnstileApi.render(targetContainer, {
             sitekey: normalizedSiteKey,
             theme: "dark",
+            language: "pt-BR",
             // Keep the verification card visible on register screen.
             appearance: "always",
             size: isCompactSize ? "compact" : "normal",
