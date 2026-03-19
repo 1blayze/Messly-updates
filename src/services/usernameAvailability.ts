@@ -3,7 +3,6 @@ import { isDirectUsersRestBlocked } from "./supabase";
 import { authService } from "./auth";
 import { getCachedValue, setCachedValue } from "./indexedCache";
 import {
-  isUsernameAvailable as checkUsernameAvailability,
   normalizeUsername,
   USERNAME_MAX_LENGTH,
   USERNAME_MIN_LENGTH,
@@ -75,7 +74,12 @@ function isTableMissing(error: unknown): boolean {
   return code === "42P01" || code === "PGRST114" || status === 404 || message.includes("not found");
 }
 
-export async function isUsernameAvailable(username: string, options: { requireRemote?: boolean } = {}): Promise<boolean> {
+function isAuthRequiredError(error: unknown): boolean {
+  const status = Number((error as { status?: unknown } | null)?.status ?? 0);
+  return status === 401 || status === 403;
+}
+
+export async function isUsernameAvailable(username: string, _options: { requireRemote?: boolean } = {}): Promise<boolean> {
   const normalized = normalizeUsername(username);
   const validation = validateUsernameInput(normalized);
   if (!validation.isValid) {
@@ -83,7 +87,8 @@ export async function isUsernameAvailable(username: string, options: { requireRe
   }
 
   const sessionAvailable = await hasSupabaseSession();
-  if (isDirectUsersRestBlocked() && !options.requireRemote) {
+  // Sign-up runs before login; keep optimistic to avoid false "username already in use".
+  if (!sessionAvailable || isDirectUsersRestBlocked()) {
     return true;
   }
 
@@ -111,12 +116,15 @@ export async function isUsernameAvailable(username: string, options: { requireRe
     try {
       await setCachedValue(cacheKey, available, 30_000);
     } catch {
-      // cache é opcional
+      // cache is optional
     }
     return available;
-  } catch {
-    // Fallback otimista; se for obrigatório, retorna false
-    return options.requireRemote ? false : true;
+  } catch (error) {
+    if (isAuthRequiredError(error) || isTableMissing(error)) {
+      return true;
+    }
+    // Fallback remains optimistic; backend enforces uniqueness at write time.
+    return true;
   }
 }
 
@@ -156,7 +164,7 @@ export async function isEmailAvailable(email: string): Promise<boolean> {
 
     return available;
   } catch {
-    // Fallback otimista; a validação final ainda ocorre nas etapas seguintes.
+    // Fallback otimista; a validacao final ainda ocorre nas etapas seguintes.
     return true;
   }
 }

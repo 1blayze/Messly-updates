@@ -16,6 +16,7 @@
     /was preloaded using link preload but not used within a few seconds/i,
     /note that 'script-src' was not explicitly set/i,
     /flexible\?lang=auto/i,
+    /normal\?lang=auto/i,
     /font-size:0;color:transparent\s+nan/i,
     /^nan$/i,
   ];

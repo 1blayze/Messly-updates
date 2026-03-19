@@ -396,9 +396,8 @@ function TurnstileWidgetInner(
           const widgetId = turnstileApi.render(targetContainer, {
             sitekey: normalizedSiteKey,
             theme: "dark",
-            // Reduce browser console noise from Cloudflare challenge internals and
-            // avoid eager challenge requests before user interaction.
-            appearance: "interaction-only",
+            // Keep the verification card visible on register screen.
+            appearance: "always",
             size: isCompactSize ? "compact" : "normal",
             callback: (token: string) => {
               if (cancelled) {

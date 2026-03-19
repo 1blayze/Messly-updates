@@ -184,7 +184,7 @@ export default function RegisterPage() {
   const navigate = useNavigate();
   const { signUp, verifyEmailCode, resendVerificationCode, requiresSignupSecurityVerification } = useAuthSession();
   const turnstileSiteKey = String(import.meta.env.VITE_TURNSTILE_SITE_KEY ?? "").trim();
-  const shouldRenderCaptcha = Boolean(turnstileSiteKey);
+  const shouldRenderCaptcha = requiresSignupSecurityVerification || Boolean(turnstileSiteKey);
   const currentYear = new Date().getFullYear();
   const birthGridRef = useRef<HTMLDivElement | null>(null);
   const usernameCheckRef = useRef<number | null>(null);
@@ -385,7 +385,7 @@ export default function RegisterPage() {
       const cleanUsername = normalizeUsername(username);
       const normalizedEmailValue = normalizeEmail(email);
 
-      const available = await isUsernameAvailable(cleanUsername, { requireRemote: true });
+      const available = await isUsernameAvailable(cleanUsername);
       if (!available) {
         setFieldErrors({ username: "Este nome de usu√°rio j√° est√° em uso." });
         setUsernameStatus("invalid");
@@ -639,7 +639,7 @@ export default function RegisterPage() {
                   <MaterialSymbolIcon name={showPassword ? "visibility_off" : "visibility"} size={18} />
                 </button>
               </div>
-              <p className="auth-note">Use no m√≠nimo 8 caracteres, com pelo menos 1 letra e 1 n√∫mero.</p>
+              <p className="auth-note">Use no mÌnimo 8 caracteres, com pelo menos 1 n˙mero e 1 sÌmbolo.</p>
               {fieldErrors.password ? (
                 <p className="auth-feedback auth-feedback--error">{fieldErrors.password}</p>
               ) : null}
