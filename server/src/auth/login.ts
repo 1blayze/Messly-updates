@@ -75,7 +75,7 @@ export async function finalizeAuthSession(
     throw new AuthHttpError(
       503,
       "SESSION_REGISTRATION_FAILED",
-      "The session was created but could not be registered for Azyoons.",
+      "The session was created but could not be registered for Azyoon.",
       sessionError instanceof Error ? sessionError.message : String(sessionError),
     );
   }

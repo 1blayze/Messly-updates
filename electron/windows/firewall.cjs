@@ -4,7 +4,7 @@ const { promisify } = require("node:util");
 
 const execFileAsync = promisify(execFile);
 
-const DEFAULT_FIREWALL_RULE_NAME = "Azyoons Private Network Access";
+const DEFAULT_FIREWALL_RULE_NAME = "Azyoon Private Network Access";
 const DEFAULT_FIREWALL_PROFILE = "private";
 const DEFAULT_NETSH_TIMEOUT_MS = 15_000;
 

@@ -537,7 +537,7 @@ function hexFingerprint(seed: number): string {
 function buildBody(overrides: Partial<SignupRequestBody> = {}): SignupRequestBody {
   return {
     email: "tester@example.com",
-    password: "StrongPass123",
+    password: "StrongPass123!",
     profile: {
       displayName: "Tester",
       username: "tester",

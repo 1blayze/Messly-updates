@@ -121,7 +121,7 @@ function isValidEmail(email: string): boolean {
 }
 
 function isValidPassword(password: string): boolean {
-  return /^(?=.*[A-Za-z])(?=.*\d).{8,}$/.test(password);
+  return /^(?=.*\d)(?=.*[^A-Za-z0-9\s]).{8,}$/.test(password);
 }
 
 function resolveAuthApiErrorCode(error: unknown): string {
@@ -337,7 +337,7 @@ export default function RegisterPage() {
     }
 
     if (!isValidPassword(password)) {
-      nextErrors.password = "Use pelo menos 8 caracteres, com letra e número.";
+      nextErrors.password = "Use pelo menos 8 caracteres, com número e símbolo.";
     }
 
     if (!parsedBirthDate) {
@@ -534,9 +534,9 @@ export default function RegisterPage() {
 
   return (
     <div className="auth-page auth-page--register">
-      <div className="auth-brand" aria-label="Azyoons">
-        <img className="auth-brand__logo" src={mewsLogo} alt="Azyoons" />
-        <span className="auth-brand__name">Azyoons</span>
+      <div className="auth-brand" aria-label="Azyoon">
+        <img className="auth-brand__logo" src={mewsLogo} alt="Azyoon" />
+        <span className="auth-brand__name">Azyoon</span>
       </div>
       <div className="auth-card auth-card--register">
         <h1 className="auth-title">{title}</h1>

@@ -3684,7 +3684,7 @@ export default function DirectMessagesSidebar({
     <>
       <aside className="friends-sidebar">
         <div className="friends-sidebar__header">
-          <span className="friends-sidebar__title">Azyoons</span>
+          <span className="friends-sidebar__title">Azyoon</span>
         </div>
 
         <div className="friends-sidebar__content">

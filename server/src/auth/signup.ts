@@ -64,13 +64,13 @@ function normalizeUsername(usernameRaw: string | null | undefined): string | nul
 
 function assertPasswordStrength(passwordRaw: string): string {
   const password = String(passwordRaw ?? "");
-  const hasLetter = /[A-Za-z]/.test(password);
   const hasNumber = /\d/.test(password);
-  if (password.length < 8 || !hasLetter || !hasNumber) {
+  const hasSymbol = /[^A-Za-z0-9\s]/.test(password);
+  if (password.length < 8 || !hasNumber || !hasSymbol) {
     throw new AuthHttpError(
       400,
       "WEAK_PASSWORD",
-      "Password must have at least 8 characters, including one letter and one number.",
+      "Password must have at least 8 characters, including one number and one symbol.",
     );
   }
   return password;

@@ -396,8 +396,10 @@ function TurnstileWidgetInner(
           const widgetId = turnstileApi.render(targetContainer, {
             sitekey: normalizedSiteKey,
             theme: "dark",
-            appearance: isDesktop ? "interaction-only" : "always",
-            size: isCompactSize ? "compact" : isDesktop ? "normal" : "flexible",
+            // Reduce browser console noise from Cloudflare challenge internals and
+            // avoid eager challenge requests before user interaction.
+            appearance: "interaction-only",
+            size: isCompactSize ? "compact" : "normal",
             callback: (token: string) => {
               if (cancelled) {
                 return;

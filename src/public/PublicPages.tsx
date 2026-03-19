@@ -7,7 +7,7 @@ export function PublicLandingPage() {
       <header className="landing-v2-topbar" aria-label="Cabecalho da landing page">
         <Link className="landing-v2-brand" to="/">
           <img className="landing-v2-brand__logo" src={messlyLogo} alt="" aria-hidden="true" />
-          <span className="landing-v2-brand__name">Azyoons</span>
+          <span className="landing-v2-brand__name">Azyoon</span>
         </Link>
 
         <Link className="landing-v2-login" to="/auth/login">
@@ -18,7 +18,7 @@ export function PublicLandingPage() {
       <section className="landing-v2-hero">
         <h1 className="landing-v2-hero__title">Converse com qualquer pessoa</h1>
         <p className="landing-v2-hero__text">
-          Azyoons e uma plataforma moderna de mensagens para conversar com amigos, equipes e
+          Azyoon e uma plataforma moderna de mensagens para conversar com amigos, equipes e
           comunidades em tempo real.
         </p>
 

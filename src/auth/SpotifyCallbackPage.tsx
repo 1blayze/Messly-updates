@@ -99,18 +99,18 @@ export default function SpotifyCallbackPage() {
       return;
     }
 
-    // Browser callback with no active Azyoons session: handoff to desktop app.
+    // Browser callback with no active Azyoon session: handoff to desktop app.
     if (typeof window !== "undefined" && !user && !isLoading) {
       const handoffUrl = buildDesktopHandoffUrl(searchParams);
       setStatus("handoff");
-      setMessage("Abrindo o aplicativo Azyoons para concluir a conexao...");
+      setMessage("Abrindo o aplicativo Azyoon para concluir a conexao...");
       window.location.href = handoffUrl;
       return;
     }
 
     if (!user || isLoading) {
       setStatus("processing");
-      setMessage("Aguardando sessao do Azyoons para concluir a conexao...");
+      setMessage("Aguardando sessao do Azyoon para concluir a conexao...");
       hasHandledRef.current = false;
       return;
     }
@@ -133,7 +133,7 @@ export default function SpotifyCallbackPage() {
         if (!user && typeof window !== "undefined") {
           const handoffUrl = buildDesktopHandoffUrl(searchParams);
           setStatus("handoff");
-          setMessage("Abrindo o aplicativo Azyoons para concluir a conexao...");
+          setMessage("Abrindo o aplicativo Azyoon para concluir a conexao...");
           window.location.href = handoffUrl;
           return;
         }
@@ -153,7 +153,7 @@ export default function SpotifyCallbackPage() {
             : status === "error"
               ? "Falha na conexao"
               : status === "handoff"
-                ? "Abrindo o Azyoons"
+                ? "Abrindo o Azyoon"
                 : "Conectando Spotify"}
         </h1>
         <p className="auth-subtitle">{message}</p>

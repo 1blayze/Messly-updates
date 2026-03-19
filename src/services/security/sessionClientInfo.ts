@@ -91,8 +91,8 @@ export function getSessionClientDescriptor(versionRaw: string): SessionClientDes
   return {
     name:
       clientType === "desktop"
-        ? "Azyoons Desktop"
-        : metadata.clientName.trim() || (clientType === "web" ? "Azyoons Web" : "Azyoons"),
+        ? "Azyoon Desktop"
+        : metadata.clientName.trim() || (clientType === "web" ? "Azyoon Web" : "Azyoon"),
     version,
     platform: getSessionPlatform(),
     clientType,

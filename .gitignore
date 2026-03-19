@@ -38,6 +38,7 @@ tmp/
 .temp/
 *.tmp
 *.temp
+.jscpd-report/
 
 # Supabase local artifacts
 supabase/.temp/

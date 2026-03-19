@@ -1,7 +1,7 @@
 {
   "name": "messly",
   "private": true,
-  "productName": "Azyoons",
+  "productName": "Azyoon",
   "version": "0.0.35",
   "author": "Mackstony Labs",
   "type": "module",
@@ -80,7 +80,7 @@
   "build": {
     "afterPack": "scripts/electron-after-pack.cjs",
     "appId": "com.mackstony.messly",
-    "productName": "Azyoons",
+    "productName": "Azyoon",
     "artifactName": "messly-setup.${ext}",
     "generateUpdatesFilesForAllChannels": true,
     "copyright": "Copyright (c) 2026 Marco",
@@ -126,7 +126,7 @@
     "icon": "assets/icons/messly.ico",
     "protocols": [
       {
-        "name": "Azyoons",
+        "name": "Azyoon",
         "schemes": [
           "messly"
         ]
@@ -142,7 +142,7 @@
     },
     "win": {
       "appId": "com.mackstony.messly",
-      "executableName": "Azyoons",
+      "executableName": "Azyoon",
       "icon": "assets/icons/messly.ico",
       "signAndEditExecutable": false,
       "target": [
@@ -162,8 +162,8 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "language": "1046",
-      "shortcutName": "Azyoons",
-      "uninstallDisplayName": "Azyoons",
+      "shortcutName": "Azyoon",
+      "uninstallDisplayName": "Azyoon",
       "deleteAppDataOnUninstall": false,
       "differentialPackage": true,
       "runAfterFinish": true,

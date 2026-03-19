@@ -12,8 +12,10 @@
     /download the react devtools for a better development experience/i,
     /request for the private access token challenge/i,
     /the next request for the private access token challenge may return a 401/i,
+    /https:\/\/challenges\.cloudflare\.com\/cdn-cgi\/challenge-platform\/.*\/pat\/.*401\s*\(unauthorized\)/i,
     /was preloaded using link preload but not used within a few seconds/i,
     /note that 'script-src' was not explicitly set/i,
+    /flexible\?lang=auto/i,
     /font-size:0;color:transparent\s+nan/i,
     /^nan$/i,
   ];

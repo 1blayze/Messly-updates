@@ -15,7 +15,7 @@ export default function AppStartupScreen({
   phase = "running",
   errorText,
 }: AppStartupScreenProps) {
-  const effectiveStatus = String(statusText ?? "").trim() || "Inicializando Azyoons";
+  const effectiveStatus = String(statusText ?? "").trim() || "Inicializando Azyoon";
   const effectiveDetail =
     String(errorText ?? "").trim() ||
     String(detailText ?? "").trim() ||

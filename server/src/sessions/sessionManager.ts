@@ -133,7 +133,7 @@ function buildClientName(client: SessionClientInfo | null): string {
     return explicit;
   }
 
-  return normalizeClientType(client) === "desktop" ? "Azyoons Desktop" : "Azyoons";
+  return normalizeClientType(client) === "desktop" ? "Azyoon Desktop" : "Azyoon";
 }
 
 function detectOsFromUserAgent(userAgentRaw: string | null): string | null {

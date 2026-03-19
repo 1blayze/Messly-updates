@@ -124,7 +124,7 @@ function detectBrowserClientName(): string {
 
 function detectClientName(platform: PresencePlatform): string {
   if (typeof window !== "undefined" && window.electronAPI) {
-    return "Azyoons Desktop";
+    return "Azyoon Desktop";
   }
 
   const browserName = detectBrowserClientName();

@@ -3512,7 +3512,7 @@ export default function AppShell() {
     <div className="app-shell" data-messly-startup-surface="shell">
       {!isInitialShellReady ? (
         <AppStartupScreen
-          statusText="Carregando Azyoons"
+          statusText="Carregando Azyoon"
           detailText={shellStartupDetailText}
           progress={shellStartupProgress}
           phase="running"
@@ -3932,8 +3932,8 @@ export default function AppShell() {
           </div>
 
           {!activeDirectMessage ? (
-            <aside className="main-panel__right-sidebar" aria-label="Agora no Azyoons">
-              <h2 className="main-panel__right-title">Agora no Azyoons</h2>
+            <aside className="main-panel__right-sidebar" aria-label="Agora no Azyoon">
+              <h2 className="main-panel__right-title">Agora no Azyoon</h2>
 
               {rightSidebarSpotifyFriends.length === 0 ? (
                 <div className="main-panel__right-card">

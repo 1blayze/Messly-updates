@@ -346,6 +346,7 @@ function resolveVisibleSettingsSection(section: SettingsSection, isElectron: boo
 
 const ACCOUNT_DELETE_CONFIRM_TEXT = "EXCLUIR";
 const ACCOUNT_DEACTIVATE_CONFIRM_TEXT = "DESATIVAR";
+const ACCOUNT_PASSWORD_REGEX = /^(?=.*\d)(?=.*[^A-Za-z0-9\s]).{8,}$/;
 
 interface CachedSidebarIdentityFallback {
   displayName: string;
@@ -2061,7 +2062,7 @@ export default function AppSettingsView({
       NOISE_SUPPRESSION_MODE_OPTIONS[0]!,
     [noiseSuppressionMode],
   );
-  const settingsSidebarVersionPrimary = `Azyoons ${settingsVersion}`;
+  const settingsSidebarVersionPrimary = `Azyoon ${settingsVersion}`;
   const settingsSidebarVersionSecondary = `${releaseChannelLabel} · ${runtimePlatformLabel} · ${runtimeEngineLabel}`;
   const pendingProfile = useMemo(() => {
     if (!user?.uid || typeof window === "undefined") {
@@ -5104,8 +5105,11 @@ export default function AppSettingsView({
       return;
     }
 
-    if (accountPasswordNewInput.length < 6) {
-      setAccountPasswordModalFeedback({ tone: "error", message: "A nova senha deve ter pelo menos 6 caracteres." });
+    if (!ACCOUNT_PASSWORD_REGEX.test(accountPasswordNewInput)) {
+      setAccountPasswordModalFeedback({
+        tone: "error",
+        message: "A nova senha deve ter no mínimo 8 caracteres, com número e símbolo.",
+      });
       return;
     }
 
@@ -5859,7 +5863,7 @@ export default function AppSettingsView({
                     <p className={styles.connectionsDirectoryTitle}>Adicionar conexões ao perfil</p>
                     <p className={styles.connectionsDirectorySubtitle}>
                       Seus dados só serão usados com sua autorização, conforme a{" "}
-                      <span className={styles.connectionsDirectoryPolicyLink}>política de privacidade</span> do Azyoons.
+                      <span className={styles.connectionsDirectoryPolicyLink}>política de privacidade</span> do Azyoon.
                     </p>
                     <div className={styles.connectionsProviderGrid}>
                       <button
@@ -6379,13 +6383,13 @@ export default function AppSettingsView({
                             {
                               key: "launchAtStartup",
                               title: "Abrir na inicialização",
-                              description: "Inicia o Azyoons automaticamente quando o Windows ligar.",
+                              description: "Inicia o Azyoon automaticamente quando o Windows ligar.",
                             },
                             {
                               key: "hardwareAcceleration",
                               title: "Aceleração de hardware",
                               description:
-                                "Usa sua GPU para otimizar o Azyoons. Desative caso note problemas visuais.",
+                                "Usa sua GPU para otimizar o Azyoon. Desative caso note problemas visuais.",
                             },
                           ] as const
                         ).map((item) => {

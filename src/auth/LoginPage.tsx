@@ -80,9 +80,9 @@ export default function LoginPage() {
 
   return (
     <div className="auth-page">
-      <div className="auth-brand" aria-label="Azyoons">
-        <img className="auth-brand__logo" src={mewsLogo} alt="Azyoons" />
-        <span className="auth-brand__name">Azyoons</span>
+      <div className="auth-brand" aria-label="Azyoon">
+        <img className="auth-brand__logo" src={mewsLogo} alt="Azyoon" />
+        <span className="auth-brand__name">Azyoon</span>
       </div>
       <div className="auth-card">
         <h1 className="auth-title auth-title--welcome">Boas-vindas de volta!</h1>

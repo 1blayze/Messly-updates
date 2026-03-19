@@ -173,6 +173,11 @@ const AUTH_PROFILE_FETCH_TIMEOUT_MS = 10_000;
 const AUTH_HARD_LOADING_TIMEOUT_MS = 20_000;
 const AUTH_BACKGROUND_RECOVERY_TIMEOUT_MS = 15_000;
 
+function hasValidSignupPassword(passwordRaw: string): boolean {
+  const password = String(passwordRaw ?? "");
+  return /^(?=.*\d)(?=.*[^A-Za-z0-9\s]).{8,}$/.test(password);
+}
+
 async function withTimeout<T>(task: Promise<T>, timeoutMs: number, message: string): Promise<T> {
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
   const timeoutPromise = new Promise<never>((_, reject) => {
@@ -813,8 +818,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     ): Promise<{ user: AuthUser | null; profile: ProfileRow | null; needsEmailConfirmation: boolean }> => {
       const normalizedUserEmail = normalizeEmail(email);
       const normalizedPassword = String(password ?? "");
-      if (!normalizedUserEmail || normalizedPassword.length < 8) {
-        throw new Error("Informe e-mail válido e senha com pelo menos 8 caracteres.");
+      if (!normalizedUserEmail || !hasValidSignupPassword(normalizedPassword)) {
+        throw new Error("Informe e-mail válido e senha com no mínimo 8 caracteres, número e símbolo.");
       }
 
       const displayName = String(profileInput.displayName ?? "").trim();
