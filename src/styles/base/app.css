@@ -1019,6 +1019,11 @@ body {
   padding: 0 5px;
 }
 
+.main-panel__navbar-tab--pending .main-panel__navbar-tab-count {
+  background: var(--color-danger);
+  color: #fff;
+}
+
 .main-panel__content {
   display: grid;
   grid-template-columns: minmax(0, 1fr) var(--activity-sidebar-width);
