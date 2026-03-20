@@ -1669,10 +1669,15 @@ function loadWindowsBehaviorSettings() {
   }
 
   const persisted = readWindowsBehaviorSettingsFromDisk();
+  const systemLaunchEnabled = readLaunchAtStartupFromSystem();
+  const resolvedLaunchAtStartup =
+    typeof persisted?.launchAtStartup === "boolean"
+      ? persisted.launchAtStartup
+      : (systemLaunchEnabled || DEFAULT_WINDOWS_BEHAVIOR_SETTINGS.launchAtStartup);
   windowsBehaviorSettings = normalizeWindowsBehaviorSettings({
     ...DEFAULT_WINDOWS_BEHAVIOR_SETTINGS,
     ...(persisted ?? {}),
-    launchAtStartup: persisted?.launchAtStartup ?? readLaunchAtStartupFromSystem(),
+    launchAtStartup: resolvedLaunchAtStartup,
   });
   return windowsBehaviorSettings;
 }
