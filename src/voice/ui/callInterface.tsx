@@ -28,28 +28,12 @@ export interface VoiceCallInterfaceProps {
   onLeave: () => void;
 }
 
-const CONNECTION_QUALITY_RANK: Record<VoiceDiagnosticsPeerSnapshot["connectionQuality"], number> = {
-  poor: 0,
-  fair: 1,
-  good: 2,
-  excellent: 3,
-  unknown: 4,
-};
-
-function formatDiagnosticsValue(value: number | null, suffix: string): string {
-  if (!Number.isFinite(value) || value == null) {
-    return "--";
-  }
-  const rounded = Math.abs(value) >= 10 ? Math.round(value) : Number(value.toFixed(1));
-  return `${rounded}${suffix}`;
-}
-
 export default function VoiceCallInterface({
   isOpen,
   participants,
   localMuted,
   localDeafened,
-  diagnostics,
+  diagnostics: _diagnostics,
   onToggleMute,
   onLeave,
 }: VoiceCallInterfaceProps) {
@@ -59,33 +43,8 @@ export default function VoiceCallInterface({
 
   const sortedParticipants = [...participants].sort((left, right) => Number(right.isLocal) - Number(left.isLocal));
   const avatarParticipants = sortedParticipants.slice(0, 2);
-  const hasDiagnostics = diagnostics.length > 0;
-  const prioritizedDiagnostics = [...diagnostics].sort((left, right) => {
-    const qualityDelta = CONNECTION_QUALITY_RANK[left.connectionQuality] - CONNECTION_QUALITY_RANK[right.connectionQuality];
-    if (qualityDelta !== 0) {
-      return qualityDelta;
-    }
-
-    const leftPing = left.pingMs ?? Number.POSITIVE_INFINITY;
-    const rightPing = right.pingMs ?? Number.POSITIVE_INFINITY;
-    return leftPing - rightPing;
-  });
-  const primaryDiagnostic = prioritizedDiagnostics[0] ?? null;
-  const diagnosticsTone = primaryDiagnostic?.connectionQuality === "poor" || primaryDiagnostic?.connectionQuality === "fair"
-    ? "voice-call-panel__diagnostics--warn"
-    : "";
-
   return (
     <aside className="voice-call-panel" aria-label="Chamada de voz">
-      {hasDiagnostics && primaryDiagnostic ? (
-        <p className={`voice-call-panel__diagnostics ${diagnosticsTone}`}>
-          Ping {formatDiagnosticsValue(primaryDiagnostic.pingMs, "ms")}
-          {" • "}
-          Jitter {formatDiagnosticsValue(primaryDiagnostic.jitterMs, "ms")}
-          {" • "}
-          Perda {formatDiagnosticsValue(primaryDiagnostic.packetLossPercent, "%")}
-        </p>
-      ) : null}
       <section className="voice-call-panel__avatars" aria-label="Participantes da chamada">
         {avatarParticipants.map((participant) => {
           const participantMuted = participant.isLocal ? localMuted : participant.muted;
